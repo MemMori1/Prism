@@ -78,6 +78,17 @@ export interface CreatedSession {
   directory: string | null
 }
 
+/** 挂起的权限请求（引擎 permission.asked 的同形数据）。 */
+export interface PermissionRequest {
+  id: string
+  sessionId: string
+  action: string
+  resources: string[]
+  message: string | null
+  sourceMessageId: string | null
+  sourceCallId: string | null
+}
+
 /** 引擎 SSE 事件（原样透传的信封，取用 type / data）。 */
 export interface EngineEvent {
   type: string

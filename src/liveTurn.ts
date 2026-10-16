@@ -8,18 +8,22 @@
 export interface LiveTextPart {
   kind: 'text'
   key: string
+  /** 产出该部分的助手消息 id（用于与 DB 记录去重）。 */
+  messageId: string
   text: string
 }
 
 export interface LiveReasoningPart {
   kind: 'reasoning'
   key: string
+  messageId: string
   text: string
 }
 
 export interface LiveToolPart {
   kind: 'tool'
   key: string
+  messageId: string
   callId: string
   name: string
   status: 'running' | 'completed' | 'error'
@@ -90,11 +94,12 @@ function appendText(
   state: LiveTurn,
   kind: 'text' | 'reasoning',
   key: string,
+  messageId: string,
   delta: string,
 ): LiveTurn {
   const index = state.parts.findIndex(item => item.key === key)
   if (index === -1) {
-    const part: LiveTextPart | LiveReasoningPart = { kind, key, text: delta }
+    const part: LiveTextPart | LiveReasoningPart = { kind, key, messageId, text: delta }
     return { ...state, parts: [...state.parts, part] }
   }
   const target = state.parts[index]
@@ -108,11 +113,12 @@ function setText(
   state: LiveTurn,
   kind: 'text' | 'reasoning',
   key: string,
+  messageId: string,
   full: string,
 ): LiveTurn {
   const index = state.parts.findIndex(item => item.key === key)
   if (index === -1) {
-    const part: LiveTextPart | LiveReasoningPart = { kind, key, text: full }
+    const part: LiveTextPart | LiveReasoningPart = { kind, key, messageId, text: full }
     return { ...state, parts: [...state.parts, part] }
   }
   const target = state.parts[index]
@@ -125,13 +131,14 @@ function setText(
 function upsertTool(
   state: LiveTurn,
   key: string,
-  patch: Partial<Omit<LiveToolPart, 'kind' | 'key'>>,
+  patch: Partial<Omit<LiveToolPart, 'kind' | 'key' | 'messageId'>> & { messageId?: string },
 ): LiveTurn {
   const index = state.parts.findIndex(item => item.key === key)
   if (index === -1) {
     const created: LiveToolPart = {
       kind: 'tool',
       key,
+      messageId: patch.messageId ?? 'unknown',
       callId: patch.callId ?? key,
       name: patch.name ?? 'tool',
       status: patch.status ?? 'running',
@@ -175,22 +182,26 @@ export function reduceLiveTurn(state: LiveTurn, event: EngineEventLike): LiveTur
 
     case 'session.text.delta': {
       const delta = text(data.delta)
-      return delta ? appendText(state, 'text', textKey('text'), delta) : state
+      return delta ? appendText(state, 'text', textKey('text'), assistantMessageID, delta) : state
     }
 
     case 'session.text.ended': {
       const full = text(data.text)
-      return full !== null ? setText(state, 'text', textKey('text'), full) : state
+      return full !== null ? setText(state, 'text', textKey('text'), assistantMessageID, full) : state
     }
 
     case 'session.reasoning.delta': {
       const delta = text(data.delta)
-      return delta ? appendText(state, 'reasoning', textKey('reasoning'), delta) : state
+      return delta
+        ? appendText(state, 'reasoning', textKey('reasoning'), assistantMessageID, delta)
+        : state
     }
 
     case 'session.reasoning.ended': {
       const full = text(data.text)
-      return full !== null ? setText(state, 'reasoning', textKey('reasoning'), full) : state
+      return full !== null
+        ? setText(state, 'reasoning', textKey('reasoning'), assistantMessageID, full)
+        : state
     }
 
     case 'session.tool.input.started': {
@@ -198,6 +209,7 @@ export function reduceLiveTurn(state: LiveTurn, event: EngineEventLike): LiveTur
       if (!callId) return state
       return upsertTool(state, `tool:${callId}`, {
         callId,
+        messageId: assistantMessageID,
         name: text(data.name) ?? 'tool',
         status: 'running',
       })
@@ -209,6 +221,7 @@ export function reduceLiveTurn(state: LiveTurn, event: EngineEventLike): LiveTur
       const input = data.input ?? null
       return upsertTool(state, `tool:${callId}`, {
         callId,
+        messageId: assistantMessageID,
         status: 'running',
         input,
         summary: summarizeToolInput(input),

@@ -17,6 +17,8 @@ pub fn run() {
             ipc::session_create,
             ipc::session_send,
             ipc::session_interrupt,
+            ipc::session_permissions,
+            ipc::session_permission_reply,
         ])
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));

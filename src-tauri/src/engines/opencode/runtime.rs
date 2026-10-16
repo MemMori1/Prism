@@ -45,6 +45,49 @@ pub struct CreatedSession {
     pub directory: Option<String>,
 }
 
+/// 挂起的权限请求（`permission.asked` / 列表端点同形状）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionRequest {
+    pub id: String,
+    pub session_id: String,
+    pub action: String,
+    pub resources: Vec<String>,
+    pub message: Option<String>,
+    pub source_message_id: Option<String>,
+    pub source_call_id: Option<String>,
+}
+
+/// 宽松解析权限请求（缺字段不报错）。
+fn parse_permission(value: &Value) -> Option<PermissionRequest> {
+    let id = string_field(value, "id")?;
+    Some(PermissionRequest {
+        id,
+        session_id: string_field(value, "sessionID").unwrap_or_default(),
+        action: string_field(value, "action").unwrap_or_else(|| "unknown".to_string()),
+        resources: value
+            .get("resources")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        message: string_field(value, "message").filter(|text| !text.trim().is_empty()),
+        source_message_id: value
+            .pointer("/source/messageID")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        source_call_id: value
+            .pointer("/source/id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
 /// 启动横幅的解析结果。
 #[derive(Debug, PartialEq)]
 enum StartupLine {
@@ -109,6 +152,10 @@ impl ServerTarget {
 
     fn post_json(&self, path: &str, body: Value) -> Result<Value, String> {
         send_json(self.request(reqwest::Method::POST, path).json(&body), path)
+    }
+
+    fn get_json(&self, path: &str) -> Result<Value, String> {
+        send_json(self.request(reqwest::Method::GET, path), path)
     }
 
     #[allow(dead_code)] // 测试清理用
@@ -337,6 +384,58 @@ impl Runtime {
     pub fn interrupt(&self, session_id: &str) -> Result<(), String> {
         let target = self.ensure_server()?;
         target.post_json(&format!("/api/session/{session_id}/interrupt"), json!({}))?;
+        Ok(())
+    }
+
+    /// 当前已在跑的 serve（不触发启动）；进程已死时顺手清理。
+    fn current_server(&self) -> Option<ServerTarget> {
+        let mut slot = self
+            .inner
+            .server
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match slot.as_mut() {
+            Some(handle) => match handle.child.try_wait() {
+                Ok(None) => Some(handle.target.clone()),
+                _ => {
+                    if let Some(mut dead) = slot.take() {
+                        terminate_server(&mut dead);
+                    }
+                    None
+                }
+            },
+            None => None,
+        }
+    }
+
+    /// 会话当前挂起的权限请求（选择会话时补拉；运行轴没开就返回空）。
+    pub fn list_permissions(&self, session_id: &str) -> Result<Vec<PermissionRequest>, String> {
+        let Some(target) = self.current_server() else {
+            return Ok(Vec::new());
+        };
+        let value = target.get_json(&format!("/api/session/{session_id}/permission"))?;
+        let data = unwrap_data(value);
+        Ok(data
+            .as_array()
+            .map(|items| items.iter().filter_map(parse_permission).collect())
+            .unwrap_or_default())
+    }
+
+    /// 回复权限请求：once / always / reject。
+    pub fn permission_reply(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        decision: &str,
+    ) -> Result<(), String> {
+        if !matches!(decision, "once" | "always" | "reject") {
+            return Err(format!("不支持的权限决定：{decision}"));
+        }
+        let target = self.ensure_server()?;
+        target.post_json(
+            &format!("/api/session/{session_id}/permission/{request_id}/reply"),
+            json!({ "decision": decision }),
+        )?;
         Ok(())
     }
 
@@ -647,6 +746,42 @@ mod tests {
         assert_eq!(truncate("abcdef", 3), "abc…");
     }
 
+    #[test]
+    fn parses_permission_request() {
+        // 真机抓到的 permission.asked 形状
+        let value = json!({
+            "action": "read",
+            "id": "per_14720267a001XATm8hoUGHTavL",
+            "resources": [".env"],
+            "save": ["*"],
+            "sessionID": "ses_eb8dfe32fffeQv9WGD2nw6h9yZ",
+            "source": {
+                "id": "call-901f9a53-7c7c-4040-97a8-77ddb15dfcfc",
+                "messageID": "msg_147201d8d001cOnrnh5D2Lk9UV",
+                "type": "tool"
+            }
+        });
+        let request = parse_permission(&value).expect("应可解析");
+        assert_eq!(request.id, "per_14720267a001XATm8hoUGHTavL");
+        assert_eq!(request.action, "read");
+        assert_eq!(request.resources, vec![".env".to_string()]);
+        assert!(request.message.is_none());
+        assert_eq!(
+            request.source_call_id.as_deref(),
+            Some("call-901f9a53-7c7c-4040-97a8-77ddb15dfcfc")
+        );
+        assert_eq!(
+            request.source_message_id.as_deref(),
+            Some("msg_147201d8d001cOnrnh5D2Lk9UV")
+        );
+
+        // 缺 id 无法成请求；缺字段则宽松兜底
+        assert!(parse_permission(&json!({ "action": "read" })).is_none());
+        let minimal = parse_permission(&json!({ "id": "per_1" })).expect("应可解析");
+        assert!(minimal.resources.is_empty());
+        assert_eq!(minimal.action, "unknown");
+    }
+
     /// 真机端到端（需本机 CLI 与可用模型）：
     /// `cargo test --lib -- --ignored --nocapture drives_real_session`
     #[test]
@@ -840,6 +975,337 @@ mod tests {
         runtime.shutdown();
         let removed = cleanup_project(&dir);
         println!("已清理测试项目行：{removed}");
+        assert_eq!(removed, 1, "应恰好清理一条测试项目行");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真机权限流：读 .env 触发 permission.asked → 列表端点可见 → 回复 once →
+    /// 引擎继续执行读出内容；再读一次回复 reject 验证拒绝路径可收口。
+    /// `cargo test --lib -- --ignored --nocapture permission_flow_real`
+    #[test]
+    #[ignore]
+    fn permission_flow_real() {
+        let runtime = Runtime::unattached();
+        let events = runtime.subscribe();
+
+        let dir = std::env::temp_dir().join(format!("prism-m4-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        // 引擎默认权限规则：读 *.env 会触发 ask（其余默认 allow）。
+        std::fs::write(dir.join(".env"), "SECRET=42\n").expect("写 .env 探测文件");
+        let created = runtime
+            .create_session(dir.to_str().expect("临时目录路径"))
+            .expect("create_session");
+        let sid = created.session_id.clone();
+        println!("会话: {sid}");
+
+        runtime
+            .send_prompt(&sid, "请用 read 工具读取当前目录下的 .env 文件，然后告诉我 SECRET 的值。")
+            .expect("send_prompt");
+
+        // 等权限请求（触发后引擎会阻塞在这一步，直到回复）
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut asked: Option<PermissionRequest> = None;
+        while Instant::now() < deadline {
+            let Ok(event) = events.recv_timeout(Duration::from_millis(500)) else {
+                continue;
+            };
+            if event.pointer("/data/sessionID").and_then(Value::as_str) != Some(sid.as_str()) {
+                continue;
+            }
+            match event.get("type").and_then(Value::as_str) {
+                Some("permission.asked") => {
+                    asked = parse_permission(&event["data"]);
+                    break;
+                }
+                Some("session.execution.succeeded") | Some("session.execution.failed") => break,
+                _ => {}
+            }
+        }
+        let asked = asked.expect("读 .env 应触发 permission.asked");
+        println!("权限请求: {asked:?}");
+        assert_eq!(asked.action, "read");
+        assert_eq!(asked.session_id, sid);
+        assert!(asked.resources.iter().any(|item| item.ends_with(".env")));
+        assert!(asked.source_call_id.is_some(), "应带来源工具调用 id");
+
+        // 列表端点（前端选择会话时的补拉路径）应能看到同一条
+        let pending = runtime.list_permissions(&sid).expect("list_permissions");
+        assert!(
+            pending.iter().any(|item| item.id == asked.id),
+            "列表端点应包含刚触发的请求：{pending:?}"
+        );
+        // 非法决定值应在本地被拦下
+        assert!(runtime.permission_reply(&sid, &asked.id, "maybe").is_err());
+
+        // 回复 once → 引擎继续：工具成功、执行收口
+        runtime
+            .permission_reply(&sid, &asked.id, "once")
+            .expect("permission_reply once");
+
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut tool_success = false;
+        let mut terminal: Option<String> = None;
+        while Instant::now() < deadline {
+            let Ok(event) = events.recv_timeout(Duration::from_millis(500)) else {
+                continue;
+            };
+            if event.pointer("/data/sessionID").and_then(Value::as_str) != Some(sid.as_str()) {
+                continue;
+            }
+            match event.get("type").and_then(Value::as_str) {
+                Some("session.tool.success") => tool_success = true,
+                Some(
+                    kind @ ("session.execution.succeeded"
+                    | "session.execution.failed"
+                    | "session.execution.interrupted"),
+                ) => {
+                    terminal = Some(kind.to_string());
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(terminal.as_deref(), Some("session.execution.succeeded"));
+        assert!(tool_success, "授权后读工具应执行成功");
+
+        // DB 核验：助手最终答出 SECRET 的值
+        let db_path = locator::database_path().expect("opencode.db");
+        let mut answer: Option<String> = None;
+        for _ in 0..20 {
+            let page = crate::engines::opencode::db::read_timeline(&db_path, &sid, None, 50)
+                .expect("read_timeline");
+            let found = page.records.iter().rev().find_map(|record| {
+                (record.role == "assistant" && record.completed).then(|| {
+                    record
+                        .parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            crate::engines::core::TimelinePart::Text { text } => {
+                                Some(text.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<String>()
+                })
+            });
+            if let Some(text) = found.filter(|text| text.contains("42")) {
+                answer = Some(text);
+                break;
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+        println!(
+            "助手回复: {}",
+            answer.clone().unwrap_or_default().trim().replace('\n', " ")
+        );
+        assert!(answer.is_some(), "授权后应读到 SECRET=42");
+
+        // 再读一次（once 不落盘，会再次 ask）→ 回复 reject，验证拒绝路径能收口。
+        runtime
+            .send_prompt(&sid, "请再次用 read 工具读取 .env 文件，告诉我里面有几行。")
+            .expect("send_prompt 2");
+
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut rejections = 0;
+        let mut second_asked = false;
+        let mut terminal2: Option<String> = None;
+        while Instant::now() < deadline {
+            let Ok(event) = events.recv_timeout(Duration::from_millis(500)) else {
+                continue;
+            };
+            if event.pointer("/data/sessionID").and_then(Value::as_str) != Some(sid.as_str()) {
+                continue;
+            }
+            match event.get("type").and_then(Value::as_str) {
+                Some("permission.asked") => {
+                    let request_id = event
+                        .pointer("/data/id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    second_asked = true;
+                    rejections += 1;
+                    println!("第 {rejections} 次权限请求，回复 reject");
+                    runtime
+                        .permission_reply(&sid, &request_id, "reject")
+                        .expect("permission_reply reject");
+                    // 模型可能再试；回复数封顶，避免测试卡死
+                    assert!(rejections <= 5, "拒绝后不应无限重试");
+                }
+                Some(
+                    kind @ ("session.execution.succeeded"
+                    | "session.execution.failed"
+                    | "session.execution.interrupted"),
+                ) => {
+                    terminal2 = Some(kind.to_string());
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(second_asked, "第二次读取应再次申请权限（once 不落盘）");
+        println!("拒绝路径终态: {terminal2:?}");
+        assert!(terminal2.is_some(), "拒绝后引擎应仍能走到终态");
+        if let Some(db_path) = locator::database_path() {
+            if let Ok(page) = crate::engines::opencode::db::read_timeline(&db_path, &sid, None, 50) {
+                let brief = page
+                    .records
+                    .iter()
+                    .rev()
+                    .find(|record| record.role == "assistant")
+                    .map(|record| {
+                        record
+                            .parts
+                            .iter()
+                            .filter_map(|part| match part {
+                                crate::engines::core::TimelinePart::Text { text } => {
+                                    Some(text.as_str())
+                                }
+                                _ => None,
+                            })
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                let short: String = brief.chars().take(80).collect();
+                println!("拒绝后助手回复: {}", short.replace('\n', " "));
+            }
+        }
+
+        runtime.delete_session(&sid).expect("delete_session");
+        runtime.shutdown();
+        let removed = cleanup_project(&dir);
+        assert_eq!(removed, 1, "应恰好清理一条测试项目行");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真机插话：执行中追发消息 → 同一执行内下一步送达（inbox.enqueued →
+    /// inbox.delivered），插话与答复在 DB 各成记录。
+    /// `cargo test --lib -- --ignored --nocapture steers_running_execution`
+    #[test]
+    #[ignore]
+    fn steers_running_execution() {
+        let runtime = Runtime::unattached();
+        let events = runtime.subscribe();
+
+        let dir = std::env::temp_dir().join(format!("prism-m4-steer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        let created = runtime
+            .create_session(dir.to_str().expect("临时目录路径"))
+            .expect("create_session");
+        let sid = created.session_id.clone();
+        println!("会话: {sid}");
+
+        runtime
+            .send_prompt(&sid, "请从 1 数到 150，每行一个数字，不要省略任何数字。")
+            .expect("send_prompt 1");
+
+        // 等执行开始 + 已有流式输出
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut started = false;
+        let mut deltas = 0;
+        while Instant::now() < deadline {
+            let Ok(event) = events.recv_timeout(Duration::from_millis(300)) else {
+                continue;
+            };
+            if event.pointer("/data/sessionID").and_then(Value::as_str) != Some(sid.as_str()) {
+                continue;
+            }
+            let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+            if kind == "session.execution.started" {
+                started = true;
+            }
+            if kind == "session.text.delta" {
+                deltas += 1;
+            }
+            if started && deltas > 15 {
+                break;
+            }
+        }
+        assert!(started, "未见执行开始");
+        println!("执行中（已收 {deltas} 个 delta），现在插话");
+
+        let steered_id = runtime
+            .send_prompt(&sid, "插话：不用数了，请立刻停下，只回复『收到』两个字。")
+            .expect("send_prompt 2");
+        println!("插话消息 id: {steered_id}");
+
+        // 观察：插话应由当前执行在下一步边界消化（不应另起 execution.started）
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut executions = 0;
+        let mut enqueued = false;
+        let mut delivered = false;
+        let mut terminal = String::new();
+        while Instant::now() < deadline {
+            let Ok(event) = events.recv_timeout(Duration::from_millis(500)) else {
+                continue;
+            };
+            if event.pointer("/data/sessionID").and_then(Value::as_str) != Some(sid.as_str()) {
+                continue;
+            }
+            let kind = event.get("type").and_then(Value::as_str).unwrap_or("?");
+            let inbox = event
+                .pointer("/data/inboxID")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            match kind {
+                "session.execution.started" => executions += 1,
+                "session.inbox.enqueued" if inbox == steered_id => enqueued = true,
+                "session.inbox.delivered" if inbox == steered_id => delivered = true,
+                "session.execution.succeeded"
+                | "session.execution.failed"
+                | "session.execution.interrupted" => {
+                    terminal = kind.to_string();
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(enqueued, "插话应入队（inbox.enqueued）");
+        assert!(delivered, "插话应送达（inbox.delivered）");
+        assert_eq!(terminal, "session.execution.succeeded");
+        assert_eq!(executions, 0, "插话应由当前执行消化，不应另起执行");
+        println!("终态: {terminal}");
+
+        // DB 侧：插话消息与答复各成记录（用户/助手 × 2 = 4 条）
+        let db_path = locator::database_path().expect("opencode.db");
+        let mut records = Vec::new();
+        for _ in 0..20 {
+            let page = crate::engines::opencode::db::read_timeline(&db_path, &sid, None, 50)
+                .expect("read_timeline");
+            if page.records.len() >= 4 {
+                records = page.records;
+                break;
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+        assert!(
+            records.len() >= 4,
+            "应有 4 条记录（用户/助手 × 2），实得 {}",
+            records.len()
+        );
+        let steered_record = records
+            .iter()
+            .find(|record| record.id == steered_id)
+            .expect("插话消息应落库");
+        assert_eq!(steered_record.role, "user");
+        let last_assistant = records
+            .iter()
+            .rev()
+            .find(|record| record.role == "assistant")
+            .expect("应有助手答复");
+        let text = last_assistant
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                crate::engines::core::TimelinePart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(text.contains("收到"), "插话后助手应回应『收到』：{text}");
+
+        runtime.delete_session(&sid).expect("delete_session");
+        runtime.shutdown();
+        let removed = cleanup_project(&dir);
         assert_eq!(removed, 1, "应恰好清理一条测试项目行");
         let _ = std::fs::remove_dir_all(&dir);
     }

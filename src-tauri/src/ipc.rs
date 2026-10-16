@@ -8,7 +8,7 @@ use crate::engines::core::{
     EngineHealth, ProjectItem, SessionSummary, TimelinePage, ToolDetail,
 };
 use crate::engines::opencode;
-use crate::engines::opencode::runtime::{CreatedSession, Runtime, RuntimeStatus};
+use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runtime, RuntimeStatus};
 
 fn opencode_db_path() -> Result<PathBuf, String> {
     opencode::locator::database_path().ok_or_else(|| {
@@ -169,4 +169,34 @@ pub async fn session_interrupt(
     tauri::async_runtime::spawn_blocking(move || runtime.interrupt(&session_id))
         .await
         .map_err(|cause| cause.to_string())?
+}
+
+/// 会话当前挂起的权限请求（选择会话时补拉；serve 未运行则返回空）。
+#[tauri::command]
+pub async fn session_permissions(
+    runtime: tauri::State<'_, Runtime>,
+    session_id: String,
+) -> Result<Vec<PermissionRequest>, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || runtime.list_permissions(&session_id))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 回复权限请求：once / always / reject。
+#[tauri::command]
+pub async fn session_permission_reply(
+    runtime: tauri::State<'_, Runtime>,
+    session_id: String,
+    request_id: String,
+    decision: String,
+) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    println!("[prism] session_permission_reply -> {session_id} {request_id} {decision}");
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime.permission_reply(&session_id, &request_id, &decision)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
 }

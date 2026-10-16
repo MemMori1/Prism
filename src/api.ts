@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type {
   CreatedSession,
   EngineHealth,
+  PermissionRequest,
   ProjectItem,
   RuntimeStatus,
   SessionSummary,
@@ -25,4 +26,8 @@ export const api = {
   sessionSend: (sessionId: string, text: string) =>
     invoke<string>('session_send', { sessionId, text }),
   sessionInterrupt: (sessionId: string) => invoke<void>('session_interrupt', { sessionId }),
+  sessionPermissions: (sessionId: string) =>
+    invoke<PermissionRequest[]>('session_permissions', { sessionId }),
+  sessionPermissionReply: (sessionId: string, requestId: string, decision: string) =>
+    invoke<void>('session_permission_reply', { sessionId, requestId, decision }),
 }

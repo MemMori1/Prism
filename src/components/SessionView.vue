@@ -3,7 +3,16 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { api } from '../api'
 import { onEngineEvent } from '../engineEvents'
 import { createLiveTurn, reduceLiveTurn, type LiveTurn } from '../liveTurn'
-import type { SessionSummary, TimelineRecord } from '../types'
+import {
+  mergePermissions,
+  permissionFromEvent,
+  permissionHeadline,
+  permissionResources,
+  removePermission,
+  repliedRequestId,
+  type PermissionDecision,
+} from '../permissions'
+import type { PermissionRequest, SessionSummary, TimelineRecord } from '../types'
 import { formatCost, formatTokens, fullTime } from '../format'
 import TimelineItem from './TimelineItem.vue'
 import LiveTurnView from './LiveTurn.vue'
@@ -32,6 +41,10 @@ const liveStartedAt = ref<number | null>(null)
 const draft = ref('')
 const sending = ref(false)
 const stopping = ref(false)
+/** 挂起的权限请求（引擎阻塞等待审批）。 */
+const pendingPermissions = ref<PermissionRequest[]>([])
+/** 正在回复中的权限请求 id（防连点）。 */
+const replyingPermission = ref<string | null>(null)
 /** 视口是否吸附在底部（跟随流式输出）。 */
 const stick = ref(true)
 
@@ -60,6 +73,22 @@ const stopEvents = onEngineEvent(event => {
   const sessionId = typeof event.data?.sessionID === 'string' ? event.data.sessionID : null
   const current = props.session?.id ?? null
   if (!sessionId || !current || sessionId !== current) return
+
+  // 权限审批：进入 / 退出挂起列表（不参与 live 归约）。
+  if (event.type === 'permission.asked') {
+    const request = permissionFromEvent(event.data)
+    if (request) {
+      pendingPermissions.value = mergePermissions(pendingPermissions.value, [request])
+    }
+    return
+  }
+  if (event.type === 'permission.replied' || event.type === 'permission.rejected') {
+    const requestId = repliedRequestId(event.data)
+    if (requestId) {
+      pendingPermissions.value = removePermission(pendingPermissions.value, requestId)
+    }
+    return
+  }
 
   const before = live.value
   const after = reduceLiveTurn(before, event)
@@ -150,10 +179,22 @@ async function refreshTail(): Promise<TimelineRecord[]> {
     const page = await api.readTimeline(sessionId)
     if (props.session?.id !== sessionId) return []
     const known = new Set(records.value.map(record => record.id))
+    // live 块正在展示的助手消息（插话后可能已完结落库，避免重复渲染）。
+    const liveMessageIds = new Set(
+      live.value.parts
+        .map(part => part.messageId)
+        .filter(messageId => messageId && messageId !== 'unknown'),
+    )
     const additions = page.records.filter(record => {
       if (known.has(record.id)) return false
-      // 执行中：引擎可能已在写未完结的助手消息，交给 live 块展示。
-      if (live.value.running && record.role === 'assistant' && !record.completed) return false
+      // 执行中：引擎可能已在写未完结（或已由 live 展示）的助手消息。
+      if (
+        live.value.running &&
+        record.role === 'assistant' &&
+        (!record.completed || liveMessageIds.has(record.id))
+      ) {
+        return false
+      }
       return true
     })
     if (additions.length) {
@@ -170,6 +211,7 @@ async function loadInitial(sessionId: string) {
   records.value = []
   cursor.value = null
   hasMore.value = false
+  pendingPermissions.value = []
   loading.value = true
   try {
     const page = await api.readTimeline(sessionId)
@@ -178,6 +220,13 @@ async function loadInitial(sessionId: string) {
     cursor.value = page.nextCursor
     hasMore.value = page.hasMore
     scrollToBottom()
+    // 补拉挂起的权限请求（引擎可能正在等待审批）。
+    try {
+      const pending = await api.sessionPermissions(sessionId)
+      if (props.session?.id === sessionId) pendingPermissions.value = pending
+    } catch {
+      // 权限补拉失败不阻塞时间线。
+    }
   } catch (cause) {
     report(cause)
   } finally {
@@ -231,9 +280,10 @@ function onScroll() {
 async function send() {
   const sessionId = props.session?.id
   const content = draft.value.trim()
-  if (!sessionId || !content || sending.value || live.value.running) return
+  if (!sessionId || !content || sending.value) return
   sending.value = true
   try {
+    // 执行中发送 = 插话：引擎会把消息投递进当前执行（下一步边界送达）。
     await api.sessionSend(sessionId, content)
     if (props.session?.id !== sessionId) return
     draft.value = ''
@@ -248,6 +298,22 @@ async function send() {
     report(cause)
   } finally {
     sending.value = false
+  }
+}
+
+/** 回复权限请求：once / always / reject。 */
+async function replyPermission(request: PermissionRequest, decision: PermissionDecision) {
+  const sessionId = props.session?.id
+  if (!sessionId || replyingPermission.value) return
+  replyingPermission.value = request.id
+  try {
+    await api.sessionPermissionReply(sessionId, request.id, decision)
+    if (props.session?.id !== sessionId) return
+    pendingPermissions.value = removePermission(pendingPermissions.value, request.id)
+  } catch (cause) {
+    report(cause)
+  } finally {
+    replyingPermission.value = null
   }
 }
 
@@ -283,6 +349,8 @@ watch(
     liveStartedAt.value = null
     draft.value = ''
     stopping.value = false
+    pendingPermissions.value = []
+    replyingPermission.value = null
     stick.value = true
     if (sessionId) {
       void loadInitial(sessionId)
@@ -352,6 +420,50 @@ watch(
       </div>
 
       <footer class="composer">
+        <div v-if="pendingPermissions.length" class="permission-stack">
+          <div
+            v-for="item in pendingPermissions"
+            :key="item.id"
+            class="permission-card"
+          >
+            <span class="permission-lock" aria-hidden="true">🔐</span>
+            <div class="permission-main">
+              <div class="permission-headline">{{ permissionHeadline(item) }}</div>
+              <div class="permission-paths">
+                <span
+                  v-for="(resource, index) in permissionResources(item)"
+                  :key="index"
+                  class="permission-path"
+                  >{{ resource }}</span
+                >
+              </div>
+            </div>
+            <div class="permission-actions">
+              <button
+                class="permission-btn allow"
+                :disabled="replyingPermission === item.id"
+                @click="replyPermission(item, 'once')"
+              >
+                允许一次
+              </button>
+              <button
+                class="permission-btn always"
+                :disabled="replyingPermission === item.id"
+                title="保存到项目权限，同类请求以后自动放行"
+                @click="replyPermission(item, 'always')"
+              >
+                总是允许
+              </button>
+              <button
+                class="permission-btn reject"
+                :disabled="replyingPermission === item.id"
+                @click="replyPermission(item, 'reject')"
+              >
+                拒绝
+              </button>
+            </div>
+          </div>
+        </div>
         <div class="composer-box">
           <textarea
             v-model="draft"
@@ -360,7 +472,7 @@ watch(
             spellcheck="false"
             :placeholder="
               running
-                ? '执行中…（可先起草，结束后发送）'
+                ? '执行中：发送 = 插话引导（下一步送达），Shift+Enter 换行'
                 : '发一条指令…（Enter 发送，Shift+Enter 换行）'
             "
             :disabled="sending"
@@ -368,7 +480,15 @@ watch(
           />
           <div class="composer-actions">
             <span v-if="sending" class="composer-hint">发送中…</span>
-            <span v-else-if="running" class="composer-hint">执行中…</span>
+            <span v-else-if="running" class="composer-hint">执行中，发送即插话</span>
+            <button
+              v-if="running"
+              class="send-btn"
+              :disabled="!draft.trim() || sending"
+              @click="send"
+            >
+              插话 ⏎
+            </button>
             <button
               v-if="running"
               class="stop-btn"
@@ -524,6 +644,116 @@ watch(
   border-top: 1px solid var(--border);
   background: var(--panel);
   padding: 10px 22px 14px;
+}
+
+.permission-stack {
+  max-width: 1000px;
+  margin: 0 auto 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.permission-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--amber-soft);
+}
+
+.permission-lock {
+  font-size: 14px;
+  line-height: 1.5;
+  flex: none;
+}
+
+.permission-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.permission-headline {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.permission-paths {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.permission-path {
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--border));
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 17px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding-top: 1px;
+}
+
+.permission-btn {
+  padding: 4px 11px;
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
+}
+
+.permission-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.permission-btn.allow {
+  background: var(--accent);
+  color: #fff;
+}
+
+.permission-btn.allow:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.permission-btn.always {
+  border-color: var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.permission-btn.always:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.permission-btn.reject {
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  background: transparent;
+  color: var(--red);
+}
+
+.permission-btn.reject:hover:not(:disabled) {
+  border-color: var(--red);
+  background: var(--red-soft);
 }
 
 .composer-box {
