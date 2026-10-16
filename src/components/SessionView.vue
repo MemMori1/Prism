@@ -1,17 +1,27 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
+import { api } from '../api'
 import type { SessionSummary, TimelineRecord } from '../types'
 import { formatCost, formatTokens, fullTime } from '../format'
 import TimelineItem from './TimelineItem.vue'
 
 const props = defineProps<{
   session: SessionSummary | null
-  records: TimelineRecord[]
-  loading: boolean
   hasProject: boolean
 }>()
 
+const emit = defineEmits<{ (e: 'error', message: string): void }>()
+
 const scroller = ref<HTMLElement | null>(null)
+const records = ref<TimelineRecord[]>([])
+const cursor = ref<number | null>(null)
+const hasMore = ref(false)
+const loading = ref(false)
+const loadingOlder = ref(false)
+
+function report(cause: unknown) {
+  emit('error', cause instanceof Error ? cause.message : String(cause))
+}
 
 function scrollToBottom() {
   nextTick(() => {
@@ -20,18 +30,76 @@ function scrollToBottom() {
   })
 }
 
-watch(
-  () => props.session?.id,
-  () => {
-    if (props.session) scrollToBottom()
-  },
-)
+async function loadInitial(sessionId: string) {
+  records.value = []
+  cursor.value = null
+  hasMore.value = false
+  loading.value = true
+  try {
+    const page = await api.readTimeline(sessionId)
+    if (props.session?.id !== sessionId) return
+    records.value = page.records
+    cursor.value = page.nextCursor
+    hasMore.value = page.hasMore
+    scrollToBottom()
+  } catch (cause) {
+    report(cause)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadOlder() {
+  const sessionId = props.session?.id
+  if (
+    !sessionId ||
+    !hasMore.value ||
+    cursor.value === null ||
+    loadingOlder.value ||
+    loading.value
+  ) {
+    return
+  }
+
+  const el = scroller.value
+  const previousHeight = el?.scrollHeight ?? 0
+  const previousTop = el?.scrollTop ?? 0
+
+  loadingOlder.value = true
+  try {
+    const page = await api.readTimeline(sessionId, cursor.value)
+    if (props.session?.id !== sessionId) return
+    records.value = [...page.records, ...records.value]
+    cursor.value = page.nextCursor
+    hasMore.value = page.hasMore
+    // 保持视口锚定：新增内容在顶部，回补滚动偏移。
+    await nextTick()
+    if (el) el.scrollTop = el.scrollHeight - (previousHeight - previousTop)
+  } catch (cause) {
+    report(cause)
+  } finally {
+    loadingOlder.value = false
+  }
+}
+
+function onScroll() {
+  const el = scroller.value
+  if (!el || loading.value || loadingOlder.value || !hasMore.value) return
+  if (el.scrollTop < 120) void loadOlder()
+}
 
 watch(
-  () => props.records,
-  () => {
-    scrollToBottom()
+  () => props.session?.id,
+  sessionId => {
+    if (sessionId) {
+      void loadInitial(sessionId)
+    } else {
+      records.value = []
+      cursor.value = null
+      hasMore.value = false
+    }
   },
+  { immediate: true },
 )
 </script>
 
@@ -60,13 +128,31 @@ watch(
         </div>
       </header>
 
-      <div ref="scroller" class="timeline">
+      <div ref="scroller" class="timeline" @scroll.passive="onScroll">
         <div v-if="loading" class="timeline-hint">加载中…</div>
         <div v-else-if="!records.length" class="timeline-hint">这个会话还没有消息</div>
 
-        <div v-else class="timeline-track">
-          <TimelineItem v-for="record in records" :key="record.id" :record="record" />
-        </div>
+        <template v-else>
+          <div class="timeline-top">
+            <button
+              v-if="hasMore"
+              class="older-btn"
+              :disabled="loadingOlder"
+              @click="loadOlder"
+            >
+              {{ loadingOlder ? '加载中…' : '加载更早的消息' }}
+            </button>
+            <div v-else class="timeline-start">已是全部历史</div>
+          </div>
+          <div class="timeline-track">
+            <TimelineItem
+              v-for="record in records"
+              :key="record.id"
+              :record="record"
+              :session-id="session.id"
+            />
+          </div>
+        </template>
       </div>
     </template>
   </main>
@@ -150,7 +236,7 @@ watch(
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 22px 60px;
+  padding: 14px 22px 60px;
 }
 
 .timeline-hint {
@@ -158,6 +244,37 @@ watch(
   color: var(--faint);
   font-size: 12px;
   padding-top: 40px;
+}
+
+.timeline-top {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 12px;
+}
+
+.older-btn {
+  padding: 4px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11.5px;
+  transition: all 0.15s ease;
+}
+
+.older-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.older-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.timeline-start {
+  color: var(--faint);
+  font-size: 10.5px;
 }
 
 .timeline-track {

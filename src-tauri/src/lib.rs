@@ -9,6 +9,7 @@ pub fn run() {
             ipc::list_projects,
             ipc::list_sessions,
             ipc::read_timeline,
+            ipc::read_tool_detail,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Prism");

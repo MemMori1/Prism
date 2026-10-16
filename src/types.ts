@@ -34,7 +34,13 @@ export interface SessionSummary {
 export type TimelinePart =
   | { kind: 'text'; text: string }
   | { kind: 'reasoning'; text: string }
-  | { kind: 'tool'; name: string; status: string | null; summary: string | null }
+  | {
+      kind: 'tool'
+      name: string
+      status: string | null
+      summary: string | null
+      callId: string
+    }
 
 export type RecordRole = 'user' | 'assistant' | 'system'
 
@@ -45,4 +51,18 @@ export interface TimelineRecord {
   model: string | null
   completed: boolean
   parts: TimelinePart[]
+}
+
+export interface TimelinePage {
+  records: TimelineRecord[]
+  nextCursor: number | null
+  hasMore: boolean
+}
+
+export interface ToolDetail {
+  input: Record<string, unknown> | null
+  output: string | null
+  error: string | null
+  metadata: Record<string, unknown> | null
+  truncated: boolean
 }

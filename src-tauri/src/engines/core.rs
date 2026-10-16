@@ -57,6 +57,8 @@ pub enum TimelinePart {
         name: String,
         status: Option<String>,
         summary: Option<String>,
+        /// 工具调用 id，展开详情时用于定位。
+        call_id: String,
     },
 }
 
@@ -72,4 +74,30 @@ pub struct TimelineRecord {
     /// 助手消息是否已完结（无 time.completed 视为进行中/中断）。
     pub completed: bool,
     pub parts: Vec<TimelinePart>,
+}
+
+/// 时间线分页（从最新往回取）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelinePage {
+    /// 按时间正序（最新一页在末尾）。
+    pub records: Vec<TimelineRecord>,
+    /// 继续加载更早消息的游标（不透明）；没有更早消息时为 None。
+    pub next_cursor: Option<i64>,
+    pub has_more: bool,
+}
+
+/// 工具调用的完整详情（展开卡片时按需加载）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDetail {
+    pub input: Option<serde_json::Value>,
+    /// 输出文本（state.content 拼接 / state.output）。
+    pub output: Option<String>,
+    /// 失败原因（state.error）。
+    pub error: Option<String>,
+    /// 引擎附带的元数据（如 edit 的 unified diff patch）。
+    pub metadata: Option<serde_json::Value>,
+    /// 输出因过大被截断。
+    pub truncated: bool,
 }

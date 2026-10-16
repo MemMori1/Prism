@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, computed } from 'vue'
 import { api } from './api'
-import type { EngineHealth, ProjectItem, SessionSummary, TimelineRecord } from './types'
+import type { EngineHealth, ProjectItem, SessionSummary } from './types'
 import ProjectsPane from './components/ProjectsPane.vue'
 import SessionsPane from './components/SessionsPane.vue'
 import SessionView from './components/SessionView.vue'
@@ -16,9 +16,6 @@ const selectedProjectId = ref<string | null>(null)
 const sessions = ref<SessionSummary[]>([])
 const sessionsLoading = ref(false)
 const selectedSessionId = ref<string | null>(null)
-
-const timeline = ref<TimelineRecord[]>([])
-const timelineLoading = ref(false)
 
 const selectedProject = computed(
   () => projects.value.find(project => project.id === selectedProjectId.value) ?? null,
@@ -49,7 +46,6 @@ async function loadProjects() {
       selectedProjectId.value = null
       selectedSessionId.value = null
       sessions.value = []
-      timeline.value = []
     }
   } catch (cause) {
     reportError(cause)
@@ -63,7 +59,6 @@ async function selectProject(projectId: string) {
   selectedProjectId.value = projectId
   selectedSessionId.value = null
   sessions.value = []
-  timeline.value = []
   await loadSessions(projectId)
 }
 
@@ -83,20 +78,8 @@ async function loadSessions(projectId: string) {
   }
 }
 
-async function selectSession(sessionId: string) {
-  if (selectedSessionId.value === sessionId) return
+function selectSession(sessionId: string) {
   selectedSessionId.value = sessionId
-  timeline.value = []
-  timelineLoading.value = true
-  try {
-    const records = await api.readTimeline(sessionId)
-    if (selectedSessionId.value !== sessionId) return
-    timeline.value = records
-  } catch (cause) {
-    reportError(cause)
-  } finally {
-    timelineLoading.value = false
-  }
 }
 
 async function reload() {
@@ -161,9 +144,8 @@ onMounted(reload)
       />
       <SessionView
         :session="selectedSession"
-        :records="timeline"
-        :loading="timelineLoading"
         :has-project="!!selectedProject"
+        @error="reportError"
       />
     </div>
   </div>

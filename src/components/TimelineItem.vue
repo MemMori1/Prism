@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { TimelineRecord } from '../types'
+import { renderMarkdown } from '../markdown'
 import ToolCard from './ToolCard.vue'
 
 defineProps<{
   record: TimelineRecord
+  sessionId: string
 }>()
 </script>
 
@@ -13,7 +15,11 @@ defineProps<{
     <template v-if="record.role === 'user'">
       <div class="user-bubble">
         <template v-for="(part, index) in record.parts" :key="index">
-          <div v-if="part.kind === 'text'" class="user-text">{{ part.text }}</div>
+          <div
+            v-if="part.kind === 'text'"
+            class="user-text md"
+            v-html="renderMarkdown(part.text)"
+          />
         </template>
       </div>
     </template>
@@ -35,10 +41,17 @@ defineProps<{
             <summary>思考过程</summary>
             <div class="reasoning-body">{{ part.text }}</div>
           </details>
-          <ToolCard v-else-if="part.kind === 'tool'" :part="part" />
-          <div v-else-if="part.kind === 'text' && part.text.trim()" class="assistant-text">
-            {{ part.text }}
-          </div>
+          <ToolCard
+            v-else-if="part.kind === 'tool'"
+            :part="part"
+            :session-id="sessionId"
+            :message-id="record.id"
+          />
+          <div
+            v-else-if="part.kind === 'text' && part.text.trim()"
+            class="assistant-text md"
+            v-html="renderMarkdown(part.text)"
+          />
         </div>
       </div>
     </template>
@@ -65,11 +78,6 @@ defineProps<{
   padding: 8px 13px;
 }
 
-.user-text {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 .system-note {
   align-self: center;
   color: var(--faint);
@@ -87,11 +95,6 @@ defineProps<{
 .part {
   display: flex;
   flex-direction: column;
-}
-
-.assistant-text {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .reasoning {

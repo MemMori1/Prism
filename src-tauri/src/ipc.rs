@@ -4,7 +4,9 @@
 
 use std::path::PathBuf;
 
-use crate::engines::core::{EngineHealth, ProjectItem, SessionSummary, TimelineRecord};
+use crate::engines::core::{
+    EngineHealth, ProjectItem, SessionSummary, TimelinePage, ToolDetail,
+};
 use crate::engines::opencode;
 
 fn opencode_db_path() -> Result<PathBuf, String> {
@@ -62,14 +64,53 @@ pub async fn list_sessions(
 }
 
 #[tauri::command]
-pub async fn read_timeline(session_id: String) -> Result<Vec<TimelineRecord>, String> {
+pub async fn read_timeline(
+    session_id: String,
+    before_seq: Option<i64>,
+    limit: Option<i64>,
+) -> Result<TimelinePage, String> {
     let db_path = opencode_db_path()?;
-    let records =
-        tauri::async_runtime::spawn_blocking(move || opencode::db::read_timeline(&db_path, &session_id))
-            .await
-            .map_err(|cause| cause.to_string())?;
-    let records = records?;
+    let limit = limit
+        .unwrap_or_else(opencode::db::timeline_page_size)
+        .clamp(1, 500);
+    let page = tauri::async_runtime::spawn_blocking(move || {
+        opencode::db::read_timeline(&db_path, &session_id, before_seq, limit)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?;
+    let page = page?;
     #[cfg(debug_assertions)]
-    println!("[prism] read_timeline -> {} 条", records.len());
-    Ok(records)
+    println!(
+        "[prism] read_timeline -> {} 条 (has_more={})",
+        page.records.len(),
+        page.has_more
+    );
+    Ok(page)
+}
+
+/// 展开工具卡片时按需加载完整输入 / 输出 / diff。
+#[tauri::command]
+pub async fn read_tool_detail(
+    session_id: String,
+    message_id: String,
+    call_id: String,
+) -> Result<ToolDetail, String> {
+    let db_path = opencode_db_path()?;
+    let detail = tauri::async_runtime::spawn_blocking(move || {
+        opencode::db::read_tool_detail(&db_path, &session_id, &message_id, &call_id)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?;
+    let detail = detail?;
+    #[cfg(debug_assertions)]
+    println!(
+        "[prism] read_tool_detail -> ok（output={}，diff={}）",
+        detail.output.is_some(),
+        detail
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("files"))
+            .is_some()
+    );
+    Ok(detail)
 }

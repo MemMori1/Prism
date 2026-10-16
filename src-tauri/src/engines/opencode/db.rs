@@ -5,18 +5,27 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::Value;
 
-use crate::engines::core::{ProjectItem, SessionSummary, TimelinePart, TimelineRecord};
+use crate::engines::core::{
+    ProjectItem, SessionSummary, TimelinePage, TimelinePart, TimelineRecord, ToolDetail,
+};
 
 type DbResult<T> = Result<T, String>;
 
 const SESSION_LIMIT: i64 = 500;
-const TIMELINE_LIMIT: i64 = 3000;
+/// 一页时间线最多返回多少条映射后的记录。
+const TIMELINE_PAGE: i64 = 150;
+/// 工具详情输出上限（字符），超出截断。
+const TOOL_OUTPUT_LIMIT: usize = 200_000;
 
 pub fn session_limit() -> i64 {
     SESSION_LIMIT
+}
+
+pub fn timeline_page_size() -> i64 {
+    TIMELINE_PAGE
 }
 
 fn open_readonly(path: &Path) -> DbResult<Connection> {
@@ -103,46 +112,181 @@ pub fn list_sessions(db_path: &Path, project_id: &str, limit: i64) -> DbResult<V
         .map_err(|cause| format!("读取会话失败：{cause}"))
 }
 
-/// 会话时间线：按 seq 顺序还原用户与助手的消息。
-pub fn read_timeline(db_path: &Path, session_id: &str) -> DbResult<Vec<TimelineRecord>> {
+/// 会话时间线分页：从最新往回取一页，按时间正序返回。
+///
+/// `before_seq` 为上一页的游标（更早消息的边界，严格递减）。
+pub fn read_timeline(
+    db_path: &Path,
+    session_id: &str,
+    before_seq: Option<i64>,
+    limit: i64,
+) -> DbResult<TimelinePage> {
     let connection = open_readonly(db_path)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, type, time_created, data
+            "SELECT id, seq, type, time_created, data
              FROM session_message
-             WHERE session_id = ?1 AND type IN ('user', 'assistant')
-             ORDER BY seq ASC
-             LIMIT ?2",
+             WHERE session_id = ?1
+               AND type IN ('user', 'assistant')
+               AND (?2 IS NULL OR seq < ?2)
+             ORDER BY seq DESC
+             LIMIT ?3",
         )
         .map_err(|cause| format!("查询消息失败：{cause}"))?;
 
-    let rows = statement
-        .query_map(params![session_id, TIMELINE_LIMIT], |row| {
-            let id: String = row.get(0)?;
-            let kind: String = row.get(1)?;
-            let time_created: i64 = row.get(2)?;
-            let data: String = row.get(3)?;
-            Ok((id, kind, time_created, data))
-        })
-        .map_err(|cause| format!("查询消息失败：{cause}"))?;
+    let limit = limit.max(1) as usize;
+    // DESC 顺序收集，最后反转成时间正序。
+    let mut collected: Vec<TimelineRecord> = Vec::new();
+    let mut cursor = before_seq;
+    let mut last_consumed_seq: Option<i64> = None;
+    let mut has_more = false;
 
-    let mut records = Vec::new();
-    for row in rows {
-        let (id, kind, time_created, data) =
-            row.map_err(|cause| format!("读取消息失败：{cause}"))?;
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
-            continue;
-        };
-        let record = match kind.as_str() {
-            "user" => map_user_record(id, time_created, &value),
-            "assistant" => map_assistant_record(id, time_created, &value),
-            _ => None,
-        };
-        if let Some(record) = record {
-            records.push(record);
+    while collected.len() < limit {
+        let rows = statement
+            .query_map(params![session_id, cursor, limit as i64], |row| {
+                let id: String = row.get(0)?;
+                let seq: i64 = row.get(1)?;
+                let kind: String = row.get(2)?;
+                let time_created: i64 = row.get(3)?;
+                let data: String = row.get(4)?;
+                Ok((id, seq, kind, time_created, data))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|cause| format!("查询消息失败：{cause}"))?;
+
+        if rows.is_empty() {
+            break;
         }
+        let source_exhausted = rows.len() < limit;
+
+        let mut rows = rows.into_iter();
+        while let Some((id, seq, kind, time_created, data)) = rows.next() {
+            last_consumed_seq = Some(seq);
+            let Ok(value) = serde_json::from_str::<Value>(&data) else {
+                continue;
+            };
+            let record = match kind.as_str() {
+                "user" => map_user_record(id, time_created, &value),
+                "assistant" => map_assistant_record(id, time_created, &value),
+                _ => None,
+            };
+            if let Some(record) = record {
+                collected.push(record);
+                if collected.len() >= limit {
+                    // 页已满：本批还有更早的行，或源头还有更早的批次。
+                    has_more = rows.len() > 0 || !source_exhausted;
+                    break;
+                }
+            }
+        }
+
+        if has_more || source_exhausted {
+            break;
+        }
+        cursor = last_consumed_seq;
     }
-    Ok(records)
+
+    collected.reverse();
+    Ok(TimelinePage {
+        records: collected,
+        next_cursor: if has_more { last_consumed_seq } else { None },
+        has_more,
+    })
+}
+
+/// 单个工具调用的完整详情（展开卡片时按需读取）。
+pub fn read_tool_detail(
+    db_path: &Path,
+    session_id: &str,
+    message_id: &str,
+    call_id: &str,
+) -> DbResult<ToolDetail> {
+    let connection = open_readonly(db_path)?;
+    let data: Option<String> = connection
+        .prepare("SELECT data FROM session_message WHERE id = ?1 AND session_id = ?2")
+        .and_then(|mut statement| {
+            statement
+                .query_row(params![message_id, session_id], |row| row.get(0))
+                .optional()
+        })
+        .map_err(|cause| format!("查询工具调用失败：{cause}"))?;
+
+    let data = data.ok_or_else(|| "未找到该消息".to_string())?;
+    let value: Value =
+        serde_json::from_str(&data).map_err(|cause| format!("解析消息失败：{cause}"))?;
+
+    let part = value
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|parts| {
+            parts.iter().find(|part| {
+                part.get("type").and_then(Value::as_str) == Some("tool")
+                    && part.get("id").and_then(Value::as_str) == Some(call_id)
+            })
+        })
+        .ok_or_else(|| "未找到该工具调用".to_string())?;
+
+    let state = part.get("state").filter(|state| !state.is_null());
+    let input = state
+        .and_then(|state| state.get("input"))
+        .filter(|input| !input.is_null())
+        .cloned();
+    let metadata = state
+        .and_then(|state| state.get("metadata"))
+        .filter(|metadata| !metadata.is_null())
+        .cloned();
+    let error = state.and_then(extract_tool_error);
+    let (output, truncated) = match state.and_then(extract_tool_output) {
+        Some(output) => truncate_long(&output, TOOL_OUTPUT_LIMIT),
+        None => (None, false),
+    };
+
+    Ok(ToolDetail {
+        input,
+        output,
+        error,
+        metadata,
+        truncated,
+    })
+}
+
+/// v2 的输出在 `state.content` 文本数组；兼容 `state.output` 字符串。
+fn extract_tool_output(state: &Value) -> Option<String> {
+    if let Some(Value::String(text)) = state.get("output") {
+        return Some(text.clone());
+    }
+    let parts = state.get("content").and_then(Value::as_array)?;
+    let texts: Vec<&str> = parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect();
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n"))
+    }
+}
+
+/// 错误可能是字符串，也可能是 `{type, message}` 对象。
+fn extract_tool_error(state: &Value) -> Option<String> {
+    let error = state.get("error")?;
+    match error {
+        Value::Null => None,
+        Value::String(text) if text.trim().is_empty() => None,
+        Value::String(text) => Some(text.clone()),
+        other => other
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| serde_json::to_string(other).ok()),
+    }
+}
+
+fn truncate_long(text: &str, max: usize) -> (Option<String>, bool) {
+    if text.chars().count() <= max {
+        return (Some(text.to_string()), false);
+    }
+    (Some(text.chars().take(max).collect()), true)
 }
 
 /// session_v2.model 是 JSON（{"id","providerID",...}），展示为 "provider/id"。
@@ -217,6 +361,11 @@ fn map_assistant_record(id: String, time_created: i64, data: &Value) -> Option<T
                         .and_then(Value::as_str)
                         .unwrap_or("tool")
                         .to_string();
+                    let call_id = part
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
                     let status = part
                         .pointer("/state/status")
                         .and_then(Value::as_str)
@@ -228,6 +377,7 @@ fn map_assistant_record(id: String, time_created: i64, data: &Value) -> Option<T
                         name,
                         status,
                         summary,
+                        call_id,
                     });
                 }
                 _ => {}
@@ -337,7 +487,7 @@ mod tests {
             "content": [
                 {"type": "reasoning", "text": "think…"},
                 {"type": "text", "text": "hello"},
-                {"type": "tool", "name": "read", "state": {"status": "completed", "input": {"path": "/tmp/x"}}},
+                {"type": "tool", "id": "call_1", "name": "read", "state": {"status": "completed", "input": {"path": "/tmp/x"}}},
                 {"type": "unknown", "payload": 1}
             ]
         });
@@ -349,10 +499,16 @@ mod tests {
         assert!(matches!(record.parts[0], TimelinePart::Reasoning { .. }));
         assert!(matches!(record.parts[1], TimelinePart::Text { .. }));
         match &record.parts[2] {
-            TimelinePart::Tool { name, status, summary } => {
+            TimelinePart::Tool {
+                name,
+                status,
+                summary,
+                call_id,
+            } => {
                 assert_eq!(name, "read");
                 assert_eq!(status.as_deref(), Some("completed"));
                 assert_eq!(summary.as_deref(), Some("/tmp/x"));
+                assert_eq!(call_id, "call_1");
             }
             other => panic!("expected tool part, got {other:?}"),
         }
@@ -385,6 +541,46 @@ mod tests {
         assert!(map_user_record("m1".to_string(), 7, &data).is_none());
     }
 
+    #[test]
+    fn tool_error_extracts_object_message() {
+        let state = json!({"error": {"type": "tool.execution", "message": "timed out"}});
+        assert_eq!(extract_tool_error(&state).as_deref(), Some("timed out"));
+    }
+
+    #[test]
+    fn tool_error_ignores_null_and_blank() {
+        assert_eq!(extract_tool_error(&json!({"error": null})), None);
+        assert_eq!(extract_tool_error(&json!({"error": "  "})), None);
+        assert_eq!(extract_tool_error(&json!({})), None);
+    }
+
+    #[test]
+    fn tool_output_joins_content_texts() {
+        let state = json!({
+            "content": [
+                {"type": "text", "text": "第一行"},
+                {"type": "text", "text": "第二行"}
+            ]
+        });
+        assert_eq!(extract_tool_output(&state).as_deref(), Some("第一行\n第二行"));
+        assert_eq!(
+            extract_tool_output(&json!({"output": "直接输出"})).as_deref(),
+            Some("直接输出")
+        );
+        assert_eq!(extract_tool_output(&json!({})), None);
+    }
+
+    #[test]
+    fn truncate_long_marks_oversize() {
+        let (text, truncated) = truncate_long("abcdef", 3);
+        assert_eq!(text.as_deref(), Some("abc"));
+        assert!(truncated);
+
+        let (text, truncated) = truncate_long("abc", 3);
+        assert_eq!(text.as_deref(), Some("abc"));
+        assert!(!truncated);
+    }
+
     /// 依赖本机真实 OpenCode 数据的冒烟测试：`cargo test -- --ignored`
     #[test]
     #[ignore]
@@ -393,13 +589,10 @@ mod tests {
             panic!("未找到本机 opencode.db");
         };
         let projects = list_projects(&db_path).expect("list_projects");
-        assert!(!projects.is_empty(), "至少应有一个项目");
+        assert!(!projects.is_empty(), "至少应有一个含会话的项目");
         println!("项目数: {}", projects.len());
 
-        let Some(project) = projects.iter().find(|p| p.session_count > 0) else {
-            println!("没有含会话的项目，跳过");
-            return;
-        };
+        let project = &projects[0];
         let sessions = list_sessions(&db_path, &project.id, 5).expect("list_sessions");
         assert!(!sessions.is_empty(), "含会话的项目应有顶层会话");
         let session = &sessions[0];
@@ -408,13 +601,57 @@ mod tests {
             session.id, session.title, session.model
         );
 
-        let records = read_timeline(&db_path, &session.id).expect("read_timeline");
-        println!("时间线记录数: {}", records.len());
-        for record in &records {
+        let page = read_timeline(&db_path, &session.id, None, 150).expect("read_timeline");
+        println!(
+            "时间线记录数: {} has_more={}",
+            page.records.len(),
+            page.has_more
+        );
+        for record in &page.records {
             assert!(record.role == "user" || record.role == "assistant");
         }
-        if !records.is_empty() {
-            assert!(records.iter().any(|r| r.role == "user"));
+
+        // 分页：翻到更早一页，两页不重叠且时间有序。
+        if page.has_more {
+            let cursor = page.next_cursor.expect("有更早消息时应有游标");
+            let older =
+                read_timeline(&db_path, &session.id, Some(cursor), 150).expect("older page");
+            println!("更早一页: {} 条", older.records.len());
+            let page_ids: std::collections::HashSet<&str> =
+                page.records.iter().map(|r| r.id.as_str()).collect();
+            assert!(older
+                .records
+                .iter()
+                .all(|r| !page_ids.contains(r.id.as_str())));
+            if let (Some(first_of_page), Some(last_of_older)) =
+                (page.records.first(), older.records.last())
+            {
+                assert!(last_of_older.time_created <= first_of_page.time_created);
+            }
+        }
+
+        // 工具详情：找一个工具调用，验证按需加载。
+        let found = page.records.iter().find_map(|record| {
+            record.parts.iter().find_map(|part| match part {
+                TimelinePart::Tool { call_id, .. } => Some((record.id.clone(), call_id.clone())),
+                _ => None,
+            })
+        });
+        if let Some((message_id, call_id)) = found {
+            let detail =
+                read_tool_detail(&db_path, &session.id, &message_id, &call_id).expect("tool detail");
+            println!(
+                "工具详情: input={} output_len={:?} error={}",
+                detail.input.is_some(),
+                detail.output.as_ref().map(|text| text.len()),
+                detail.error.is_some()
+            );
+            assert!(
+                detail.input.is_some()
+                    || detail.output.is_some()
+                    || detail.error.is_some()
+                    || detail.metadata.is_some()
+            );
         }
     }
 }
