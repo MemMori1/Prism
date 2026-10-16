@@ -8,6 +8,7 @@ use crate::engines::core::{
     EngineHealth, ProjectItem, SessionSummary, TimelinePage, ToolDetail,
 };
 use crate::engines::opencode;
+use crate::engines::opencode::runtime::{CreatedSession, Runtime, RuntimeStatus};
 
 fn opencode_db_path() -> Result<PathBuf, String> {
     opencode::locator::database_path().ok_or_else(|| {
@@ -113,4 +114,59 @@ pub async fn read_tool_detail(
             .is_some()
     );
     Ok(detail)
+}
+
+// ---------------------------------------------------------------- 运行轴
+
+/// 运行轴状态（不触发 serve 启动）。
+#[tauri::command]
+pub async fn runtime_status(runtime: tauri::State<'_, Runtime>) -> Result<RuntimeStatus, String> {
+    Ok(runtime.status())
+}
+
+/// 在指定目录新建会话（首次调用会启动 serve，可能稍慢）。
+#[tauri::command]
+pub async fn session_create(
+    runtime: tauri::State<'_, Runtime>,
+    directory: String,
+) -> Result<CreatedSession, String> {
+    #[cfg(debug_assertions)]
+    println!("[prism] session_create -> {directory}");
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || runtime.create_session(&directory))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 发送一条用户消息，返回用户消息 id。
+#[tauri::command]
+pub async fn session_send(
+    runtime: tauri::State<'_, Runtime>,
+    session_id: String,
+    text: String,
+) -> Result<String, String> {
+    #[cfg(debug_assertions)]
+    println!(
+        "[prism] session_send -> {}（{} 字符）",
+        session_id,
+        text.chars().count()
+    );
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || runtime.send_prompt(&session_id, &text))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 中断当前执行。
+#[tauri::command]
+pub async fn session_interrupt(
+    runtime: tauri::State<'_, Runtime>,
+    session_id: String,
+) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    println!("[prism] session_interrupt -> {session_id}");
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || runtime.interrupt(&session_id))
+        .await
+        .map_err(|cause| cause.to_string())?
 }

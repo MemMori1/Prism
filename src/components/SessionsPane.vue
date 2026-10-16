@@ -7,10 +7,12 @@ defineProps<{
   selectedId: string | null
   loading: boolean
   project: ProjectItem | null
+  creating: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'select', sessionId: string): void
+  (e: 'create'): void
 }>()
 
 function shortModel(model: string | null): string {
@@ -27,7 +29,17 @@ function shortModel(model: string | null): string {
       <span class="pane-title">
         {{ project ? `${project.name || basename(project.worktree)} 的会话` : '会话' }}
       </span>
-      <span v-if="sessions.length" class="pane-count">{{ sessions.length }}</span>
+      <span class="pane-actions">
+        <span v-if="sessions.length" class="pane-count">{{ sessions.length }}</span>
+        <button
+          class="new-btn"
+          :disabled="!project || creating"
+          :title="project ? '在当前项目目录新建会话' : '先选择项目'"
+          @click="emit('create')"
+        >
+          {{ creating ? '…' : '＋' }}
+        </button>
+      </span>
     </div>
 
     <div class="pane-body">
@@ -92,6 +104,38 @@ function shortModel(model: string | null): string {
 .pane-count {
   font-size: 11px;
   color: var(--faint);
+}
+
+.pane-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.new-btn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  transition: all 0.15s ease;
+}
+
+.new-btn:hover:not(:disabled) {
+  color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.new-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .pane-body {

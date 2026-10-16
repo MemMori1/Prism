@@ -66,3 +66,20 @@ export interface ToolDetail {
   metadata: Record<string, unknown> | null
   truncated: boolean
 }
+
+export interface RuntimeStatus {
+  running: boolean
+  baseUrl: string | null
+  pid: number | null
+}
+
+export interface CreatedSession {
+  sessionId: string
+  directory: string | null
+}
+
+/** 引擎 SSE 事件（原样透传的信封，取用 type / data）。 */
+export interface EngineEvent {
+  type: string
+  data: Record<string, unknown> | null
+}

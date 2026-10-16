@@ -16,6 +16,7 @@ const selectedProjectId = ref<string | null>(null)
 const sessions = ref<SessionSummary[]>([])
 const sessionsLoading = ref(false)
 const selectedSessionId = ref<string | null>(null)
+const creating = ref(false)
 
 const selectedProject = computed(
   () => projects.value.find(project => project.id === selectedProjectId.value) ?? null,
@@ -68,8 +69,9 @@ async function loadSessions(projectId: string) {
     const loaded = await api.listSessions(projectId)
     if (selectedProjectId.value !== projectId) return
     sessions.value = loaded
-    if (loaded.length > 0) {
-      await selectSession(loaded[0].id)
+    const currentStillPresent = loaded.some(session => session.id === selectedSessionId.value)
+    if (!currentStillPresent && loaded.length > 0) {
+      selectSession(loaded[0].id)
     }
   } catch (cause) {
     reportError(cause)
@@ -78,8 +80,39 @@ async function loadSessions(projectId: string) {
   }
 }
 
+const delay = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms))
+
+/** 在当前项目目录新建会话并选中（首次会顺带启动运行轴）。 */
+async function createSession() {
+  const project = selectedProject.value
+  if (!project || creating.value) return
+  creating.value = true
+  try {
+    const created = await api.sessionCreate(project.worktree)
+    // DB 写入可能稍有延迟：重试几次让新会话出现在列表里。
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const loaded = await api.listSessions(project.id)
+      if (selectedProjectId.value !== project.id) return
+      sessions.value = loaded
+      if (loaded.some(session => session.id === created.sessionId)) break
+      await delay(250)
+    }
+    selectedSessionId.value = created.sessionId
+  } catch (cause) {
+    reportError(cause)
+  } finally {
+    creating.value = false
+  }
+}
+
 function selectSession(sessionId: string) {
   selectedSessionId.value = sessionId
+}
+
+/** 一轮执行收口后刷新会话列表（标题 / 用量可能已更新）。 */
+async function onSessionSettled() {
+  const projectId = selectedProjectId.value
+  if (projectId) await loadSessions(projectId)
 }
 
 async function reload() {
@@ -140,12 +173,15 @@ onMounted(reload)
         :selected-id="selectedSessionId"
         :loading="sessionsLoading"
         :project="selectedProject"
+        :creating="creating"
         @select="selectSession"
+        @create="createSession"
       />
       <SessionView
         :session="selectedSession"
         :has-project="!!selectedProject"
         @error="reportError"
+        @settled="onSessionSettled"
       />
     </div>
   </div>

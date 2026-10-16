@@ -9,6 +9,8 @@ const props = defineProps<{
   part: Extract<TimelinePart, { kind: 'tool' }>
   sessionId: string
   messageId: string
+  /** 运行中（live）工具自带详情，跳过 DB 拉取。 */
+  liveDetail?: ToolDetail | null
 }>()
 
 const expanded = ref(false)
@@ -16,9 +18,12 @@ const loading = ref(false)
 const failed = ref<string | null>(null)
 const detail = ref<ToolDetail | null>(null)
 
+/** live 详情优先，其次是按需拉取的 DB 详情。 */
+const resolved = computed<ToolDetail | null>(() => props.liveDetail ?? detail.value)
+
 async function toggle() {
   expanded.value = !expanded.value
-  if (!expanded.value || detail.value || loading.value) return
+  if (!expanded.value || props.liveDetail || detail.value || loading.value) return
   loading.value = true
   failed.value = null
   try {
@@ -48,7 +53,7 @@ interface ToolInput {
   [key: string]: unknown
 }
 
-const input = computed<ToolInput>(() => (detail.value?.input as ToolInput | null) ?? {})
+const input = computed<ToolInput>(() => (resolved.value?.input as ToolInput | null) ?? {})
 
 const statusInfo = computed(() => {
   switch (props.part.status) {
@@ -139,7 +144,7 @@ const primaryBlocks = computed<Array<{ label: string; text: string }>>(() => {
 
 /** edit 的 unified diff（来自 metadata.files[].patch）。 */
 const diffFiles = computed(() => {
-  const metadata = detail.value?.metadata as
+  const metadata = resolved.value?.metadata as
     | { files?: Array<{ file?: string; patch?: string }> }
     | null
   const files = metadata?.files ?? []
@@ -195,7 +200,7 @@ function signOf(type: DiffRow['type']): string {
       <div v-if="loading" class="tool-note">加载详情…</div>
       <div v-else-if="failed" class="tool-error">{{ failed }}</div>
 
-      <template v-else-if="detail">
+      <template v-else-if="resolved">
         <!-- diff 视图 -->
         <div v-for="(file, index) in diffFiles" :key="index" class="diff-block">
           <div class="diff-head">
@@ -233,12 +238,12 @@ function signOf(type: DiffRow['type']): string {
         </template>
 
         <!-- 错误 -->
-        <div v-if="detail.error" class="tool-error">{{ detail.error }}</div>
+        <div v-if="resolved.error" class="tool-error">{{ resolved.error }}</div>
 
         <!-- 输出 -->
-        <template v-if="detail.output">
-          <div class="block-label">输出{{ detail.truncated ? '（已截断）' : '' }}</div>
-          <pre class="tool-pre output">{{ detail.output }}</pre>
+        <template v-if="resolved.output">
+          <div class="block-label">输出{{ resolved.truncated ? '（已截断）' : '' }}</div>
+          <pre class="tool-pre output">{{ resolved.output }}</pre>
         </template>
 
         <!-- 原始输入 -->

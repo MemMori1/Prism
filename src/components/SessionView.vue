@@ -1,16 +1,22 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { api } from '../api'
+import { onEngineEvent } from '../engineEvents'
+import { createLiveTurn, reduceLiveTurn, type LiveTurn } from '../liveTurn'
 import type { SessionSummary, TimelineRecord } from '../types'
 import { formatCost, formatTokens, fullTime } from '../format'
 import TimelineItem from './TimelineItem.vue'
+import LiveTurnView from './LiveTurn.vue'
 
 const props = defineProps<{
   session: SessionSummary | null
   hasProject: boolean
 }>()
 
-const emit = defineEmits<{ (e: 'error', message: string): void }>()
+const emit = defineEmits<{
+  (e: 'error', message: string): void
+  (e: 'settled'): void
+}>()
 
 const scroller = ref<HTMLElement | null>(null)
 const records = ref<TimelineRecord[]>([])
@@ -19,15 +25,145 @@ const hasMore = ref(false)
 const loading = ref(false)
 const loadingOlder = ref(false)
 
+// ---- 运行轴（live）状态 ----
+
+const live = ref<LiveTurn>(createLiveTurn())
+const liveStartedAt = ref<number | null>(null)
+const draft = ref('')
+const sending = ref(false)
+const stopping = ref(false)
+/** 视口是否吸附在底部（跟随流式输出）。 */
+const stick = ref(true)
+
+const running = computed(() => live.value.running)
+const showLive = computed(
+  () => live.value.running || live.value.parts.length > 0 || !!live.value.error,
+)
+
+const TERMINAL_EVENTS = new Set([
+  'session.execution.succeeded',
+  'session.execution.failed',
+  'session.execution.interrupted',
+])
+
+let settleTimer: number | null = null
+
 function report(cause: unknown) {
   emit('error', cause instanceof Error ? cause.message : String(cause))
 }
+
+function sleep(ms: number) {
+  return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+const stopEvents = onEngineEvent(event => {
+  const sessionId = typeof event.data?.sessionID === 'string' ? event.data.sessionID : null
+  const current = props.session?.id ?? null
+  if (!sessionId || !current || sessionId !== current) return
+
+  const before = live.value
+  const after = reduceLiveTurn(before, event)
+  if (after !== before) {
+    live.value = after
+    if (event.type === 'session.execution.started') {
+      liveStartedAt.value = Date.now()
+    }
+    if (after.running) maybeStick()
+  }
+  if (TERMINAL_EVENTS.has(event.type)) {
+    scheduleSettle(sessionId)
+  }
+})
+
+onBeforeUnmount(() => {
+  stopEvents()
+  if (settleTimer !== null) window.clearTimeout(settleTimer)
+})
+
+function scheduleSettle(sessionId: string) {
+  if (settleTimer !== null) window.clearTimeout(settleTimer)
+  settleTimer = window.setTimeout(() => {
+    settleTimer = null
+    void settleTurn(sessionId)
+  }, 500)
+}
+
+/**
+ * turn 收口：以 DB 为准合并新增记录，然后清掉 live 块。
+ * DB 写入可能略滞后于 execution.* 事件，必要时重试刷新兜底。
+ */
+async function settleTurn(sessionId: string) {
+  if (props.session?.id !== sessionId) return
+  let additions = await refreshTail()
+  if (props.session?.id !== sessionId) return
+  if (!coveredBy(additions)) {
+    await sleep(800)
+    if (props.session?.id !== sessionId) return
+    additions = await refreshTail()
+  }
+  if (props.session?.id !== sessionId) return
+  if (!coveredBy(additions)) {
+    await sleep(1200)
+    if (props.session?.id !== sessionId) return
+    await refreshTail()
+  }
+  if (props.session?.id !== sessionId) return
+  if (!live.value.running) {
+    live.value = createLiveTurn()
+    liveStartedAt.value = null
+  }
+  emit('settled')
+}
+
+/** 本次刷新新增的记录里是否已覆盖本轮结果。 */
+function coveredBy(additions: TimelineRecord[]): boolean {
+  const startedAt = liveStartedAt.value
+  if (startedAt === null) {
+    return additions.some(record => record.role === 'assistant')
+  }
+  return additions.some(
+    record =>
+      record.role === 'assistant' &&
+      record.completed &&
+      record.timeCreated >= startedAt - 3000,
+  )
+}
+
+// ---- 时间线分页 ----
 
 function scrollToBottom() {
   nextTick(() => {
     const el = scroller.value
     if (el) el.scrollTop = el.scrollHeight
   })
+}
+
+function maybeStick() {
+  if (stick.value) scrollToBottom()
+}
+
+/** 合并 DB 最新一页里尚未出现过的记录（重连/收口时用），返回本次新增。 */
+async function refreshTail(): Promise<TimelineRecord[]> {
+  const sessionId = props.session?.id
+  if (!sessionId) return []
+  try {
+    const page = await api.readTimeline(sessionId)
+    if (props.session?.id !== sessionId) return []
+    const known = new Set(records.value.map(record => record.id))
+    const additions = page.records.filter(record => {
+      if (known.has(record.id)) return false
+      // 执行中：引擎可能已在写未完结的助手消息，交给 live 块展示。
+      if (live.value.running && record.role === 'assistant' && !record.completed) return false
+      return true
+    })
+    if (additions.length) {
+      records.value = [...records.value, ...additions]
+    }
+    return additions
+  } catch (cause) {
+    report(cause)
+    return []
+  }
 }
 
 async function loadInitial(sessionId: string) {
@@ -84,13 +220,70 @@ async function loadOlder() {
 
 function onScroll() {
   const el = scroller.value
-  if (!el || loading.value || loadingOlder.value || !hasMore.value) return
+  if (!el) return
+  stick.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  if (loading.value || loadingOlder.value || !hasMore.value) return
   if (el.scrollTop < 120) void loadOlder()
+}
+
+// ---- 输入与运行 ----
+
+async function send() {
+  const sessionId = props.session?.id
+  const content = draft.value.trim()
+  if (!sessionId || !content || sending.value || live.value.running) return
+  sending.value = true
+  try {
+    await api.sessionSend(sessionId, content)
+    if (props.session?.id !== sessionId) return
+    draft.value = ''
+    await refreshTail()
+    stick.value = true
+    scrollToBottom()
+    // 用户消息落库可能略滞后：稍后再兜一次底。
+    window.setTimeout(() => {
+      if (props.session?.id === sessionId) void refreshTail()
+    }, 600)
+  } catch (cause) {
+    report(cause)
+  } finally {
+    sending.value = false
+  }
+}
+
+async function stop() {
+  const sessionId = props.session?.id
+  if (!sessionId || stopping.value) return
+  stopping.value = true
+  try {
+    await api.sessionInterrupt(sessionId)
+  } catch (cause) {
+    report(cause)
+  } finally {
+    stopping.value = false
+  }
+}
+
+function onEnter(event: KeyboardEvent) {
+  if (event.isComposing) return
+  if (!event.shiftKey) {
+    event.preventDefault()
+    void send()
+  }
 }
 
 watch(
   () => props.session?.id,
   sessionId => {
+    if (settleTimer !== null) {
+      window.clearTimeout(settleTimer)
+      settleTimer = null
+    }
+    live.value = createLiveTurn()
+    liveStartedAt.value = null
+    draft.value = ''
+    stopping.value = false
+    stick.value = true
     if (sessionId) {
       void loadInitial(sessionId)
     } else {
@@ -130,7 +323,9 @@ watch(
 
       <div ref="scroller" class="timeline" @scroll.passive="onScroll">
         <div v-if="loading" class="timeline-hint">加载中…</div>
-        <div v-else-if="!records.length" class="timeline-hint">这个会话还没有消息</div>
+        <div v-else-if="!records.length && !showLive" class="timeline-hint">
+          这个会话还没有消息，直接在下面发一条试试
+        </div>
 
         <template v-else>
           <div class="timeline-top">
@@ -151,9 +346,48 @@ watch(
               :record="record"
               :session-id="session.id"
             />
+            <LiveTurnView v-if="showLive" :turn="live" />
           </div>
         </template>
       </div>
+
+      <footer class="composer">
+        <div class="composer-box">
+          <textarea
+            v-model="draft"
+            class="composer-input"
+            rows="3"
+            spellcheck="false"
+            :placeholder="
+              running
+                ? '执行中…（可先起草，结束后发送）'
+                : '发一条指令…（Enter 发送，Shift+Enter 换行）'
+            "
+            :disabled="sending"
+            @keydown.enter="onEnter"
+          />
+          <div class="composer-actions">
+            <span v-if="sending" class="composer-hint">发送中…</span>
+            <span v-else-if="running" class="composer-hint">执行中…</span>
+            <button
+              v-if="running"
+              class="stop-btn"
+              :disabled="stopping"
+              @click="stop"
+            >
+              {{ stopping ? '停止中…' : '■ 停止' }}
+            </button>
+            <button
+              v-else
+              class="send-btn"
+              :disabled="!draft.trim() || sending"
+              @click="send"
+            >
+              发送 ⏎
+            </button>
+          </div>
+        </div>
+      </footer>
     </template>
   </main>
 </template>
@@ -236,7 +470,7 @@ watch(
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 22px 60px;
+  padding: 14px 22px 40px;
 }
 
 .timeline-hint {
@@ -283,5 +517,93 @@ watch(
   gap: 18px;
   max-width: 1000px;
   margin: 0 auto;
+}
+
+.composer {
+  flex: none;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding: 10px 22px 14px;
+}
+
+.composer-box {
+  max-width: 1000px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.composer-input {
+  width: 100%;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.55;
+  padding: 8px 11px;
+  transition: border-color 0.15s ease;
+}
+
+.composer-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.composer-input:disabled {
+  opacity: 0.6;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.composer-hint {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.send-btn {
+  padding: 5px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  transition: opacity 0.15s ease;
+}
+
+.send-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.send-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.stop-btn {
+  padding: 5px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stop-btn:hover:not(:disabled) {
+  border-color: var(--red);
+}
+
+.stop-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 </style>
