@@ -585,6 +585,26 @@ fn log_event(value: &Value) {
 mod tests {
     use super::*;
 
+    /// 测试收尾：引擎没有"删除项目"API，这里把临时目录的项目行一并清掉，
+    /// 避免测试在用户引擎库里留下孤儿项目（仅开发期测试的清理，产品代码不写引擎数据）。
+    fn cleanup_project(worktree: &std::path::Path) -> usize {
+        let Some(db_path) = locator::database_path() else {
+            return 0;
+        };
+        let canonical =
+            std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+        let Ok(connection) = rusqlite::Connection::open(&db_path) else {
+            return 0;
+        };
+        let _ = connection.execute_batch("PRAGMA foreign_keys = ON");
+        connection
+            .execute(
+                "DELETE FROM project WHERE worktree = ?1",
+                [canonical.to_string_lossy().to_string()],
+            )
+            .unwrap_or(0)
+    }
+
     #[test]
     fn parses_startup_lines() {
         assert_eq!(
@@ -727,6 +747,9 @@ mod tests {
 
         runtime.delete_session(&created.session_id).expect("delete_session");
         runtime.shutdown();
+        let removed = cleanup_project(&dir);
+        println!("已清理测试项目行：{removed}");
+        assert_eq!(removed, 1, "应恰好清理一条测试项目行");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -815,6 +838,9 @@ mod tests {
 
         runtime.delete_session(&created.session_id).expect("delete_session");
         runtime.shutdown();
+        let removed = cleanup_project(&dir);
+        println!("已清理测试项目行：{removed}");
+        assert_eq!(removed, 1, "应恰好清理一条测试项目行");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
