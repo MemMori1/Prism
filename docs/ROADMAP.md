@@ -1,0 +1,210 @@
+# Prism 路线图（v0.2+）
+
+> 定位不变：**多引擎 AI 编码 Agent 指挥台** —— 数据只读、自研视觉、干净房间。
+> 2026-10-17 完成一轮功能盘点与差距复核（逐模块核对、关键结论抽查原文），
+> 据此修订功能对照与 M6–M12 开发规划。
+>
+> 一句话路线：**工作台 → 搜索 → Codex → Claude Code → 工坊 → 自动化 → 平台化发布。**
+
+## 0. 现状快照（M1–M12 完成；自动更新待发布源，Claude 运行轴待 CLI）
+
+| 能力 | 说明 |
+|---|---|
+| 归档浏览 | 三栏（项目 / 会话 / 详情），零导入读 `opencode.db` / Codex state 库 / Claude 档案 |
+| 时间线 | 文本 / 推理 / 工具卡片（按需加载详情）/ diff / markdown / 150 条分页 |
+| 指挥 | 新建会话、发消息、SSE 流式渲染、插话（steer）、中断 |
+| 审批 | 权限卡片（允许一次 / 总是允许 / 拒绝），挂起请求补拉 |
+| 运行轴 | OpenCode：serve 惰性启动 + 看门狗回收；Codex：`codex app-server` JSON-RPC（流式 / 插话 / 打断 / 审批，配置零覆盖） |
+| 工作台 | 多列并行、列宽拖拽、布局持久化、全局审批汇总角标 |
+| 搜索 | FTS5 trigram 全库检索（中文子串即查即中；<3 字符回退 LIKE），结果定位高亮 |
+| 工坊 | 资产只读浏览：技能 / 命令 / 子代理 / 记忆 / 插件 × 三引擎（用户 / 内置 / 项目）；MCP 列表（三引擎配置真相位置）+ 探活（仅 http GET，不 spawn stdio）；markdown 预览 + 系统程序打开 |
+| 自动化 | `~/.prism/routines.json` 定时任务（五字段 cron 自研解析）；应用内 30s tick 调度，到点用引擎运行轴跑提示词；执行日志 + 状态回写，sessionId 一键回看；唤醒合并补一次、关停期间错过不补 |
+| 通知 | 回合完成 / 失败 / 待审批 → 顶栏铃铛持久面板 + 系统通知（非前台才发，权限拒绝静默降级）；例行任务结果与权限同样进通知 |
+| 托盘 | macOS 菜单栏：图标旁待审批计数 + 菜单状态行 / tooltip（前端合并工作台 + 归档视图实时推送，按 sessionId 去重）；菜单含打开 / 退出；**关窗 ≠ 退出**（隐藏窗口，进程与调度继续跑）；Dock 点击唤起 |
+| 三引擎 | OpenCode（全功能）；Codex（浏览 + 运行：发消息 / 流式 / 插话 / 打断 / 审批卡片 / 新建会话）；Claude Code（历史浏览，运行轴待 CLI） |
+| 打磨 | 自研图标、设置面板（双引擎健康）、输入框自适应 |
+| 打包 | `.app` + `.dmg`（v0.2.0，含 M1–M12 全部改动，未签名；Gatekeeper 打开流程见 README）；自动更新待发布源 |
+
+## 1. 差距对照（现状 → 去向）
+
+| 能力 | Prism 现状 | 去向 |
+|---|---|---|
+| 工作台多列 / 列宽 / 持久化 | ✅ M6 | —— |
+| 监控轨（卡内审批）/ 标签页 / 全景图导出 | ❌ | 远期池（监控轨优先级最高） |
+| 赛马（广播 + 并排 + token HUD） | ❌ | M8 运行轴已完成；等 M9 双运行引擎后就绪，远期池 |
+| 归档排序 / 时间范围 | ✅ M7 顺行 | —— |
+| 星标 / 标签（宿主 metadata） | ❌ | 远期池（写 `~/.prism/`，乐观更新+回滚照抄经验） |
+| 搜索 | ✅ M7 FTS5 trigram | 选型：FTS5 trigram + <3 字符 LIKE 回退（覆盖中文两字词硬伤）；数据量变大再评估无索引内存子串路径 |
+| 会话详情块体系 | 🟡 文本 / 推理 / 工具 / diff / 权限 | 按需随行 |
+| 文件台账 + git 快照条 | ❌ | 远期池（高价值候选） |
+| 产物预览（HTML/SVG/图片） | ❌ | 远期池（沙箱：CSP `default-src 'none'` + 脚本按 nonce 激活） |
+| 多引擎 | 🟡 OpenCode + Codex 全功能；Claude 历史浏览 | **M9 运行轴（待 CLI 安装）** |
+| 运行轴事件模型（generation/sequence、配置变即重启） | 🟡 双引擎事件已归一化成同形 | 配置变更即重启随行补（M9 或之后） |
+| 权限交互语义（四档 / 问答卡 / 计划卡） | 🟡 三档（once/always/reject） | 随引擎运行轴逐步补（问答卡语义 = allow + updatedInput.answers） |
+| 工坊（技能 / 命令 / MCP / 记忆） | ✅ | M10a 资产浏览 + M10b MCP 列表 / 探活已实现（2026-10-17，见 M10）；写操作（增删 MCP）后置，不做 |
+| 自动化（定时任务） | ✅ | M11b 已实现（2026-10-17，见 M11）：应用内 30s tick 调度（不用 launchd，理由见 M11）；launchd / 后台常驻后置 |
+| Hooks / Turn Signal | ❌ | 远期（依赖 Claude 接入，M9 后再看） |
+| 通知三层 | ✅ | M11a 已实现（2026-10-17，见 M11）：单条内存事件流 + 系统通知（非前台才发 + 静默降级）；持久面板为事件流派生视图（不复制引擎状态），跳转以选中态为准 |
+| 设置多标签 | 🟡 双引擎状态面板 | 随行逐步扩展 |
+| 托盘 | ✅ | M12a 已实现（2026-10-17，见 M12）：Tauri 内置 tray 轻版——状态行 / tooltip / 待审批计数、点击唤起、关窗 ≠ 退出；不引入独立常驻二进制 + LaunchAgent |
+| 小组件 | ❌ | 远期池 |
+| 自动更新 | ❌ | M12 待发布源：需 GitHub 仓库 + updater 签名密钥，就位后接 Tauri updater 并做 v0.1→v0.2 升级验收 |
+| 主题系统 / i18n | 🟡 自研单主题 + 中文 | i18n 架构预留后置（文案集中化重构，随第一次语言需求启动）；主题远期 |
+| 用量 / 成本统计 / 配额 | 🟡 三类 token 已有 | 远期（配额数据源：Claude usage 接口 / Codex app-server rateLimits） |
+| MCP 双向桥（宿主能力给 agent 用） | ❌ | 远期池（宿主即工具：把审批 / 搜索 / 任务能力暴露给会话内 agent） |
+| 菜单 / 快捷键 / 开机自启 | 🟡 Cmd+W 关闭即隐藏（关窗 ≠ 退出）、Cmd+Q 退出 | 视图快捷键随行；开机自启远期（托盘常驻 + 关窗不退已覆盖多数场景） |
+
+## 2. 引擎路线修订（重要）
+
+原计划：OpenCode → Claude Code → Codex。
+**修订为：OpenCode → Codex → Claude Code。** 依据 2026-10-17 实机核实：
+
+- **Codex 全链路可测**：`~/.codex/sessions` 已有 41 条真实 rollout 档案；
+  `/Applications/Codex.app/Contents/Resources/codex` 内嵌 codex-cli 0.133.0（arm64），
+  `codex app-server` 运行轴可端到端真机验证。
+- **Claude Code 本机无数据无 CLI**（`~/.claude` 不存在、PATH 无 `claude`）：
+  浏览层走样例档案开发验收；运行轴等安装 CLI 后补真机复测（或与用户约时间装一个）。
+- 若用户先装好了 `claude` CLI，可把 M8 / M9 对调，不受影响。
+
+## 3. 开发规划（M6–M12）
+
+### M6 工作台：多列并行指挥 ★核心补齐
+> 状态：已实现（2026-10-17）并提交。
+- 顶部区块切换：**归档** ⇄ **工作台**；一屏多列（发送 / 插话 / 停止 / 审批全保留）。
+- 列头 = 标题 · 状态 · 关闭；开列 = 新建会话或归档「在工作台打开」。
+- 全局提示：任一会话等审批 → 顶部汇总角标；列宽可拖拽；布局持久化。
+- 本期不做：标签页、赛马、监控轨、截图（→ 远期池）。
+
+### M7 搜索：本地全文检索
+> 状态：已实现（2026-10-17）并提交；真机索引冒烟通过，前端 59 测全绿。
+- 自建索引 `~/.prism/search.db`（FTS5 trigram：中文子串即查即中；
+  两字符以下查询回退 LIKE 扫描），从 `opencode.db` 增量抽取（Prism 自有数据，不写引擎库）。
+- 搜索页：关键词 → 结果（项目 / 时间 / 高亮片段）；点击定位到消息并短暂高亮。
+- 顺行：归档列表排序 + 时间范围筛选。
+
+### M8 Codex 引擎接入（浏览 + 运行轴）
+> 状态：**已实现（2026-10-17）**：浏览层 + 运行轴（`codex app-server` 长活进程）。
+> Rust 45 测全绿；真机集成测试 `drives_real_app_server` 通过（内嵌假模型驱动真
+> app-server：文本流式 / 沙箱命令 / 升级审批→放行→落盘 / 归档清理，全程 0.4s）。
+- 数据：`$CODEX_HOME/state_*.sqlite`（按 schema 探测 `threads` 表：标题 / 用量 / rollout 路径）
+  + `sessions/**/rollout-*.jsonl` 宽容解析（去重规则：`event_msg/user_message` +
+  `response_item` 的 assistant message / reasoning；`function_call_output` 按 call_id 回填状态）。
+- 会话 id 约定：`codex:<thread-uuid>`；项目 id = `codex:<cwd>`；Rust 层按前缀分发，前端 API 零分支。
+- 运行轴实现：行分隔 JSON-RPC —— `initialize`（声明 experimentalApi）→
+  `thread/start`（`ephemeral=false` 立即写 state 库，前端"新建后刷新"直接可见）或
+  `thread/resume`（历史会话首条消息前自动加载）→ `turn/start`（空闲）/ `turn/steer`
+  （执行中插话，带 expectedTurnId）/ `turn/interrupt`（打断，`turn/completed.status=interrupted`）。
+  通知归一化成 OpenCode 同形 `{type,data}` 事件（`session.text|reasoning.delta/ended`、
+  `session.tool.*`、`session.execution.*`）；审批反向请求按 `availableDecisions` 把前端
+  三档映射为 accept / acceptForSession / decline（缺省回退 accept / cancel），
+  `serverRequest/resolved` 广播 `permission.replied` 收卡；问答卡 v1 回空答卷不阻塞。
+  配置完全继承 `~/.codex/config.toml`（模型 / 审批策略 / 沙箱），Prism 不写入不覆盖。
+- 验收：真机发消息 / 流式 / 中断（已实证）；工作台两引擎并行可用；
+  浏览层验收（36 项目 / 38 条记录 / token 汇总 / 工具详情）已达成。
+
+### M9 Claude Code 引擎接入
+> 状态：**浏览层已实现（2026-10-17）**：`~/.claude/projects` JSONL 解析、三引擎合并
+> IPC、项目角标（CC）/ 设置面板 Claude 块；Rust 55 测全绿 + 样例档案（2 项目 /
+> 3 会话：工具回填 / structuredPatch diff / 失败结果 / 子代理噪音）全链路通过。
+> **运行轴待本机安装 `claude` CLI 后接入**（验收分两段执行）。
+- 数据：`~/.claude/projects/<编码 cwd>/<会话 uuid>.jsonl`；`CLAUDE_CONFIG_DIR`
+  官方变量优先（与 CLI 视角一致）；cwd 有采信守卫（编码回目录名一致才认，防漂移），
+  `agent-*.jsonl`（子代理档案）排除；`isSidechain` / `isMeta` 不进主时间线；
+  `file-history-snapshot` 等大行快筛跳过。
+- 标题：custom-title > ai-title > summary > 首条用户消息（首行截 80 字符）；
+  用量四类缓存字段求和（含子代理，真实计费口径）；`ToolDetail` 输出 200k 字符截断。
+- 工具映射：名称统一小写（Bash→bash、Edit→edit…）对齐 OpenCode 卡片；`tool_result`
+  按 `tool_use_id` 回填状态（`is_error`→error）；Edit/Write 的
+  `toolUseResult.structuredPatch` 转统一 diff 进 `metadata.files[].patch`（复用卡片渲染）。
+- 运行轴：`claude` CLI stream-json（待安装后真机验证，验收分两段执行）。
+- 届时按需补：AskUserQuestion / PlanApproval 交互语义（问答卡 / 计划卡）。
+- 验收：样例档案时间线正确（已达成）；安装 CLI 后执行真机验收清单。
+
+### M10 工坊：引擎资产
+- ✅ M10a 资产浏览（2026-10-17 实现并提交）：
+  - 纯函数发现器 `engines/workshop.rs::collect(roots, project_cwds)`：命令层只装配家目录与项目列表，
+    单测注入 fixture 目录；全程只读，不写引擎任何目录。
+  - 引擎口径（源码/官方文档核实）：OpenCode `~/.config/opencode/{skills,agents,commands}`（含遗留单数
+    `command/`）+ 项目 `.opencode/`（技能兼容 `.claude/skills` 归 Claude 侧展示避免重复）；Codex
+    `~/.codex/skills/<名>/SKILL.md`（`.system` 作内置）+ 插件缓存 `plugins/cache/<市场>/<插件>/<版本>`
+    + `memories/`；Claude Code `~/.claude/{skills,commands,agents}` + 项目 `.claude/`；记忆 = `AGENTS.md`
+    （Codex / OpenCode）与 `CLAUDE.md`（Claude），用户级 + 项目级。
+  - 元数据：frontmatter `name` / `description`（含 `>` / `|` 折叠块标量），缺省回退正文首行；插件描述取
+    `plugin.json`；技能录两层（平铺 `*.md` + `<名>/SKILL.md`），命令 / 子代理目录递归并入名称（`team/review`）。
+  - IPC：`workshop_assets`（总览）/ `workshop_read`（预览，200k 字符截断）/ `open_path`（系统默认程序打开）。
+  - 前端：顶栏第 4 视图「工坊」（AppView 扩 `workshop`；`prism-view` 持久化），三栏 =
+    引擎×种类导航（计数）| 列表（过滤 + 归属/时间）| 详情（markdown 预览 + 打开文件）；各引擎空态有引导文案。
+  - 验收：本机真机 87 条（Codex 12：技能 6 / 插件 5 / 记忆 1；Claude 项目技能 75；OpenCode 0 → 空态）；
+    Rust 63 测（含 4 条 workshop）+ vitest 63 + vue-tsc 0。
+- ✅ M10b MCP 列表与探活（2026-10-17 实现）：
+  - 真相位置：OpenCode `opencode.jsonc|json` 的 `mcp.servers`（v2 口径 local/remote、`disabled`；兼容旧
+    `enabled`；JSONC 注释与尾随逗号容忍）+ 项目根同名文件；Codex `~/.codex/config.toml`
+    `[mcp_servers.<名>]`（极简 TOML 子集：单行/多行数组、`.env` 子段只取键名）；Claude `~/.claude.json`
+    顶层与 `projects.<cwd>`（local scope）+ 项目 `.mcp.json` + 用户/项目 `settings.json`。
+  - 安全边界：环境变量只显示键名（不落值）；stdio 仅查命令可解析性（绝对路径 / PATH），**绝不 spawn**；
+    探活仅对 http url 发 GET（4s 超时，任何 HTTP 响应=可达，传输错误=不可达）。
+  - IPC：`workshop_mcp` / `mcp_probe`；前端工坊加「资产 | MCP」模式切换——左导航（引擎计数）、列表
+    （状态圆点：绿=可达 / 红=失败 / 空心=stdio）、详情（命令或地址、命令状态、环境变量键名、探活按钮、打开配置）。
+  - 验收：本机 3 个 stdio 服务（OpenCode imessage；Codex node_repl / stitch）；Rust 63 测（含 4 条 MCP）
+    + vitest 65 + vue-tsc 0。
+- 写操作（增删 MCP）后置，不做；Hooks 总览不在本期。
+- 边界：资产只读 + 系统默认程序打开（无新建 / 编辑 / 运行）。
+
+### M11 自动化与通知（2026-10-17 完成：M11a 通知 + M11b 定时任务）
+
+- ✅ M11a 通知：
+  - 事件源：回合完成 / 失败（含错误摘要）/ 待审批（打断是用户主动动作，不打扰）；例行任务结果与运行中权限请求由 Rust 广播 `routine-event`。
+  - 应用内持久条：顶栏铃铛 + 未读角标 + 面板（点击跳回会话并高亮定位、清空）；条目是内存事件流，不做引擎状态副本。
+  - 去重：同键 10s 窗口合并（归档 + 工作台双实例会对同一条引擎事件各上报一次）；权限请求按 request id 永久去重（引擎重连可能重放）。
+  - 系统通知：tauri-plugin-notification；窗口非前台才发；首次询问权限、明确拒绝后本次运行不再请求；一切失败静默降级（应用内条目不受影响）。
+- ✅ M11b 定时任务：
+  - 定义与日志：`~/.prism/routines.json`（单一事实源，原子写：临时文件 + rename）；日志 `~/.prism/routine-logs/<id>/<startedAt>.json`。
+  - cron：自研五字段解析与求值（Vixie 语义：日 / 周双限定取 OR、周日 0|7、支持 `*/n` 与列表；1500 天无解判"不可达"），不引三方 cron 库。
+  - 执行器：走引擎运行轴（新建会话 → 发提示词 → 等终态）；工作区固定 `~/.prism/routine-workspace`（数据主权：不动用户项目目录）；15 分钟超时先打断再按 timeout 收口；运行中权限请求立即进通知；日志带 sessionId，界面可"打开会话"回看完整过程。
+  - 互斥：进程内 running 集合 + 触发前查重（调度与手动触发全在同一进程内，无需跨进程文件锁）。
+  - 界面：第 5 视图「自动化」——任务列表（启停状态点）+ 详情（计划人话描述 / 下次触发倒计时 / 提示词 / 执行日志）+ 新建 / 编辑弹窗（预设 + 自定义 cron）。
+  - **调度承载决策：应用内 tick（30s），不用 launchd**。理由：触发与运行轴同进程，免安装 plist / 免独立 runner 二进制、免二进制路径漂移（dev 与打包路径不同是独立 runner 方案的长期坑）；代价是应用未运行时任务不跑。若以后要"退到后台也能跑"，再评估 launchd 或 Tauri 侧后台常驻。
+  - **错过语义（与本机睡眠场景）**：合盖休眠时进程挂起、唤醒后按 tick 窗口**合并补一次**（近似 launchd StartCalendarInterval 的平台惯例）；应用关停期间的错过**不补跑**（启动即重置窗口，避免开机连环触发）。
+- 验收（真机，2026-10-17 10:15）：探针任务「每分钟」→ 调度器到点触发 → opencode 在 routine-workspace 完成回合（4 秒，会话自动标题「收到确认」）→ 日志 `status=succeeded` + 定义回写 `lastTrigger / lastStatus / lastSessionId` → 前端收到 `routine-event`（通知中心可见）。
+- 本期不做：睡眠唤醒（pmset 提权）、Hooks 总览、任务结果的 webhook / IM 渠道。
+
+### M12 平台化 + v0.2 发布
+> 状态（2026-10-17）：**M12a 托盘 ✅ / v0.2.0 打包 ✅ / 自动更新 ⏸ 待发布源**。
+
+- 托盘（✅ M12a）：Tauri 内置 tray 轻版（自研，不引入独立常驻二进制 + LaunchAgent）——
+  单色模板图标（自研光栅化脚本 `src-tauri/icons/tray-icon.cjs`，可复跑）
+  + 菜单「状态行 / 打开 Prism / 退出 Prism」；状态由前端合并「工作台 + 归档视图」后
+  经 `tray_status` IPC 实时推送（按 sessionId 去重，防同一会话两处显示虚高）；
+  有待审批时图标旁直接显示数字，tooltip / 菜单行同步文案。
+- 关窗 ≠ 退出（✅ M12a）：`CloseRequested` 拦截为隐藏窗口——进程、定时调度、
+  通知继续跑；退出走托盘菜单或 Cmd+Q（`ExitRequested` 置位放行）；
+  Dock 点击（`Reopen`）唤起主窗口。
+- 打包（✅）：三处版本号升 0.2.0（`package.json` / `tauri.conf.json` / `Cargo.toml`）；
+  `pnpm tauri build` 产出 `.app` + `.dmg`（未签名——无 Apple Developer ID，暂不签名公证；
+  README 写清 Gatekeeper「右键 → 打开」流程）。
+- 自动更新（⏸）：Tauri updater + GitHub Releases（stable 通道）需要用户的发布源与
+  updater 签名密钥（`tauri signer generate`）；就位后：先发 v0.1 再发 v0.2，
+  完成「自动更新到 v0.2」验收。当前升级方式 = 下载新 dmg 覆盖安装。
+- 菜单与快捷键：Cmd+W（关窗 = 隐藏）/ Cmd+Q 已按 macOS 惯例工作；
+  视图快捷键与 i18n 架构预留后置（文案集中化随第一次语言需求启动）。
+- 验收：他人机器可安装（README 流程）✅；从 v0.1 自动更新到 v0.2 ⏸ 等发布源。
+
+## 4. 远期池（不排期，按兴趣取用）
+
+监控轨（卡内审批）· 工作台标签页 · 全景图导出 · 赛马 · 用量 / 成本统计 / 配额
+（Claude usage 接口、Codex app-server rateLimits）· 小组件 · 主题系统与主题库 ·
+AI 元数据（标题 / 标签 / 摘要）· 智能搜索（AI 归纳）· **文件台账（含 git 快照条）** ·
+异步任务面板 · Runner 跑单（孤儿清扫双校验）· 附件 / 图片输入 · 斜杠命令面板 ·
+会话 find bar / 锚点导航 / 置顶提示 · 输入队列（流式期间提交）· 权限四档与问答/计划交互卡 ·
+运行轴 generation 热重启 · Turn Signal · **MCP 双向桥（宿主能力暴露给 agent）** ·
+睡眠唤醒 · 多语言 · 产物预览（HTML/SVG/图片，沙箱：CSP 白名单 + 脚本按 nonce 激活）。
+
+## 5. 明确不做
+
+- 主题 AI 生成与社区投稿。
+- cc-switch 导入（第三方配置迁移链路，与 Prism 无关）。
+- 睡眠唤醒 pmset 提权。
+- 独立托盘 / 小组件二进制 + App Group 那套系统级基建（Prism 用 Tauri 内置能力做轻版）。
+- webhook / IM 通知渠道（只做系统通知 + 应用内）。
+- 遥测 / 账号系统（零遥测）。
+- 复刻第三方应用的视觉资源 / 文案 / 代码（干净房间原则）。
