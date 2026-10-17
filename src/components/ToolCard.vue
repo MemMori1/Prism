@@ -21,13 +21,23 @@ const detail = ref<ToolDetail | null>(null)
 /** live 详情优先，其次是按需拉取的 DB 详情。 */
 const resolved = computed<ToolDetail | null>(() => props.liveDetail ?? detail.value)
 
+/** 历史数据里偶有缺失 id 的工具片段，兜底避免拿空参数调后端。 */
+const callId = computed(() => {
+  const part = props.part as { callId?: string; call_id?: string }
+  return part.callId ?? part.call_id ?? ''
+})
+
 async function toggle() {
   expanded.value = !expanded.value
   if (!expanded.value || props.liveDetail || detail.value || loading.value) return
+  if (!callId.value) {
+    failed.value = '这条工具调用没有 id，无法加载详情'
+    return
+  }
   loading.value = true
   failed.value = null
   try {
-    detail.value = await api.readToolDetail(props.sessionId, props.messageId, props.part.callId)
+    detail.value = await api.readToolDetail(props.sessionId, props.messageId, callId.value)
   } catch (cause) {
     failed.value = cause instanceof Error ? cause.message : String(cause)
   } finally {

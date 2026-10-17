@@ -53,7 +53,13 @@ pub struct SessionSummary {
 
 /// 时间线记录里的一个片段。
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+// `rename_all` 只作用于变体名（→ kind 的取值），变体里的字段要单独声明
+// `rename_all_fields`，否则 call_id 会以 snake_case 发到前端，调用详情时报缺参。
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum TimelinePart {
     Text { text: String },
     Reasoning { text: String },
@@ -168,4 +174,25 @@ pub struct SearchStats {
     pub indexed_messages: i64,
     /// 最近一次索引构建时间（毫秒时间戳；从未构建为 0）。
     pub updated_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 前端按 `part.callId` 取工具调用 id；字段名必须是 camelCase，
+    /// 否则展开详情时 invoke 会缺 `callId` 参数。
+    #[test]
+    fn tool_part_serializes_camel_case_fields() {
+        let part = TimelinePart::Tool {
+            name: "shell".to_string(),
+            status: Some("completed".to_string()),
+            summary: None,
+            call_id: "call_1".to_string(),
+        };
+        let json = serde_json::to_string(&part).expect("序列化工具片段");
+        assert!(json.contains("\"kind\":\"tool\""), "kind 取值：{json}");
+        assert!(json.contains("\"callId\":\"call_1\""), "callId 字段：{json}");
+        assert!(!json.contains("call_id"), "不应出现 snake_case：{json}");
+    }
 }
