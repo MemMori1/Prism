@@ -29,19 +29,23 @@
   Tauri 会自动走 notarytool 公证。
 - 效果：下载即开，无 Gatekeeper 提示。
 
-## 4. 自动更新（Tauri updater + GitHub Releases）
+## 4. 自动更新（Tauri updater + GitHub Pages 镜像 / Releases 兜底）
 
-已接入。发布源 = GitHub Releases（公开仓库，端点免鉴权）：
+已接入。更新清单有两个端点（`tauri.conf.json` 的 `plugins.updater.endpoints`，按序尝试；
+清单里的安装包 URL 指向 gh-pages 镜像）：
 
-    https://github.com/MemMori1/Prism/releases/latest/download/latest.json
+    1) https://memmori1.github.io/Prism/latest.json  （首选：Fastly CDN，国内可达性更好）
+    2) https://github.com/MemMori1/Prism/releases/latest/download/latest.json  （兜底）
 
 - 签名密钥：私钥在开发机 `~/.prism/updater.key`（**绝不入库**）；公钥已写入
   `tauri.conf.json` 的 `plugins.updater.pubkey`（公开信息）。
 - 一条命令发版：`scripts/release.sh`（校验三处版本号一致 → 构建 + 签名 →
   产物收拢到 `release-artifacts/` 并生成 `latest.json`）。
-- 上传 Release（tag 用 `v<版本>`，如 `v0.2.0`）：
-  - 有 gh CLI：`scripts/release.sh --publish`（首次先 `gh auth login`）；
-  - 或网页：Releases → Draft a new release → 拖入 `release-artifacts/` 的全部文件。
+- 发布（tag 用 `v<版本>`，如 `v0.2.1`）：
+  - 有 gh CLI：`scripts/release.sh --publish`——创建 GitHub Release **并自动强制推送
+    gh-pages 镜像**（latest.json + dmg + app.tar.gz），首次先 `gh auth login`；
+  - 手工路径：Releases 网页拖入 `release-artifacts/` 全部文件后，再把同批文件
+    推送到 gh-pages 分支（镜像）——只发 Release 时旧版用户仍可经兜底端点更新。
 - 客户端：设置面板 →「更新」区块 → 检查更新 / 下载并安装 / 重启生效。
 - 验收闭环：装旧版 → 发布新版（版本号 +1）→ 点「检查更新」→ 下载重启后版本已更新。
 

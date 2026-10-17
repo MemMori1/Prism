@@ -3,7 +3,7 @@
 #
 # 用法：
 #   scripts/release.sh            构建到 release-artifacts/（不上传）
-#   scripts/release.sh --publish  构建后经 gh CLI 创建 GitHub Release 并上传
+#   scripts/release.sh --publish  构建后经 gh CLI 创建 GitHub Release 并同步 gh-pages 镜像
 #
 # 前置：
 #   - 签名私钥在 ~/.prism/updater.key（可用 PRISM_UPDATER_KEY 覆盖路径）
@@ -15,6 +15,9 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
 REPO="MemMori1/Prism"
+# 更新清单镜像（GitHub Pages / Fastly CDN）：updater 首选端点与安装包下载源，
+# 国内网络对 github.com 直连不稳定，Releases 作为兜底端点。
+PAGES_URL="https://memmori1.github.io/Prism"
 KEY="${PRISM_UPDATER_KEY:-$HOME/.prism/updater.key}"
 PUBLISH=0
 [ "${1:-}" = "--publish" ] && PUBLISH=1
@@ -60,7 +63,7 @@ DMG_NAME="Prism_${VERSION}_${ARCH}.dmg"
 cp "$APP_TAR" "$DIST/$TAR_NAME"
 cp "$DMG" "$DIST/$DMG_NAME"
 
-URL="https://github.com/$REPO/releases/download/$TAG/$TAR_NAME"
+URL="$PAGES_URL/$TAR_NAME"
 SIG=$(cat "$APP_TAR.sig")
 node -e '
 const fs = require("fs");
@@ -88,6 +91,22 @@ if [ "$PUBLISH" = "1" ]; then
     --title "Prism $TAG" \
     --notes "Prism $TAG"
   echo "==> 已发布：https://github.com/$REPO/releases/tag/$TAG"
+
+  # ---- 同步镜像到 gh-pages（更新检查 / 下载首选走 Fastly CDN）----
+  PAGES_DIR="$(mktemp -d)"
+  cp "$DIST/latest.json" "$DIST/$TAR_NAME" "$DIST/$DMG_NAME" "$PAGES_DIR/"
+  touch "$PAGES_DIR/.nojekyll"
+  git -C "$PAGES_DIR" init -q -b gh-pages
+  git -C "$PAGES_DIR" add -A
+  git -C "$PAGES_DIR" -c user.name="Prism Release" \
+    -c user.email="prism-release@users.noreply.github.com" \
+    commit -qm "release: $TAG"
+  if git -C "$PAGES_DIR" push --force "$(git remote get-url --push origin)" gh-pages; then
+    echo "==> 镜像已更新：$PAGES_URL/latest.json"
+  else
+    echo "⚠️ gh-pages 同步失败：更新检查将退回 GitHub Releases 端点" >&2
+  fi
+  rm -rf "$PAGES_DIR"
 else
   echo
   echo "上传（二选一）："
