@@ -48,12 +48,26 @@
 }
 
 .refresh-btn {
-  padding: 4px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  padding: 0;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--muted);
-  transition: all 0.15s ease;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.refresh-btn svg {
+  width: 15px;
+  height: 15px;
 }
 
 .refresh-btn:hover:not(:disabled) {
@@ -62,8 +76,24 @@
 }
 
 .refresh-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.6;
   cursor: default;
+}
+
+.refresh-btn.is-busy svg {
+  animation: refresh-spin 0.8s linear infinite;
+}
+
+@keyframes refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .refresh-btn.is-busy svg {
+    animation: none;
+  }
 }
 
 
@@ -74,15 +104,24 @@
 }
 
 .notify-btn {
+  display: inline-flex;
   position: relative;
-  padding: 4px 10px;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
+  line-height: 1;
   transition: all 0.15s ease;
+}
+
+.notify-bell {
+  width: 16px;
+  height: 16px;
 }
 
 .notify-btn:hover {

@@ -174,6 +174,7 @@ function openInWorkbench(sessionId: string) {
 
 const projects = ref<ProjectItem[]>([])
 const projectsLoading = ref(false)
+const refreshing = ref(false)
 const selectedProjectId = ref<string | null>(null)
 
 const sessions = ref<SessionSummary[]>([])
@@ -321,17 +322,23 @@ async function onSessionSettled() {
 }
 
 async function reload() {
+  if (refreshing.value) return
+  refreshing.value = true
   try {
-    health.value = await api.engineHealth()
-  } catch (cause) {
-    reportError(cause)
-  }
-  await loadProjects()
-  const first = projects.value[0]
-  if (!selectedProjectId.value && first) {
-    await selectProject(first.id)
-  } else if (selectedProjectId.value) {
-    await loadSessions(selectedProjectId.value)
+    try {
+      health.value = await api.engineHealth()
+    } catch (cause) {
+      reportError(cause)
+    }
+    await loadProjects()
+    const first = projects.value[0]
+    if (!selectedProjectId.value && first) {
+      await selectProject(first.id)
+    } else if (selectedProjectId.value) {
+      await loadSessions(selectedProjectId.value)
+    }
+  } finally {
+    refreshing.value = false
   }
 }
 
@@ -376,9 +383,23 @@ onBeforeUnmount(stopRoutineEvents)
           <button
             class="notify-btn"
             title="通知：回合完成 / 失败 / 待审批"
+            aria-label="通知"
+            :aria-expanded="notifyOpen"
             @click="toggleNotify"
           >
-            🔔
+            <svg
+              class="notify-bell"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+              <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+            </svg>
             <span v-if="unreadCount" class="notify-badge">
               {{ unreadCount > 99 ? '99+' : unreadCount }}
             </span>
@@ -418,7 +439,20 @@ onBeforeUnmount(stopRoutineEvents)
           </template>
         </div>
 
-        <button class="refresh-btn" :disabled="projectsLoading" @click="reload">刷新</button>
+        <button
+          class="refresh-btn"
+          :class="{ 'is-busy': refreshing }"
+          :disabled="refreshing"
+          :aria-busy="refreshing"
+          aria-label="重新扫描引擎、项目与会话"
+          title="重新扫描引擎、项目与会话"
+          @click="reload"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 11a8 8 0 1 1-2.3-5.6" />
+            <path d="M20 4v7h-7" />
+          </svg>
+        </button>
       </header>
 
       <transition name="fade">

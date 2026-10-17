@@ -175,6 +175,30 @@
   color: var(--accent-text);
 }
 
+.kind-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--muted);
+}
+
+.kind-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.nav-item:hover .kind-icon {
+  color: var(--text);
+}
+
+.nav-item.active .kind-icon,
+.asset-row.active .kind-icon {
+  color: var(--accent-text);
+}
+
 .filter {
   width: 100%;
   padding: 5px 9px;
@@ -298,6 +322,18 @@
   font-family: var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chip-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chip-kind .kind-icon {
+  width: 12px;
+  height: 12px;
+  color: var(--muted);
 }
 
 .detail-body {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import { parseSnippet, type SnippetSegment } from '../search'
 import { rangeToSince, type TimeRange } from '../sessionList'
@@ -25,6 +25,19 @@ const searched = ref(false)
 const tookMs = ref(0)
 const stats = ref<SearchStats | null>(null)
 const updating = ref(false)
+const inputEl = ref<HTMLInputElement | null>(null)
+
+const indexSummary = computed(() => {
+  const current = stats.value
+  if (!current) return '尚未建立索引'
+  return `${current.indexedSessions.toLocaleString('zh-CN')} 个会话 · ${current.indexedMessages.toLocaleString('zh-CN')} 条消息`
+})
+
+const indexUpdated = computed(() => {
+  const current = stats.value
+  if (!current || !current.updatedAt) return '尚未更新'
+  return `更新于 ${relativeTime(current.updatedAt)}`
+})
 
 /** 防乱序：只认最后一次查询的响应。 */
 let queryToken = 0
@@ -56,20 +69,37 @@ async function updateIndex(silent = false): Promise<void> {
 }
 
 function scheduleSearch(): void {
-  if (debounceTimer !== null) window.clearTimeout(debounceTimer)
+  if (debounceTimer !== null) {
+    window.clearTimeout(debounceTimer)
+    debounceTimer = null
+  }
+  if (!term.value.trim()) {
+    void runSearch()
+    return
+  }
   debounceTimer = window.setTimeout(() => {
     void runSearch()
   }, 280)
 }
 
+function submitSearch(): void {
+  if (debounceTimer !== null) {
+    window.clearTimeout(debounceTimer)
+    debounceTimer = null
+  }
+  void runSearch()
+}
+
 async function runSearch(): Promise<void> {
+  const token = ++queryToken
   const text = term.value.trim()
   if (!text) {
     results.value = []
     searched.value = false
+    searching.value = false
+    tookMs.value = 0
     return
   }
-  const token = ++queryToken
   searching.value = true
   const startedAt = performance.now()
   try {
@@ -89,6 +119,20 @@ async function runSearch(): Promise<void> {
   }
 }
 
+function clearSearch(): void {
+  queryToken += 1
+  if (debounceTimer !== null) {
+    window.clearTimeout(debounceTimer)
+    debounceTimer = null
+  }
+  term.value = ''
+  results.value = []
+  searched.value = false
+  searching.value = false
+  tookMs.value = 0
+  inputEl.value?.focus()
+}
+
 function snippetSegments(hit: SearchHit): SnippetSegment[] {
   return parseSnippet(hit.snippet)
 }
@@ -105,6 +149,10 @@ function roleLabel(role: string | null): string {
   return '标题'
 }
 
+function openHint(hit: SearchHit): string {
+  return hit.messageId ? '打开会话并定位到该消息' : '打开会话'
+}
+
 watch([term, projectId, range, onlyTitle], scheduleSearch)
 
 onMounted(async () => {
@@ -117,87 +165,190 @@ onMounted(async () => {
 
 <template>
   <section class="search-pane">
-    <div class="search-bar">
-      <span class="search-glyph" aria-hidden="true">⌕</span>
-      <input
-        v-model="term"
-        class="search-input"
-        type="search"
-        placeholder="搜索全部会话内容（支持中文子串）…"
-        spellcheck="false"
-      />
-      <button
-        class="index-btn"
-        :disabled="updating"
-        title="增量更新本地索引（只读引擎数据，索引存在 ~/.prism）"
-        @click="updateIndex()"
-      >
-        {{ updating ? '索引中…' : '刷新索引' }}
-      </button>
-    </div>
-
-    <div class="search-filters">
-      <select v-model="projectId" class="mini-select" title="按项目过滤">
-        <option value="">全部项目</option>
-        <option v-for="project in projects" :key="project.id" :value="project.id">
-          {{ project.name || basename(project.worktree) }}
-        </option>
-      </select>
-      <select v-model="range" class="mini-select" title="按时间范围过滤">
-        <option value="all">全部时间</option>
-        <option value="today">今天</option>
-        <option value="week">本周</option>
-        <option value="month">本月</option>
-      </select>
-      <label class="only-title">
-        <input v-model="onlyTitle" type="checkbox" />
-        仅标题
-      </label>
-      <span v-if="stats" class="index-stats" :title="`索引位置：~/.prism/search.db`">
-        {{ stats.indexedMessages }} 条消息 / {{ stats.indexedSessions }} 个会话 ·
-        {{ stats.updatedAt ? `更新于 ${relativeTime(stats.updatedAt)}` : '尚未建立索引' }}
-      </span>
-    </div>
-
-    <div class="results">
-      <div v-if="!searched && !searching" class="search-hint">
-        输入关键词检索全部会话。索引由 Prism 本地维护，引擎数据只读。
-      </div>
-      <div v-else-if="searching && !results.length" class="search-hint">搜索中…</div>
-      <div v-else-if="searched && !results.length" class="search-hint">
-        没有找到匹配（{{ tookMs }}ms）
-      </div>
-
-      <template v-else>
-        <div class="results-meta">
-          {{ results.length }} 条命中 · {{ tookMs }}ms
-          <span v-if="searching" class="results-live">更新中…</span>
+    <div class="search-shell">
+      <header class="search-head">
+        <div class="search-head-copy">
+          <h1 class="search-title">搜索</h1>
+          <p class="search-subtitle">在全部会话的标题和消息中检索</p>
         </div>
+        <div class="index-state" title="索引位置：~/.prism/search.db">
+          <span class="index-dot" :class="{ 'is-ready': stats && stats.indexedSessions > 0 }"></span>
+          <span class="index-text">
+            {{ indexSummary }}
+            <template v-if="stats">
+              <span class="index-sep">·</span>
+              <span class="index-time">{{ indexUpdated }}</span>
+            </template>
+          </span>
+        </div>
+      </header>
+
+      <div class="search-field" :class="{ 'is-busy': searching }">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.5" />
+          <path d="m16 16 4.5 4.5" />
+        </svg>
+        <input
+          ref="inputEl"
+          v-model="term"
+          class="search-input"
+          type="search"
+          placeholder="搜索消息内容、会话标题…"
+          spellcheck="false"
+          @keydown.enter="submitSearch"
+          @keydown.esc="clearSearch"
+        />
+        <span v-if="searching" class="search-spinner" aria-hidden="true"></span>
         <button
-          v-for="(hit, index) in results"
-          :key="`${hit.sessionId}-${hit.messageId ?? 'title'}-${index}`"
-          class="result-item"
-          :title="`打开会话定位到该消息`"
-          @click="emit('openHit', hit)"
+          v-if="term"
+          type="button"
+          class="search-clear"
+          title="清空搜索"
+          aria-label="清空搜索"
+          @click="clearSearch"
         >
-          <div class="result-head">
-            <span class="result-role" :class="`role-${hit.role ?? 'title'}`">
-              {{ roleLabel(hit.role) }}
-            </span>
-            <span class="result-title">{{ hit.sessionTitle || '未命名会话' }}</span>
-            <span class="result-project">{{ projectLabel(hit.projectId) }}</span>
-            <span class="result-time">{{ relativeTime(hit.timeCreated) }}</span>
-          </div>
-          <div class="result-snippet">
-            <span
-              v-for="(segment, segIndex) in snippetSegments(hit)"
-              :key="segIndex"
-              :class="{ 'seg-hit': segment.hit }"
-              >{{ segment.text }}</span
-            >
-          </div>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18" />
+          </svg>
         </button>
-      </template>
+      </div>
+
+      <div class="search-controls">
+        <div class="filter-group">
+          <label class="filter-chip">
+            <span class="filter-label">项目</span>
+            <select v-model="projectId" class="filter-select" aria-label="按项目过滤">
+              <option value="">全部项目</option>
+              <option v-for="project in projects" :key="project.id" :value="project.id">
+                {{ project.name || basename(project.worktree) }}
+              </option>
+            </select>
+            <svg class="filter-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </label>
+
+          <label class="filter-chip">
+            <span class="filter-label">时间</span>
+            <select v-model="range" class="filter-select" aria-label="按时间范围过滤">
+              <option value="all">全部时间</option>
+              <option value="today">今天</option>
+              <option value="week">本周</option>
+              <option value="month">本月</option>
+            </select>
+            <svg class="filter-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </label>
+
+          <label class="filter-toggle" :class="{ 'is-active': onlyTitle }">
+            <input v-model="onlyTitle" type="checkbox" class="toggle-input" />
+            <span class="toggle-box" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m5 12 4.5 4.5L19 7" />
+              </svg>
+            </span>
+            <span>仅标题</span>
+          </label>
+        </div>
+
+        <button
+          class="index-btn"
+          :class="{ 'is-busy': updating }"
+          :disabled="updating"
+          title="增量更新本地索引（只读引擎数据，索引存在 ~/.prism）"
+          @click="updateIndex()"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 11a8 8 0 1 0-2.3 5.7" />
+            <path d="M20 5v6h-6" />
+          </svg>
+          {{ updating ? '索引更新中…' : '刷新索引' }}
+        </button>
+      </div>
+
+      <div class="results">
+        <div v-if="!searched && !searching" class="search-empty">
+          <span class="empty-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5" />
+              <path d="m16 16 4.5 4.5" />
+            </svg>
+          </span>
+          <p class="empty-title">搜索全部会话</p>
+          <p class="empty-text">输入关键词检索消息内容。索引由 Prism 在本地维护，引擎数据只读。</p>
+        </div>
+
+        <div v-else-if="searching && !results.length" class="search-empty">
+          <span class="empty-spinner" aria-hidden="true"></span>
+          <p class="empty-title">正在搜索…</p>
+          <p class="empty-text">正在最后确认索引状态。</p>
+        </div>
+
+        <div v-else-if="searched && !results.length" class="search-empty">
+          <span class="empty-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5" />
+              <path d="m16 16 4.5 4.5" />
+              <path d="m8.5 8.5 5 5M13.5 8.5l-5 5" />
+            </svg>
+          </span>
+          <p class="empty-title">没有找到「{{ term.trim() }}」</p>
+          <p class="empty-text">试试更短的关键词，或放宽项目与时间范围。</p>
+        </div>
+
+        <template v-else>
+          <div class="results-meta">
+            <span><strong>{{ results.length }}</strong> 条结果</span>
+            <span class="results-sep">·</span>
+            <span>{{ tookMs }} ms</span>
+            <span v-if="searching" class="results-live">
+              <span class="mini-spinner" aria-hidden="true"></span>更新中
+            </span>
+            <span class="results-hint">点击结果打开会话</span>
+          </div>
+
+          <div class="result-list">
+            <button
+              v-for="(hit, index) in results"
+              :key="`${hit.sessionId}-${hit.messageId ?? 'title'}-${index}`"
+              class="result-item"
+              :title="openHint(hit)"
+              :aria-label="`打开会话：${hit.sessionTitle || '未命名会话'}`"
+              @click="emit('openHit', hit)"
+            >
+              <span class="result-head">
+                <span class="result-role" :class="`role-${hit.role ?? 'title'}`">
+                  {{ roleLabel(hit.role) }}
+                </span>
+                <span class="result-title">{{ hit.sessionTitle || '未命名会话' }}</span>
+                <span class="result-time">{{ relativeTime(hit.timeCreated) }}</span>
+              </span>
+              <span class="result-snippet">
+                <template v-for="(segment, segIndex) in snippetSegments(hit)" :key="segIndex">
+                  <mark v-if="segment.hit">{{ segment.text }}</mark>
+                  <span v-else>{{ segment.text }}</span>
+                </template>
+              </span>
+              <span class="result-foot">
+                <span class="result-project">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+                  </svg>
+                  {{ projectLabel(hit.projectId) }}
+                </span>
+                <span class="result-open">
+                  打开会话
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M7 17 17 7" />
+                    <path d="M9 7h8v8" />
+                  </svg>
+                </span>
+              </span>
+            </button>
+          </div>
+        </template>
+      </div>
     </div>
   </section>
 </template>

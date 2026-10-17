@@ -4,6 +4,7 @@ import { api } from '../api'
 import { renderMarkdown } from '../markdown'
 import { relativeTime } from '../format'
 import { commandLine, engineLabel, groupAssets, groupMcp, kindLabel, scopeLabel } from '../workshop'
+import { assetKindIcon } from '../assetIcons'
 import type { AssetGroup } from '../workshop'
 import type { AssetFile, AssetItem, McpProbeResult, McpServer } from '../types'
 
@@ -315,6 +316,11 @@ onMounted(load)
               :class="{ active: group.key === activeKey }"
               @click="selectGroup(group.key)"
             >
+              <span class="kind-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path v-for="path in assetKindIcon(group.kind)" :key="path" :d="path" />
+                </svg>
+              </span>
               <span>{{ group.label }}</span>
               <span class="count">{{ group.items.length }}</span>
             </button>
@@ -360,7 +366,14 @@ onMounted(load)
             :class="{ active: entry.path === selected?.path }"
             @click="selectItem(entry)"
           >
-            <span class="asset-name">{{ entry.name }}</span>
+            <span class="asset-name">
+              <span class="kind-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path v-for="path in assetKindIcon(entry.kind)" :key="path" :d="path" />
+                </svg>
+              </span>
+              {{ entry.name }}
+            </span>
             <span class="asset-meta">
               <span class="scope">{{ scopeLabel(entry) }}</span>
               <span>{{ relativeTime(entry.updatedAt) }}</span>
@@ -413,7 +426,14 @@ onMounted(load)
         </div>
         <div class="detail-chips">
           <span class="chip">{{ engineLabel(selected.engine) }}</span>
-          <span class="chip">{{ kindLabel(selected.kind) }}</span>
+          <span class="chip chip-kind">
+            <span class="kind-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path v-for="path in assetKindIcon(selected.kind)" :key="path" :d="path" />
+              </svg>
+            </span>
+            {{ kindLabel(selected.kind) }}
+          </span>
           <span class="chip">{{ scopeLabel(selected) }}</span>
           <span v-if="selected.project" class="chip mono" :title="selected.project">
             {{ selected.project }}
