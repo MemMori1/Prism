@@ -21,6 +21,7 @@ const errorText = ref<string | null>(null)
 
 const opencode = computed(() => engines.value.find(item => item.engineId === 'opencode') ?? null)
 const codex = computed(() => engines.value.find(item => item.engineId === 'codex') ?? null)
+const claude = computed(() => engines.value.find(item => item.engineId === 'claude') ?? null)
 
 async function load() {
   loading.value = true
@@ -142,6 +143,38 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
               <span class="info-key">说明</span>
               <span class="info-value">
                 浏览与运行均已接入（发消息走本机 codex app-server，继承你的配置）
+              </span>
+            </div>
+          </div>
+
+          <div class="engine-block">
+            <div class="engine-name">
+              Claude Code
+              <span class="engine-tag">历史浏览</span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">状态</span>
+              <span class="info-value">
+                <span class="status-dot" :class="`tone-${statusOf(claude).tone}`" />
+                {{ statusOf(claude).label }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">CLI</span>
+              <span class="info-value mono" :title="claude?.cliPath ?? ''">
+                {{ claude?.cliPath ?? '未找到（安装 claude CLI 后可接入运行轴）' }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">档案目录</span>
+              <span class="info-value mono" :title="claude?.databasePath ?? ''">
+                {{ claude?.databasePath ?? '未找到（先用 Claude Code 跑过会话）' }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">说明</span>
+              <span class="info-value">
+                浏览已接入（会话档案 JSONL）；运行轴待本机安装 claude CLI 后接入
               </span>
             </div>
           </div>

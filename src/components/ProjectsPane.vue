@@ -15,6 +15,7 @@ const emit = defineEmits<{
 const ENGINE_LABELS: Record<string, string> = {
   opencode: 'OC',
   codex: 'CX',
+  claude: 'CC',
 }
 
 function engineLabel(engine: string): string {
@@ -33,7 +34,7 @@ function engineLabel(engine: string): string {
       <div v-if="loading && !projects.length" class="pane-empty">加载中…</div>
       <div v-else-if="!projects.length" class="pane-empty">
         未发现任何项目<br />
-        <span class="hint">用 OpenCode 跑过会话后会自动出现</span>
+        <span class="hint">用 OpenCode、Codex 或 Claude Code 跑过会话后会自动出现</span>
       </div>
 
       <button
@@ -152,6 +153,11 @@ function engineLabel(engine: string): string {
 .engine-badge.engine-codex {
   color: var(--amber);
   border-color: color-mix(in srgb, var(--amber) 35%, var(--border));
+}
+
+.engine-badge.engine-claude {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 35%, var(--border));
 }
 
 .project-item.active .project-name {

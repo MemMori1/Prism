@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::engines::claude;
 use crate::engines::codex;
 use crate::engines::codex::runtime::Runtime as CodexRuntime;
 use crate::engines::core::{
@@ -37,10 +38,13 @@ pub async fn engine_health() -> Result<Vec<EngineHealth>, String> {
     let opencode_cli = opencode::locator::cli_path();
     let codex_db = codex::locator::state_db();
     let codex_cli = codex::locator::cli_path();
+    // Claude 的历史数据是目录（存在才算就绪）；CLI 决定运行轴（后置）。
+    let claude_root = claude::locator::projects_dir().filter(|path| path.is_dir());
+    let claude_cli = claude::locator::cli_path();
     #[cfg(debug_assertions)]
     println!(
-        "[prism] engine_health: opencode db={:?} cli={:?} / codex db={:?} cli={:?}",
-        opencode_db, opencode_cli, codex_db, codex_cli
+        "[prism] engine_health: opencode db={:?} cli={:?} / codex db={:?} cli={:?} / claude dir={:?} cli={:?}",
+        opencode_db, opencode_cli, codex_db, codex_cli, claude_root, claude_cli
     );
     Ok(vec![
         EngineHealth {
@@ -58,6 +62,14 @@ pub async fn engine_health() -> Result<Vec<EngineHealth>, String> {
             database_path: codex_db.map(|path| path.display().to_string()),
             cli_path: codex_cli.map(|path| path.display().to_string()),
         },
+        EngineHealth {
+            engine_id: claude::locator::ENGINE_ID.to_string(),
+            display_name: claude::locator::DISPLAY_NAME.to_string(),
+            // 浏览历史只要求档案目录存在；CLI 决定运行轴（后置里程碑）。
+            ready: claude_root.is_some(),
+            database_path: claude_root.map(|path| path.display().to_string()),
+            cli_path: claude_cli.map(|path| path.display().to_string()),
+        },
     ])
 }
 
@@ -66,6 +78,7 @@ pub async fn engine_health() -> Result<Vec<EngineHealth>, String> {
 pub async fn list_projects() -> Result<Vec<ProjectItem>, String> {
     let opencode_db = opencode::locator::database_path();
     let codex_db = codex::locator::state_db();
+    let claude_root = claude::locator::projects_dir();
     let items = tauri::async_runtime::spawn_blocking(move || {
         let mut items: Vec<ProjectItem> = Vec::new();
         if let Some(db_path) = opencode_db {
@@ -78,6 +91,12 @@ pub async fn list_projects() -> Result<Vec<ProjectItem>, String> {
             match codex::state::list_projects(&db_path) {
                 Ok(mut list) => items.append(&mut list),
                 Err(cause) => eprintln!("[prism] list_projects(codex) 失败：{cause}"),
+            }
+        }
+        if let Some(root) = claude_root {
+            match claude::transcript::list_projects(&root) {
+                Ok(mut list) => items.append(&mut list),
+                Err(cause) => eprintln!("[prism] list_projects(claude) 失败：{cause}"),
             }
         }
         items.sort_by(|a, b| b.time_updated.cmp(&a.time_updated));
@@ -108,6 +127,20 @@ pub async fn list_sessions(
         .map_err(|cause| cause.to_string())?;
     }
 
+    if claude::transcript::is_claude_project(&project_id) {
+        let root = claude::locator::projects_dir()
+            .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
+        let dir_name = claude::transcript::dir_name_of(&project_id)
+            .ok_or_else(|| "非法的 Claude 项目 id".to_string())?
+            .to_string();
+        let limit = limit.unwrap_or(500).clamp(1, 1000);
+        return tauri::async_runtime::spawn_blocking(move || {
+            claude::transcript::list_sessions(&root, &dir_name, limit)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
+
     let db_path = opencode_db_path()?;
     let limit = limit
         .unwrap_or_else(opencode::db::session_limit)
@@ -122,6 +155,18 @@ pub async fn list_sessions(
 /// 按 id 读取单个会话概要（工作台恢复 / 刷新列时用）。
 #[tauri::command]
 pub async fn session_summary(session_id: String) -> Result<Option<SessionSummary>, String> {
+    if claude::transcript::is_claude_session(&session_id) {
+        let root = claude::locator::projects_dir()
+            .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
+        let uuid = claude::transcript::session_uuid_of(&session_id)
+            .unwrap_or_default()
+            .to_string();
+        return tauri::async_runtime::spawn_blocking(move || {
+            claude::transcript::session_summary(&root, &uuid)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
     if codex::state::is_codex_session(&session_id) {
         let db_path = codex_state_db_path()?;
         let thread_id = codex::state::thread_id_of(&session_id)
@@ -151,6 +196,30 @@ pub async fn read_timeline(
     let limit = limit
         .unwrap_or_else(opencode::db::timeline_page_size)
         .clamp(1, 500);
+
+    if claude::transcript::is_claude_session(&session_id) {
+        let root = claude::locator::projects_dir()
+            .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
+        let uuid = claude::transcript::session_uuid_of(&session_id)
+            .unwrap_or_default()
+            .to_string();
+        let page = tauri::async_runtime::spawn_blocking(move || {
+            let Some((_, path)) = claude::transcript::find_session_file(&root, &uuid) else {
+                return Err("Claude 会话档案不存在".to_string());
+            };
+            claude::transcript::read_timeline(&path, before_seq, limit)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+        let page = page?;
+        #[cfg(debug_assertions)]
+        println!(
+            "[prism] read_timeline(claude) -> {} 条 (has_more={})",
+            page.records.len(),
+            page.has_more
+        );
+        return Ok(page);
+    }
 
     if codex::state::is_codex_session(&session_id) {
         let db_path = codex_state_db_path()?;
@@ -197,6 +266,22 @@ pub async fn read_tool_detail(
     message_id: String,
     call_id: String,
 ) -> Result<ToolDetail, String> {
+    if claude::transcript::is_claude_session(&session_id) {
+        let root = claude::locator::projects_dir()
+            .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
+        let uuid = claude::transcript::session_uuid_of(&session_id)
+            .unwrap_or_default()
+            .to_string();
+        return tauri::async_runtime::spawn_blocking(move || {
+            let Some((_, path)) = claude::transcript::find_session_file(&root, &uuid) else {
+                return Err("Claude 会话档案不存在".to_string());
+            };
+            claude::transcript::read_tool_detail(&path, &message_id, &call_id)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
+
     if codex::state::is_codex_session(&session_id) {
         let db_path = codex_state_db_path()?;
         let thread_id = codex::state::thread_id_of(&session_id)
@@ -261,16 +346,21 @@ pub async fn session_create(
 ) -> Result<CreatedSession, String> {
     #[cfg(debug_assertions)]
     println!("[prism] session_create -> {directory}（engine={:?}）", engine);
-    if engine.as_deref() == Some("codex") {
-        let codex_runtime = codex_runtime.inner().clone();
-        return tauri::async_runtime::spawn_blocking(move || codex_runtime.create_session(&directory))
-            .await
-            .map_err(|cause| cause.to_string())?;
+    match engine.as_deref() {
+        None | Some("opencode") => {
+            let runtime = runtime.inner().clone();
+            tauri::async_runtime::spawn_blocking(move || runtime.create_session(&directory))
+                .await
+                .map_err(|cause| cause.to_string())?
+        }
+        Some("codex") => {
+            let codex_runtime = codex_runtime.inner().clone();
+            tauri::async_runtime::spawn_blocking(move || codex_runtime.create_session(&directory))
+                .await
+                .map_err(|cause| cause.to_string())?
+        }
+        Some(other) => Err(format!("该引擎（{other}）的运行轴尚在开发，暂不能新建会话")),
     }
-    let runtime = runtime.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || runtime.create_session(&directory))
-        .await
-        .map_err(|cause| cause.to_string())?
 }
 
 /// 发送一条用户消息，返回用户消息 id（Codex 无此 id，返回空串）。

@@ -40,12 +40,16 @@ interface ToolInput {
   workdir?: string
   code?: string
   path?: string
+  /** Claude Code 的入参风格（snake_case）。 */
+  file_path?: string
   pattern?: string
   query?: string
   url?: string
   content?: string
   oldString?: string
   newString?: string
+  old_string?: string
+  new_string?: string
   description?: string
   prompt?: string
   id?: string
@@ -76,7 +80,7 @@ const statusInfo = computed(() => {
 /** 常见工具给一个小图标字符，未知工具用通用符号。 */
 const toolGlyph = computed(() => {
   const name = props.part.name.toLowerCase()
-  if (name.includes('shell') || name.includes('exec')) return '❯'
+  if (name.includes('shell') || name.includes('exec') || name.includes('bash')) return '❯'
   if (name.includes('read')) return '◉'
   if (name.includes('edit') || name.includes('write') || name.includes('patch')) return '✎'
   if (name.includes('grep') || name.includes('search') || name.includes('glob')) return '⌕'
@@ -95,6 +99,7 @@ const primaryBlocks = computed<Array<{ label: string; text: string }>>(() => {
 
   switch (props.part.name) {
     case 'shell':
+    case 'bash':
       push('命令', source.command)
       push('工作目录', source.workdir)
       break
@@ -102,14 +107,14 @@ const primaryBlocks = computed<Array<{ label: string; text: string }>>(() => {
       push('代码', source.code)
       break
     case 'read':
-      push('文件', source.path)
+      push('文件', source.path ?? source.file_path)
       break
     case 'write':
-      push('写入', source.path)
+      push('写入', source.path ?? source.file_path)
       push('内容', source.content)
       break
     case 'edit':
-      push('文件', source.path)
+      push('文件', source.path ?? source.file_path)
       break
     case 'grep':
     case 'glob':
@@ -133,6 +138,7 @@ const primaryBlocks = computed<Array<{ label: string; text: string }>>(() => {
       break
     }
     case 'subagent':
+    case 'task':
       push('描述', source.description)
       push('指令', source.prompt)
       break
@@ -158,19 +164,20 @@ const diffFiles = computed(() => {
 
 const fileLabel = (file: string) => basename(file) || file
 
-/** edit 未带 patch 时的兜底：修改前 / 修改后对照。 */
+/** edit 未带 patch 时的兜底：修改前 / 修改后对照（兼容 Claude 的 snake_case 入参）。 */
 const editFallback = computed(() => {
   if (props.part.name !== 'edit' || diffFiles.value.length > 0) return null
-  const { oldString, newString } = input.value
-  if (typeof oldString !== 'string' && typeof newString !== 'string') return null
-  return { before: oldString ?? '（空）', after: newString ?? '（空）' }
+  const before = input.value.oldString ?? input.value.old_string
+  const after = input.value.newString ?? input.value.new_string
+  if (typeof before !== 'string' && typeof after !== 'string') return null
+  return { before: before ?? '（空）', after: after ?? '（空）' }
 })
 
 /** 主块已完整覆盖的简单工具不再重复展示原始 JSON。 */
 const rawInput = computed(() => {
   const source = input.value
   if (!source || Object.keys(source).length === 0) return null
-  if (['read', 'grep', 'glob', 'webfetch', 'shell', 'write'].includes(props.part.name)) {
+  if (['read', 'grep', 'glob', 'webfetch', 'shell', 'bash', 'write'].includes(props.part.name)) {
     return null
   }
   return JSON.stringify(source, null, 2)

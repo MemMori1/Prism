@@ -26,10 +26,14 @@ const emit = defineEmits<{
 const sortKey = ref<SessionSort>('recent')
 const rangeKey = ref<TimeRange>('all')
 
-/** 两个引擎都已接入运行轴：有项目即可新建会话。 */
-const canCreate = computed(() => !!props.project)
+/** 已接入运行轴的引擎才可从 Prism 新建会话（Claude Code 待 M9）。 */
+const CREATABLE_ENGINES = new Set(['opencode', 'codex'])
+const canCreate = computed(
+  () => !!props.project && CREATABLE_ENGINES.has(props.project.engine),
+)
 const newButtonTitle = computed(() => {
   if (!props.project) return '先选择项目'
+  if (!canCreate.value) return '该引擎暂只能浏览（运行轴在开发中）'
   return '在当前项目目录新建会话'
 })
 
