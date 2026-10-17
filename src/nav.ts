@@ -1,4 +1,4 @@
-/** 一级视图：左侧导航栏与顶栏共用同一份定义，避免两边漂移。 */
+/** 一级视图：左侧图标栏与视图切换共用同一份定义，避免两边漂移。 */
 export type AppView =
   | 'home'
   | 'archive'
@@ -75,4 +75,77 @@ export const NAV_ITEMS: readonly NavItem[] = [
 
 export function isAppView(value: string | null): value is AppView {
   return value !== null && NAV_ITEMS.some(item => item.view === value)
+}
+
+export const NAV_ORDER_KEY = 'prism-nav-order'
+
+const DEFAULT_NAV_ORDER: readonly AppView[] = NAV_ITEMS.map(item => item.view)
+
+/**
+ * 首页永远固定在顶部；其余视图按保存的顺序排列。
+ * 未知项、重复项会被丢弃，缺失项按默认顺序补回，避免旧存储导致图标消失。
+ */
+export function normalizeNavOrder(value: unknown): AppView[] {
+  const requested = Array.isArray(value) ? value : []
+  const seen = new Set<AppView>()
+  const rest: AppView[] = []
+
+  for (const candidate of requested) {
+    if (typeof candidate !== 'string' || candidate === 'home' || !isAppView(candidate) || seen.has(candidate)) {
+      continue
+    }
+    seen.add(candidate)
+    rest.push(candidate)
+  }
+
+  for (const view of DEFAULT_NAV_ORDER) {
+    if (view !== 'home' && !seen.has(view)) {
+      seen.add(view)
+      rest.push(view)
+    }
+  }
+
+  return ['home', ...rest]
+}
+
+type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
+
+function defaultStorage(): StorageLike | null {
+  return typeof localStorage === 'undefined' ? null : localStorage
+}
+
+export function loadNavOrder(storage: StorageLike | null = defaultStorage()): AppView[] {
+  if (!storage) return normalizeNavOrder(null)
+  try {
+    return normalizeNavOrder(JSON.parse(storage.getItem(NAV_ORDER_KEY) ?? 'null'))
+  } catch {
+    return normalizeNavOrder(null)
+  }
+}
+
+export function saveNavOrder(order: readonly AppView[], storage: StorageLike | null = defaultStorage()): void {
+  if (!storage) return
+  try {
+    storage.setItem(NAV_ORDER_KEY, JSON.stringify(normalizeNavOrder(order)))
+  } catch {
+    /* 隐私模式或配额满时写入会抛错；本次排序仍保留在内存里。 */
+  }
+}
+
+/** 把 view 移到第 gap 个间隙（0 在首页之前，1 在首页之后），首页不可移动。 */
+export function reorderNavItems(order: readonly AppView[], view: AppView, gap: number): AppView[] {
+  const next = normalizeNavOrder(order)
+  if (view === 'home') return next
+
+  const from = next.indexOf(view)
+  if (from < 1) return next
+
+  const target = Number.isFinite(gap)
+    ? Math.max(1, Math.min(next.length, Math.trunc(gap)))
+    : from
+  if (target === from || target === from + 1) return next
+
+  const [item] = next.splice(from, 1)
+  next.splice(target > from ? target - 1 : target, 0, item)
+  return next
 }
