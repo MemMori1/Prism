@@ -4,6 +4,7 @@ import { api } from '../api'
 import { buildHeatmap, heatmapColumns, pulseStats, topModels, type HeatCell } from '../home'
 import { basename, relativeTime } from '../format'
 import { barHeights, formatCost, formatTokens, totalTokens } from '../usageFormat'
+import { engineBadge } from '../engineStatus'
 import type { ProjectItem, UsageSummary } from '../types'
 
 const props = defineProps<{
@@ -76,12 +77,6 @@ interface ActivityRow {
   engines: string[]
   sessions: number
   timeUpdated: number
-}
-
-const ENGINE_LABELS: Record<string, string> = { opencode: 'OC', codex: 'CX', claude: 'CC' }
-
-function engineBadge(engine: string): string {
-  return ENGINE_LABELS[engine] ?? engine.slice(0, 2).toUpperCase()
 }
 
 const activity = computed<ActivityRow[]>(() => {

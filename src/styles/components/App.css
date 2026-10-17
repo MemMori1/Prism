@@ -43,44 +43,6 @@
   letter-spacing: 0.2px;
 }
 
-
-.engine-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 12px;
-  transition: all 0.15s ease;
-}
-
-.engine-chip:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.engine-chip .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--faint);
-}
-
-.engine-chip.tone-ok .dot {
-  background: var(--green);
-}
-
-.engine-chip.tone-warn .dot {
-  background: var(--amber);
-}
-
-.engine-chip.tone-error .dot {
-  background: var(--red);
-}
-
 .topbar-spacer {
   flex: 1;
 }

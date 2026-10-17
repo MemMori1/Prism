@@ -8,11 +8,14 @@ import {
   type AppView,
   type NavItem,
 } from '../nav'
+import { engineBadge, engineStatus } from '../engineStatus'
+import type { EngineHealth } from '../types'
 import type { WorkbenchStatus } from '../trayStatus'
 
 const props = defineProps<{
   view: AppView
   wbStatus: WorkbenchStatus
+  engines: EngineHealth[]
 }>()
 
 const emit = defineEmits<{
@@ -26,6 +29,19 @@ const waitingBadge = computed(() => {
   if (count <= 0) return null
   return count > 9 ? '9+' : String(count)
 })
+
+interface EngineRailItem extends EngineHealth {
+  status: ReturnType<typeof engineStatus>
+}
+
+/** 左下角引擎状态：点开设置查看 CLI / 数据库详情。 */
+const engineItems = computed<EngineRailItem[]>(() =>
+  props.engines.map(item => ({ ...item, status: engineStatus(item) })),
+)
+
+function engineTitle(item: EngineRailItem): string {
+  return `${item.displayName} · ${item.status.label}\n${item.cliPath ?? '未找到 CLI'}\n点击查看引擎详情`
+}
 
 /** 首页固定在第一位；其余图标允许拖拽，顺序持久化到 localStorage。 */
 const order = ref<AppView[]>(loadNavOrder())
@@ -217,6 +233,21 @@ onBeforeUnmount(() => {
     />
 
     <div class="rail-spacer" />
+
+    <div v-if="engineItems.length" class="rail-engines" aria-label="引擎状态">
+      <button
+        v-for="item in engineItems"
+        :key="item.engineId"
+        class="rail-engine"
+        :class="`tone-${item.status.tone}`"
+        :title="engineTitle(item)"
+        :aria-label="`${item.displayName} · ${item.status.label}`"
+        @click="emit('settings')"
+      >
+        <span class="rail-engine-dot" />
+        <span class="rail-engine-badge">{{ engineBadge(item.engineId) }}</span>
+      </button>
+    </div>
 
     <button class="rail-item fixed" title="设置" aria-label="设置" @click="emit('settings')">
       <svg

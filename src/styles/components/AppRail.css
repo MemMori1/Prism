@@ -21,6 +21,57 @@
   flex: 1;
 }
 
+.rail-engines {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 34px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.rail-engine {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.3px;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.rail-engine:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.rail-engine-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.rail-engine.tone-ok .rail-engine-dot {
+  background: var(--green);
+}
+
+.rail-engine.tone-warn .rail-engine-dot {
+  background: var(--amber);
+}
+
+.rail-engine.tone-error .rail-engine-dot {
+  background: var(--red);
+}
+
 .rail-item {
   position: relative;
   display: grid;

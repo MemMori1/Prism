@@ -202,18 +202,6 @@ watch(
   { immediate: true },
 )
 
-type EngineTone = 'muted' | 'ok' | 'warn' | 'error'
-
-function engineStatus(item: EngineHealth): { label: string; tone: EngineTone } {
-  if (item.ready) return { label: '已就绪', tone: 'ok' }
-  if (item.databasePath) return { label: '只读（未找到 CLI）', tone: 'warn' }
-  return { label: '未安装', tone: 'error' }
-}
-
-const engineChips = computed(() =>
-  health.value.map(item => ({ ...item, status: engineStatus(item) })),
-)
-
 function reportError(cause: unknown) {
   error.value = cause instanceof Error ? cause.message : String(cause)
   window.setTimeout(() => {
@@ -358,6 +346,7 @@ onBeforeUnmount(stopRoutineEvents)
     <AppRail
       :view="view"
       :wb-status="wbStatus"
+      :engines="health"
       @select="setView"
       @settings="showSettings = true"
     />
@@ -374,18 +363,6 @@ onBeforeUnmount(stopRoutineEvents)
           </svg>
           <span class="brand-name">Prism</span>
         </div>
-
-        <button
-          v-for="item in engineChips"
-          :key="item.engineId"
-          class="engine-chip"
-          :class="`tone-${item.status.tone}`"
-          :title="`${item.cliPath ?? '未找到 CLI'}\n点击查看引擎详情`"
-          @click="showSettings = true"
-        >
-          <span class="dot" />
-          <span>{{ item.displayName }} · {{ item.status.label }}</span>
-        </button>
 
         <div class="topbar-spacer" />
 
