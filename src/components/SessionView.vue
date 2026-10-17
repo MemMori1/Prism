@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { api } from '../api'
 import { onEngineEvent } from '../engineEvents'
 import { createLiveTurn, reduceLiveTurn, type LiveTurn } from '../liveTurn'
+import { pushNotification } from '../notify'
 import {
   mergePermissions,
   permissionFromEvent,
@@ -12,6 +13,7 @@ import {
   repliedRequestId,
   type PermissionDecision,
 } from '../permissions'
+import { engineLabel } from '../workshop'
 import type { PermissionRequest, SessionSummary, TimelineRecord } from '../types'
 import { formatCost, formatTokens, fullTime } from '../format'
 import TimelineItem from './TimelineItem.vue'
@@ -90,6 +92,44 @@ function sleep(ms: number) {
   return new Promise(resolve => window.setTimeout(resolve, ms))
 }
 
+/** 会话标题（通知展示用；缺省回退短 id）。 */
+function sessionLabel(sessionId: string): string {
+  return props.session?.title?.trim() || sessionId.slice(0, 8)
+}
+
+function truncateText(text: string, limit: number): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  return oneLine.length > limit ? `${oneLine.slice(0, limit)}…` : oneLine
+}
+
+/**
+ * 回合终止 → 通知中心（M11）。
+ * 打断是用户主动动作，不打扰；完成 / 失败各留一条持久条目。
+ */
+function notifyTerminal(eventType: string, turn: LiveTurn, sessionId: string): void {
+  const session = props.session
+  if (!session || session.id !== sessionId) return
+  const label = sessionLabel(sessionId)
+  const base = { sessionId, projectId: session.projectId }
+  if (eventType === 'session.execution.succeeded') {
+    pushNotification({
+      key: `${sessionId}:done`,
+      kind: 'done',
+      title: `「${label}」回合完成`,
+      body: engineLabel(session.engine),
+      ...base,
+    })
+  } else if (eventType === 'session.execution.failed') {
+    pushNotification({
+      key: `${sessionId}:failed`,
+      kind: 'failed',
+      title: `「${label}」回合失败`,
+      body: truncateText(turn.error ?? '执行失败', 140),
+      ...base,
+    })
+  }
+}
+
 const stopEvents = onEngineEvent(event => {
   const sessionId = typeof event.data?.sessionID === 'string' ? event.data.sessionID : null
   const current = props.session?.id ?? null
@@ -100,6 +140,16 @@ const stopEvents = onEngineEvent(event => {
     const request = permissionFromEvent(event.data)
     if (request) {
       pendingPermissions.value = mergePermissions(pendingPermissions.value, [request])
+      pushNotification({
+        key: `${sessionId}:perm:${request.id}`,
+        kind: 'permission',
+        title: `「${sessionLabel(sessionId)}」等待审批`,
+        body: permissionHeadline(request),
+        sessionId,
+        projectId: props.session?.projectId ?? null,
+        // 引擎重连可能重放同一请求：按请求 id 永久去重。
+        dedupe: 'key',
+      })
     }
     return
   }
@@ -121,6 +171,7 @@ const stopEvents = onEngineEvent(event => {
     if (after.running) maybeStick()
   }
   if (TERMINAL_EVENTS.has(event.type)) {
+    notifyTerminal(event.type, after, sessionId)
     scheduleSettle(sessionId)
   }
 })

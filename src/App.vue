@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref, computed } from 'vue'
 import { api } from './api'
+import { relativeTime } from './format'
+import {
+  notifications,
+  unreadCount,
+  markAllRead,
+  clearNotifications,
+  type NotifyItem,
+} from './notify'
 import type { EngineHealth, ProjectItem, SearchHit, SessionSummary } from './types'
 import ProjectsPane from './components/ProjectsPane.vue'
 import SessionsPane from './components/SessionsPane.vue'
@@ -51,6 +59,32 @@ function setView(next: AppView) {
   } catch {
     // 存储失败不影响使用。
   }
+}
+
+// ---- 通知中心（M11）：顶栏铃铛 + 跳转 ----
+
+const notifyOpen = ref(false)
+
+const KIND_ICONS: Record<NotifyItem['kind'], string> = {
+  done: '✓',
+  failed: '✕',
+  permission: '🔐',
+}
+
+function toggleNotify() {
+  notifyOpen.value = !notifyOpen.value
+  if (notifyOpen.value) markAllRead()
+}
+
+/** 点击通知：切到归档并定位到对应会话。 */
+async function openNotification(item: NotifyItem): Promise<void> {
+  notifyOpen.value = false
+  if (!item.projectId || !item.sessionId) return
+  setView('archive')
+  if (selectedProjectId.value !== item.projectId) {
+    await selectProject(item.projectId)
+  }
+  selectSession(item.sessionId)
 }
 
 /** 从归档「⇥ 工作台」按钮打开：开出对应列并切到工作台。 */
@@ -263,6 +297,52 @@ onMounted(reload)
       </button>
 
       <div class="topbar-spacer" />
+
+      <div class="notify-wrap">
+        <button
+          class="notify-btn"
+          title="通知：回合完成 / 失败 / 待审批"
+          @click="toggleNotify"
+        >
+          🔔
+          <span v-if="unreadCount" class="notify-badge">
+            {{ unreadCount > 99 ? '99+' : unreadCount }}
+          </span>
+        </button>
+        <template v-if="notifyOpen">
+          <div class="notify-backdrop" @click="notifyOpen = false" />
+          <div class="notify-panel">
+            <div class="notify-head">
+              <span>通知</span>
+              <button
+                class="notify-clear"
+                :disabled="!notifications.length"
+                @click="clearNotifications"
+              >
+                清空
+              </button>
+            </div>
+            <div v-if="!notifications.length" class="notify-empty">
+              暂无通知——回合完成 / 失败 / 待审批会出现在这里
+            </div>
+            <button
+              v-for="item in notifications"
+              :key="item.id"
+              class="notify-item"
+              @click="openNotification(item)"
+            >
+              <span class="notify-icon" :class="`kind-${item.kind}`">
+                {{ KIND_ICONS[item.kind] }}
+              </span>
+              <span class="notify-main">
+                <span class="notify-title">{{ item.title }}</span>
+                <span class="notify-body">{{ item.body }}</span>
+              </span>
+              <span class="notify-time">{{ relativeTime(item.time) }}</span>
+            </button>
+          </div>
+        </template>
+      </div>
 
       <button class="settings-btn" title="设置" @click="showSettings = true">⚙</button>
       <button class="refresh-btn" :disabled="projectsLoading" @click="reload">刷新</button>
@@ -486,6 +566,164 @@ onMounted(reload)
 .settings-btn:hover {
   color: var(--text);
   border-color: var(--border-strong);
+}
+
+/* ---- 通知中心（M11） ---- */
+
+.notify-wrap {
+  position: relative;
+}
+
+.notify-btn {
+  position: relative;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  transition: all 0.15s ease;
+}
+
+.notify-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.notify-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--red);
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 700;
+}
+
+.notify-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+
+.notify-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 31;
+  width: 330px;
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.notify-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.notify-clear {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.notify-clear:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.notify-clear:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.notify-empty {
+  padding: 14px 12px;
+  color: var(--faint);
+  font-size: 12px;
+  text-align: center;
+}
+
+.notify-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  transition: background 0.12s ease;
+}
+
+.notify-item:hover {
+  background: var(--panel-2);
+}
+
+.notify-item:last-child {
+  border-bottom: none;
+}
+
+.notify-icon {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.notify-icon.kind-done {
+  color: var(--green);
+}
+
+.notify-icon.kind-failed {
+  color: var(--red);
+}
+
+.notify-icon.kind-permission {
+  color: var(--amber);
+}
+
+.notify-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.notify-title {
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notify-body {
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notify-time {
+  flex: none;
+  padding-top: 1px;
+  font-size: 11px;
+  color: var(--faint);
 }
 
 .error-banner {
