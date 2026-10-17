@@ -23,6 +23,8 @@ pub struct EngineHealth {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectItem {
+    /// 所属引擎 id（opencode / codex …）。
+    pub engine: String,
     pub id: String,
     pub worktree: String,
     pub name: String,
@@ -34,6 +36,8 @@ pub struct ProjectItem {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
+    /// 所属引擎 id（opencode / codex …）。
+    pub engine: String,
     pub id: String,
     pub project_id: String,
     pub title: Option<String>,

@@ -2,8 +2,9 @@
 //!
 //! 约定：命令层只做参数整理与线程调度，业务逻辑一律下沉到各引擎适配器。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::engines::codex;
 use crate::engines::core::{
     EngineHealth, ProjectItem, SearchHit, SearchStats, SessionSummary, TimelinePage, ToolDetail,
 };
@@ -17,32 +18,75 @@ fn opencode_db_path() -> Result<PathBuf, String> {
     })
 }
 
-/// OpenCode 引擎健康状态：历史（数据库）与运行时（CLI）分别探测。
-#[tauri::command]
-pub async fn engine_health() -> Result<EngineHealth, String> {
-    let database_path = opencode::locator::database_path();
-    let cli_path = opencode::locator::cli_path();
-    #[cfg(debug_assertions)]
-    println!(
-        "[prism] engine_health: db={:?} cli={:?}",
-        database_path, cli_path
-    );
-    Ok(EngineHealth {
-        engine_id: opencode::locator::ENGINE_ID.to_string(),
-        display_name: opencode::locator::DISPLAY_NAME.to_string(),
-        ready: database_path.is_some() && cli_path.is_some(),
-        database_path: database_path.map(|path| path.display().to_string()),
-        cli_path: cli_path.map(|path| path.display().to_string()),
+fn codex_state_db_path() -> Result<PathBuf, String> {
+    codex::locator::state_db().ok_or_else(|| {
+        "未找到 Codex 状态库（~/.codex/state_*.sqlite），请先安装 Codex 并跑过会话。".to_string()
     })
 }
 
+/// Codex 运行轴尚未接入：这些命令对 Codex 会话一律拒绝（浏览不受影响）。
+fn reject_codex_runtime(session_id: &str) -> Result<(), String> {
+    if codex::state::is_codex_session(session_id) {
+        return Err("Codex 会话暂为只读浏览（运行轴开发中），请到 Codex.app 继续对话。".to_string());
+    }
+    Ok(())
+}
+
+/// 全部引擎的健康状态：历史（数据文件）与运行时（CLI）分别探测。
+#[tauri::command]
+pub async fn engine_health() -> Result<Vec<EngineHealth>, String> {
+    let opencode_db = opencode::locator::database_path();
+    let opencode_cli = opencode::locator::cli_path();
+    let codex_db = codex::locator::state_db();
+    let codex_cli = codex::locator::cli_path();
+    #[cfg(debug_assertions)]
+    println!(
+        "[prism] engine_health: opencode db={:?} cli={:?} / codex db={:?} cli={:?}",
+        opencode_db, opencode_cli, codex_db, codex_cli
+    );
+    Ok(vec![
+        EngineHealth {
+            engine_id: opencode::locator::ENGINE_ID.to_string(),
+            display_name: opencode::locator::DISPLAY_NAME.to_string(),
+            ready: opencode_db.is_some() && opencode_cli.is_some(),
+            database_path: opencode_db.map(|path| path.display().to_string()),
+            cli_path: opencode_cli.map(|path| path.display().to_string()),
+        },
+        EngineHealth {
+            engine_id: codex::locator::ENGINE_ID.to_string(),
+            display_name: codex::locator::DISPLAY_NAME.to_string(),
+            // 浏览历史只要求状态库存在；CLI 决定能否运行（运行轴开发中）。
+            ready: codex_db.is_some(),
+            database_path: codex_db.map(|path| path.display().to_string()),
+            cli_path: codex_cli.map(|path| path.display().to_string()),
+        },
+    ])
+}
+
+/// 项目列表：各引擎合并（任一引擎缺数据不拖垮另一个），按最近活动排序。
 #[tauri::command]
 pub async fn list_projects() -> Result<Vec<ProjectItem>, String> {
-    let db_path = opencode_db_path()?;
-    let items = tauri::async_runtime::spawn_blocking(move || opencode::db::list_projects(&db_path))
-        .await
-        .map_err(|cause| cause.to_string())?;
-    let items = items?;
+    let opencode_db = opencode::locator::database_path();
+    let codex_db = codex::locator::state_db();
+    let items = tauri::async_runtime::spawn_blocking(move || {
+        let mut items: Vec<ProjectItem> = Vec::new();
+        if let Some(db_path) = opencode_db {
+            match opencode::db::list_projects(&db_path) {
+                Ok(mut list) => items.append(&mut list),
+                Err(cause) => eprintln!("[prism] list_projects(opencode) 失败：{cause}"),
+            }
+        }
+        if let Some(db_path) = codex_db {
+            match codex::state::list_projects(&db_path) {
+                Ok(mut list) => items.append(&mut list),
+                Err(cause) => eprintln!("[prism] list_projects(codex) 失败：{cause}"),
+            }
+        }
+        items.sort_by(|a, b| b.time_updated.cmp(&a.time_updated));
+        items
+    })
+    .await
+    .map_err(|cause| cause.to_string())?;
     #[cfg(debug_assertions)]
     println!("[prism] list_projects -> {} 项", items.len());
     Ok(items)
@@ -53,6 +97,19 @@ pub async fn list_sessions(
     project_id: String,
     limit: Option<i64>,
 ) -> Result<Vec<SessionSummary>, String> {
+    if codex::state::is_codex_project(&project_id) {
+        let db_path = codex_state_db_path()?;
+        let cwd = codex::state::cwd_of(&project_id)
+            .ok_or_else(|| "非法的 Codex 项目 id".to_string())?
+            .to_string();
+        let limit = limit.unwrap_or(500).clamp(1, 1000);
+        return tauri::async_runtime::spawn_blocking(move || {
+            codex::state::list_sessions(&db_path, &cwd, limit)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
+
     let db_path = opencode_db_path()?;
     let limit = limit
         .unwrap_or_else(opencode::db::session_limit)
@@ -67,6 +124,18 @@ pub async fn list_sessions(
 /// 按 id 读取单个会话概要（工作台恢复 / 刷新列时用）。
 #[tauri::command]
 pub async fn session_summary(session_id: String) -> Result<Option<SessionSummary>, String> {
+    if codex::state::is_codex_session(&session_id) {
+        let db_path = codex_state_db_path()?;
+        let thread_id = codex::state::thread_id_of(&session_id)
+            .unwrap_or_default()
+            .to_string();
+        return tauri::async_runtime::spawn_blocking(move || {
+            codex::state::get_session(&db_path, &thread_id)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
+
     let db_path = opencode_db_path()?;
     tauri::async_runtime::spawn_blocking(move || {
         opencode::db::get_session(&db_path, &session_id)
@@ -81,10 +150,33 @@ pub async fn read_timeline(
     before_seq: Option<i64>,
     limit: Option<i64>,
 ) -> Result<TimelinePage, String> {
-    let db_path = opencode_db_path()?;
     let limit = limit
         .unwrap_or_else(opencode::db::timeline_page_size)
         .clamp(1, 500);
+
+    if codex::state::is_codex_session(&session_id) {
+        let db_path = codex_state_db_path()?;
+        let thread_id = codex::state::thread_id_of(&session_id)
+            .unwrap_or_default()
+            .to_string();
+        let page = tauri::async_runtime::spawn_blocking(move || {
+            let rollout_path = codex::state::rollout_path_of(&db_path, &thread_id)?
+                .ok_or_else(|| "Codex 会话没有 rollout 文件".to_string())?;
+            codex::rollout::read_timeline(Path::new(&rollout_path), before_seq, limit)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+        let page = page?;
+        #[cfg(debug_assertions)]
+        println!(
+            "[prism] read_timeline(codex) -> {} 条 (has_more={})",
+            page.records.len(),
+            page.has_more
+        );
+        return Ok(page);
+    }
+
+    let db_path = opencode_db_path()?;
     let page = tauri::async_runtime::spawn_blocking(move || {
         opencode::db::read_timeline(&db_path, &session_id, before_seq, limit)
     })
@@ -107,6 +199,20 @@ pub async fn read_tool_detail(
     message_id: String,
     call_id: String,
 ) -> Result<ToolDetail, String> {
+    if codex::state::is_codex_session(&session_id) {
+        let db_path = codex_state_db_path()?;
+        let thread_id = codex::state::thread_id_of(&session_id)
+            .unwrap_or_default()
+            .to_string();
+        return tauri::async_runtime::spawn_blocking(move || {
+            let rollout_path = codex::state::rollout_path_of(&db_path, &thread_id)?
+                .ok_or_else(|| "Codex 会话没有 rollout 文件".to_string())?;
+            codex::rollout::read_tool_detail(Path::new(&rollout_path), &message_id, &call_id)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
+
     let db_path = opencode_db_path()?;
     let detail = tauri::async_runtime::spawn_blocking(move || {
         opencode::db::read_tool_detail(&db_path, &session_id, &message_id, &call_id)
@@ -168,6 +274,7 @@ pub async fn session_send(
     session_id: String,
     text: String,
 ) -> Result<String, String> {
+    reject_codex_runtime(&session_id)?;
     #[cfg(debug_assertions)]
     println!(
         "[prism] session_send -> {}（{} 字符）",
@@ -186,6 +293,7 @@ pub async fn session_interrupt(
     runtime: tauri::State<'_, Runtime>,
     session_id: String,
 ) -> Result<(), String> {
+    reject_codex_runtime(&session_id)?;
     #[cfg(debug_assertions)]
     println!("[prism] session_interrupt -> {session_id}");
     let runtime = runtime.inner().clone();
@@ -200,6 +308,7 @@ pub async fn session_permissions(
     runtime: tauri::State<'_, Runtime>,
     session_id: String,
 ) -> Result<Vec<PermissionRequest>, String> {
+    reject_codex_runtime(&session_id)?;
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || runtime.list_permissions(&session_id))
         .await
@@ -214,6 +323,7 @@ pub async fn session_permission_reply(
     request_id: String,
     decision: String,
 ) -> Result<(), String> {
+    reject_codex_runtime(&session_id)?;
     #[cfg(debug_assertions)]
     println!("[prism] session_permission_reply -> {session_id} {request_id} {decision}");
     let runtime = runtime.inner().clone();

@@ -26,6 +26,14 @@ const emit = defineEmits<{
 const sortKey = ref<SessionSort>('recent')
 const rangeKey = ref<TimeRange>('all')
 
+/** 仅 OpenCode 支持从 Prism 新建会话（Codex 运行轴开发中）。 */
+const canCreate = computed(() => props.project?.engine === 'opencode')
+const newButtonTitle = computed(() => {
+  if (!props.project) return '先选择项目'
+  if (!canCreate.value) return 'Codex 会话暂只能浏览（运行轴在开发中）'
+  return '在当前项目目录新建会话'
+})
+
 const visibleSessions = computed(() =>
   sortSessions(
     filterSessionsByRange(props.sessions, rangeToSince(rangeKey.value, Date.now())),
@@ -51,8 +59,8 @@ function shortModel(model: string | null): string {
         <span v-if="sessions.length" class="pane-count">{{ sessions.length }}</span>
         <button
           class="new-btn"
-          :disabled="!project || creating"
-          :title="project ? '在当前项目目录新建会话' : '先选择项目'"
+          :disabled="!project || creating || !canCreate"
+          :title="newButtonTitle"
           @click="emit('create')"
         >
           {{ creating ? '…' : '＋' }}

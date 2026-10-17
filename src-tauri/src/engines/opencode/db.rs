@@ -61,6 +61,7 @@ pub fn list_projects(db_path: &Path) -> DbResult<Vec<ProjectItem>> {
     let rows = statement
         .query_map([], |row| {
             Ok(ProjectItem {
+                engine: super::locator::ENGINE_ID.to_string(),
                 id: row.get(0)?,
                 worktree: row.get(1)?,
                 name: row.get(2)?,
@@ -119,6 +120,7 @@ pub fn get_session(db_path: &Path, session_id: &str) -> DbResult<Option<SessionS
 fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
     let raw_model: Option<String> = row.get(4)?;
     Ok(SessionSummary {
+        engine: super::locator::ENGINE_ID.to_string(),
         id: row.get(0)?,
         project_id: row.get(1)?,
         title: row.get(2)?,

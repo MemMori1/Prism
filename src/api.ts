@@ -14,7 +14,7 @@ import type {
 
 /** Tauri IPC 封装：所有后端调用从这里进。 */
 export const api = {
-  engineHealth: () => invoke<EngineHealth>('engine_health'),
+  engineHealth: () => invoke<EngineHealth[]>('engine_health'),
   cliVersion: () => invoke<string | null>('cli_version'),
   listProjects: () => invoke<ProjectItem[]>('list_projects'),
   listSessions: (projectId: string) =>

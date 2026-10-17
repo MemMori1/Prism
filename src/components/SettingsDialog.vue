@@ -3,7 +3,7 @@
  * 设置对话框：引擎状态一眼看清（安装 / 版本 / 运行轴）。
  * 挂载即拉取一次；关闭由父级控制（v-if）。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { api } from '../api'
 import type { EngineHealth, RuntimeStatus } from '../types'
@@ -12,23 +12,26 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
-const health = ref<EngineHealth | null>(null)
+const engines = ref<EngineHealth[]>([])
 const cliVersion = ref<string | null>(null)
 const runtime = ref<RuntimeStatus | null>(null)
 const prismVersion = ref<string | null>(null)
 const loading = ref(true)
 const errorText = ref<string | null>(null)
 
+const opencode = computed(() => engines.value.find(item => item.engineId === 'opencode') ?? null)
+const codex = computed(() => engines.value.find(item => item.engineId === 'codex') ?? null)
+
 async function load() {
   loading.value = true
   errorText.value = null
   try {
-    const [engine, version, status] = await Promise.all([
+    const [allEngines, version, status] = await Promise.all([
       api.engineHealth(),
       api.cliVersion(),
       api.runtimeStatus(),
     ])
-    health.value = engine
+    engines.value = allEngines
     cliVersion.value = version
     runtime.value = status
   } catch (cause) {
@@ -60,10 +63,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
 })
 
-function statusLabel(): { label: string; tone: string } {
-  if (!health.value) return { label: '检测中…', tone: 'muted' }
-  if (health.value.ready) return { label: '已就绪', tone: 'ok' }
-  if (health.value.databasePath) return { label: '只读（未找到 CLI）', tone: 'warn' }
+function statusOf(item: EngineHealth | null): { label: string; tone: string } {
+  if (!item) return { label: '检测中…', tone: 'muted' }
+  if (item.ready) return { label: '已就绪', tone: 'ok' }
+  if (item.databasePath) return { label: '只读（未找到 CLI）', tone: 'warn' }
   return { label: '未安装', tone: 'error' }
 }
 </script>
@@ -81,30 +84,64 @@ function statusLabel(): { label: string; tone: string } {
 
         <section class="settings-section">
           <div class="section-label">引擎</div>
-          <div class="info-row">
-            <span class="info-key">状态</span>
-            <span class="info-value">
-              <span class="status-dot" :class="`tone-${statusLabel().tone}`" />
-              OpenCode · {{ statusLabel().label }}
-            </span>
+
+          <div class="engine-block">
+            <div class="engine-name">OpenCode</div>
+            <div class="info-row">
+              <span class="info-key">状态</span>
+              <span class="info-value">
+                <span class="status-dot" :class="`tone-${statusOf(opencode).tone}`" />
+                {{ statusOf(opencode).label }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">版本</span>
+              <span class="info-value mono">
+                {{ cliVersion ?? (opencode?.cliPath ? '（读取失败）' : '未检测到 CLI') }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">CLI</span>
+              <span class="info-value mono" :title="opencode?.cliPath ?? ''">
+                {{ opencode?.cliPath ?? '未找到' }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">数据库</span>
+              <span class="info-value mono" :title="opencode?.databasePath ?? ''">
+                {{ opencode?.databasePath ?? '未找到（先用 OpenCode 跑过会话）' }}
+              </span>
+            </div>
           </div>
-          <div class="info-row">
-            <span class="info-key">版本</span>
-            <span class="info-value mono">
-              {{ cliVersion ?? (health?.cliPath ? '（读取失败）' : '未检测到 CLI') }}
-            </span>
-          </div>
-          <div class="info-row">
-            <span class="info-key">CLI</span>
-            <span class="info-value mono" :title="health?.cliPath ?? ''">
-              {{ health?.cliPath ?? '未找到' }}
-            </span>
-          </div>
-          <div class="info-row">
-            <span class="info-key">数据库</span>
-            <span class="info-value mono" :title="health?.databasePath ?? ''">
-              {{ health?.databasePath ?? '未找到（先用 OpenCode 跑过会话）' }}
-            </span>
+
+          <div class="engine-block">
+            <div class="engine-name">
+              Codex
+              <span class="engine-tag">历史浏览</span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">状态</span>
+              <span class="info-value">
+                <span class="status-dot" :class="`tone-${statusOf(codex).tone}`" />
+                {{ statusOf(codex).label }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">CLI</span>
+              <span class="info-value mono" :title="codex?.cliPath ?? ''">
+                {{ codex?.cliPath ?? '未找到' }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">状态库</span>
+              <span class="info-value mono" :title="codex?.databasePath ?? ''">
+                {{ codex?.databasePath ?? '未找到（先用 Codex 跑过会话）' }}
+              </span>
+            </div>
+            <div class="info-row">
+              <span class="info-key">说明</span>
+              <span class="info-value">只读浏览已接入；运行时（发消息）在开发中</span>
+            </div>
           </div>
         </section>
 
@@ -129,7 +166,7 @@ function statusLabel(): { label: string; tone: string } {
         </section>
 
         <div class="settings-note">
-          引擎数据一律只读，Prism 不写 OpenCode 的数据库；一切都在本机运行。
+          引擎数据一律只读，Prism 不写引擎的数据库与状态库；一切都在本机运行。
         </div>
       </div>
 
@@ -213,6 +250,32 @@ function statusLabel(): { label: string; tone: string } {
 
 .settings-section {
   margin-top: 14px;
+}
+
+.engine-block + .engine-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.engine-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 650;
+  margin-bottom: 2px;
+}
+
+.engine-tag {
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
 }
 
 .section-label {

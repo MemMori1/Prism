@@ -63,6 +63,8 @@ const waiting = computed(() => pendingPermissions.value.length)
 const showLive = computed(
   () => live.value.running || live.value.parts.length > 0 || !!live.value.error,
 )
+/** 非 OpenCode 引擎（如 Codex）暂为只读浏览：运行轴未接入。 */
+const readOnly = computed(() => !!props.session && props.session.engine !== 'opencode')
 
 // 运行 / 待审批状态上报：工作台列头与全局审批角标用。
 watch(
@@ -327,6 +329,7 @@ function onScroll() {
 // ---- 输入与运行 ----
 
 async function send() {
+  if (readOnly.value) return
   const sessionId = props.session?.id
   const content = draft.value.trim()
   if (!sessionId || !content || sending.value) return
@@ -509,7 +512,15 @@ watch(
       </div>
 
       <footer class="composer">
-        <div v-if="pendingPermissions.length" class="permission-stack">
+        <div v-if="readOnly" class="readonly-bar">
+          <span aria-hidden="true">🔒</span>
+          <span>
+            Codex 会话暂为只读浏览（运行轴在开发中）——发消息请到 Codex.app；
+            回到 Prism 点「刷新」即可看到新内容。
+          </span>
+        </div>
+        <template v-else>
+          <div v-if="pendingPermissions.length" class="permission-stack">
           <div
             v-for="item in pendingPermissions"
             :key="item.id"
@@ -598,6 +609,7 @@ watch(
             </button>
           </div>
         </div>
+        </template>
       </footer>
     </template>
   </main>
@@ -759,6 +771,21 @@ watch(
   border-top: 1px solid var(--border);
   background: var(--panel);
   padding: 10px 22px 14px;
+}
+
+.readonly-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 9px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .permission-stack {

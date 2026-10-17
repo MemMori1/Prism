@@ -11,6 +11,15 @@ defineProps<{
 const emit = defineEmits<{
   (e: 'select', projectId: string): void
 }>()
+
+const ENGINE_LABELS: Record<string, string> = {
+  opencode: 'OC',
+  codex: 'CX',
+}
+
+function engineLabel(engine: string): string {
+  return ENGINE_LABELS[engine] ?? engine.slice(0, 2).toUpperCase()
+}
 </script>
 
 <template>
@@ -36,8 +45,11 @@ const emit = defineEmits<{
         @click="emit('select', project.id)"
       >
         <span class="project-name">{{ project.name || basename(project.worktree) }}</span>
-        <span class="project-path">{{ project.worktree }}</span>
+        <span class="engine-badge" :class="`engine-${project.engine}`">
+          {{ engineLabel(project.engine) }}
+        </span>
         <span class="project-count">{{ project.sessionCount }}</span>
+        <span class="project-path">{{ project.worktree }}</span>
       </button>
     </div>
   </aside>
@@ -98,7 +110,7 @@ const emit = defineEmits<{
 
 .project-item {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   grid-template-rows: auto auto;
   gap: 1px 8px;
   width: 100%;
@@ -122,6 +134,24 @@ const emit = defineEmits<{
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.engine-badge {
+  grid-row: 1 / 2;
+  align-self: center;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.3px;
+}
+
+.engine-badge.engine-codex {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 35%, var(--border));
 }
 
 .project-item.active .project-name {

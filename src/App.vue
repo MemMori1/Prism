@@ -9,7 +9,7 @@ import SettingsDialog from './components/SettingsDialog.vue'
 import WorkbenchPane from './components/WorkbenchPane.vue'
 import SearchPane from './components/SearchPane.vue'
 
-const health = ref<EngineHealth | null>(null)
+const health = ref<EngineHealth[]>([])
 const error = ref<string | null>(null)
 const showSettings = ref(false)
 
@@ -73,12 +73,17 @@ const selectedSession = computed(
   () => sessions.value.find(session => session.id === selectedSessionId.value) ?? null,
 )
 
-const engineStatus = computed(() => {
-  if (!health.value) return { label: '连接中…', tone: 'muted' as const }
-  if (health.value.ready) return { label: '已就绪', tone: 'ok' as const }
-  if (health.value.databasePath) return { label: '只读（未找到 CLI）', tone: 'warn' as const }
-  return { label: '未安装', tone: 'error' as const }
-})
+type EngineTone = 'muted' | 'ok' | 'warn' | 'error'
+
+function engineStatus(item: EngineHealth): { label: string; tone: EngineTone } {
+  if (item.ready) return { label: '已就绪', tone: 'ok' }
+  if (item.databasePath) return { label: '只读（未找到 CLI）', tone: 'warn' }
+  return { label: '未安装', tone: 'error' }
+}
+
+const engineChips = computed(() =>
+  health.value.map(item => ({ ...item, status: engineStatus(item) })),
+)
 
 function reportError(cause: unknown) {
   error.value = cause instanceof Error ? cause.message : String(cause)
@@ -134,6 +139,10 @@ const delay = (ms: number) => new Promise(resolve => window.setTimeout(resolve, 
 async function createSession() {
   const project = selectedProject.value
   if (!project || creating.value) return
+  if (project.engine !== 'opencode') {
+    reportError(new Error('Codex 会话的运行轴还在开发中，暂不能从 Prism 新建会话'))
+    return
+  }
   creating.value = true
   try {
     const created = await api.sessionCreate(project.worktree)
@@ -235,14 +244,15 @@ onMounted(reload)
       </div>
 
       <button
-        v-if="health"
+        v-for="item in engineChips"
+        :key="item.engineId"
         class="engine-chip"
-        :class="`tone-${engineStatus.tone}`"
-        :title="`${health.cliPath ?? ''}\n点击查看引擎详情`"
+        :class="`tone-${item.status.tone}`"
+        :title="`${item.cliPath ?? '未找到 CLI'}\n点击查看引擎详情`"
         @click="showSettings = true"
       >
         <span class="dot" />
-        <span>OpenCode · {{ engineStatus.label }}</span>
+        <span>{{ item.displayName }} · {{ item.status.label }}</span>
       </button>
 
       <div class="topbar-spacer" />

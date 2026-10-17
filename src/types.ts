@@ -10,6 +10,8 @@ export interface EngineHealth {
 }
 
 export interface ProjectItem {
+  /** 所属引擎 id（opencode / codex …）。 */
+  engine: string
   id: string
   worktree: string
   name: string
@@ -18,6 +20,8 @@ export interface ProjectItem {
 }
 
 export interface SessionSummary {
+  /** 所属引擎 id（opencode / codex …）。 */
+  engine: string
   id: string
   projectId: string
   title: string | null
