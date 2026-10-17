@@ -66,6 +66,40 @@ pub enum TimelinePart {
     },
 }
 
+/// 单轮 token 用量（各引擎归一到同一口径：缓存读不与未缓存输入重叠）。
+#[derive(Debug, Clone, Copy, Serialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnTokens {
+    /// 未缓存输入。
+    pub input: i64,
+    /// 缓存读（已从输入中扣除）。
+    pub cache_read: i64,
+    /// 缓存写 / 缓存创建。
+    pub cache_write: i64,
+    /// 输出。
+    pub output: i64,
+    /// 思考（与输出的包含关系随引擎原样呈现）。
+    pub reasoning: i64,
+    /// 该轮成本（引擎提供时）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// 模型上下文窗口（已知时，用于上下文用量条）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
+}
+
+impl TurnTokens {
+    /// 全部为零（且无成本）时视为无数据。
+    pub fn is_empty(&self) -> bool {
+        self.input == 0
+            && self.cache_read == 0
+            && self.cache_write == 0
+            && self.output == 0
+            && self.reasoning == 0
+            && self.cost.unwrap_or(0.0) <= 0.0
+    }
+}
+
 /// 时间线记录（一条用户消息或一条助手消息）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +112,9 @@ pub struct TimelineRecord {
     /// 助手消息是否已完结（无 time.completed 视为进行中/中断）。
     pub completed: bool,
     pub parts: Vec<TimelinePart>,
+    /// 该轮 token 用量（引擎数据可得时）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<TurnTokens>,
 }
 
 /// 时间线分页（从最新往回取）。

@@ -44,6 +44,13 @@ export function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`
 }
 
+export function formatBytes(size: number): string {
+  if (!size) return '0 B'
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
 export function basename(path: string): string {
   const trimmed = path.replace(/\/+$/, '')
   const index = trimmed.lastIndexOf('/')

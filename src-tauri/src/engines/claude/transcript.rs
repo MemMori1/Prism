@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use super::locator::{self, ENGINE_ID};
 use crate::engines::core::{
     ProjectItem, SessionSummary, TimelinePage, TimelinePart, TimelineRecord, ToolDetail,
+    TurnTokens,
 };
 use crate::engines::time::{file_modified_ms, parse_iso_ms};
 
@@ -434,6 +435,8 @@ struct ParsedRecord {
     role: &'static str,
     model: Option<String>,
     parts: Vec<TimelinePart>,
+    /// 该轮最后一次 API 调用的用量（Claude 一个助手回合可能含多次调用）。
+    tokens: Option<TurnTokens>,
 }
 
 /// 时间线分页：与 OpenCode 语义一致（`before_seq` 严格递减；正序返回）。
@@ -471,6 +474,7 @@ fn render_page(records: Vec<ParsedRecord>, before_seq: Option<i64>, limit: i64) 
                 model: record.model,
                 completed: true,
                 parts: record.parts,
+                tokens: record.tokens,
             })
             .collect(),
         next_cursor,
@@ -573,6 +577,7 @@ fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
                         role: "user",
                         model: None,
                         parts: vec![TimelinePart::Text { text }],
+                        tokens: None,
                     });
                 }
             }
@@ -586,6 +591,28 @@ fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
                 let record = ensure_current(&mut current, seq, time_ms);
                 if record.model.is_none() {
                     record.model = model;
+                }
+                // 每轮用量取该回合最后一次调用的值（追加即覆盖）。
+                if let Some(usage) = message.get("usage") {
+                    let get = |key: &str| {
+                        usage
+                            .get(key)
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0)
+                            .max(0)
+                    };
+                    let tokens = TurnTokens {
+                        input: get("input_tokens"),
+                        cache_read: get("cache_read_input_tokens"),
+                        cache_write: get("cache_creation_input_tokens"),
+                        output: get("output_tokens"),
+                        reasoning: 0,
+                        cost: None,
+                        context_window: None,
+                    };
+                    if !tokens.is_empty() {
+                        record.tokens = Some(tokens);
+                    }
                 }
                 let Some(blocks) = message.get("content").and_then(Value::as_array) else {
                     continue;
@@ -672,6 +699,7 @@ fn ensure_current<'a>(
             role: "assistant",
             model: None,
             parts: Vec::new(),
+            tokens: None,
         });
     }
     current.as_mut().expect("刚插入的记录必然存在")
@@ -912,6 +940,22 @@ mod tests {
         std::fs::write(dir.join("a1.jsonl"), FIXTURE).expect("写 fixture");
         std::fs::write(dir.join("agent-sub.jsonl"), FIXTURE).expect("写子代理档案");
         root
+    }
+
+    #[test]
+    fn assistant_records_carry_last_call_usage() {
+        let records = parse_fixture();
+        // 第一个助手回合含 m1 → m2 → m3 三次调用，取最后一次（m3）。
+        let tokens = records[1].tokens.expect("应有 token");
+        assert_eq!(tokens.input, 8);
+        assert_eq!(tokens.cache_read, 3000);
+        assert_eq!(tokens.cache_write, 0);
+        assert_eq!(tokens.output, 4);
+        assert_eq!(tokens.reasoning, 0);
+        // 第二个助手回合（m5）。
+        let tokens = records[3].tokens.expect("应有 token");
+        assert_eq!(tokens.input, 2);
+        assert_eq!(tokens.output, 2);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod artifact;
 mod engines;
 mod ipc;
 mod routines;
@@ -35,6 +36,7 @@ pub fn run() {
             ipc::workshop_assets,
             ipc::workshop_read,
             ipc::open_path,
+            ipc::read_artifact,
             ipc::workshop_mcp,
             ipc::mcp_probe,
             ipc::routines_list,

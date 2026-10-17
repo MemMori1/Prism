@@ -233,3 +233,127 @@ button {
   max-width: 100%;
   border-radius: 6px;
 }
+
+/* ---- 阅读增强：公式 / 沙箱预览 / 交付物卡片 ---- */
+
+.md-math-block {
+  overflow-x: auto;
+  padding: 2px 0;
+}
+
+.md-math-inline .katex {
+  font-size: 1.06em;
+}
+
+.md-embed {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  overflow: hidden;
+  max-width: 720px;
+}
+
+.md-embed-head {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--faint);
+  border-bottom: 1px solid var(--border);
+}
+
+.md-embed-frame {
+  display: block;
+  width: 100%;
+  height: 320px;
+  border: none;
+  background: #fff;
+}
+
+.md-embed-svg {
+  display: block;
+  width: 100%;
+  height: 260px;
+  border: none;
+  background: var(--panel-2);
+}
+
+.md-embed-src {
+  border-top: 1px solid var(--border);
+}
+
+.md-embed-src summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.md-embed-src summary::-webkit-details-marker {
+  display: none;
+}
+
+.md-embed-src summary::before {
+  content: '▸ ';
+}
+
+.md-embed-src[open] summary::before {
+  content: '▾ ';
+}
+
+.md-embed-src pre {
+  margin: 0;
+  border-radius: 0;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.md-artifact {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  text-decoration: none;
+  color: var(--text);
+  cursor: pointer;
+  vertical-align: top;
+}
+
+.md-artifact:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+}
+
+.md-artifact-icon {
+  flex: none;
+  font-size: 13px;
+}
+
+.md-artifact-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.md-artifact-path {
+  min-width: 0;
+  color: var(--faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 340px;
+}
+
+.md-artifact-thumb {
+  flex: none;
+  width: 100%;
+  max-height: 220px;
+  object-fit: cover;
+  border-radius: 4px;
+}

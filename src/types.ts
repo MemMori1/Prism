@@ -55,6 +55,31 @@ export interface TimelineRecord {
   model: string | null
   completed: boolean
   parts: TimelinePart[]
+  /** 该轮 token 用量（引擎数据可得时）。 */
+  tokens?: TurnTokens | null
+}
+
+/** 单轮 token 用量（各引擎归一到同一口径：缓存读不与未缓存输入重叠）。 */
+export interface TurnTokens {
+  input: number
+  cacheRead: number
+  cacheWrite: number
+  output: number
+  reasoning: number
+  /** 该轮成本（引擎提供时）。 */
+  cost?: number
+  /** 模型上下文窗口（已知时）。 */
+  contextWindow?: number
+}
+
+/** 本地交付物内容（HTML / SVG / 图片）。 */
+export interface ArtifactData {
+  kind: string
+  name: string
+  size: number
+  mime: string
+  text?: string
+  base64?: string
 }
 
 export interface TimelinePage {

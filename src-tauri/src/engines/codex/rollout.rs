@@ -17,7 +17,9 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::engines::core::{TimelinePage, TimelinePart, TimelineRecord, ToolDetail};
+use crate::engines::core::{
+    TimelinePage, TimelinePart, TimelineRecord, ToolDetail, TurnTokens,
+};
 use crate::engines::time::parse_iso_ms;
 
 type ParseResult<T> = Result<T, String>;
@@ -37,6 +39,8 @@ struct ParsedRecord {
     time_created: i64,
     role: &'static str,
     parts: Vec<TimelinePart>,
+    /// 该轮最后一次模型调用的用量（token_count 事件回填）。
+    tokens: Option<TurnTokens>,
 }
 
 /// 时间线分页：与 OpenCode 语义一致（`before_seq` 严格递减；正序返回）。
@@ -82,6 +86,7 @@ fn render_page(
                 model: None,
                 completed: true,
                 parts: record.parts,
+                tokens: record.tokens,
             })
             .collect(),
         next_cursor,
@@ -131,6 +136,7 @@ fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
                         parts: vec![TimelinePart::Text {
                             text: text.to_string(),
                         }],
+                        tokens: None,
                     });
                 }
             }
@@ -207,12 +213,59 @@ fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
                     }
                 }
             }
+            ("event_msg", Some("token_count")) => {
+                // 回填到当前助手记录：一个回合内可能多次上报，取最后一次。
+                let Some(info) = payload.get("info") else {
+                    continue;
+                };
+                let Some(tokens) = turn_tokens_from_info(info) else {
+                    continue;
+                };
+                if let Some(record) = current.as_mut() {
+                    if !record.parts.is_empty() {
+                        record.tokens = Some(tokens);
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     flush(&mut records, &mut current);
     Ok(records)
+}
+
+/// `payload.info` → 本轮用量（last_token_usage；缓存读从输入中扣除）。
+///
+/// 只认 last_token_usage：它是当轮调用的真实用量；旧版 rollout 缺该字段时
+/// 本轮不回填（宁缺毋错）。
+fn turn_tokens_from_info(info: &Value) -> Option<TurnTokens> {
+    let usage = info.get("last_token_usage")?;
+    let get = |key: &str| {
+        usage
+            .get(key)
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0)
+    };
+    let cached_input = get("cached_input_tokens");
+    let tokens = TurnTokens {
+        input: get("input_tokens").saturating_sub(cached_input),
+        cache_read: cached_input,
+        cache_write: 0,
+        output: get("output_tokens"),
+        reasoning: get("reasoning_output_tokens"),
+        cost: None,
+        context_window: info
+            .get("model_context_window")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0),
+    };
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens)
+    }
 }
 
 fn flush(records: &mut Vec<ParsedRecord>, current: &mut Option<ParsedRecord>) {
@@ -234,6 +287,7 @@ fn ensure_current<'a>(
             time_created,
             role: "assistant",
             parts: Vec::new(),
+            tokens: None,
         });
     }
     current.as_mut().expect("刚插入的记录必然存在")
@@ -526,6 +580,34 @@ mod tests {
     }
 
     #[test]
+    fn attaches_last_token_usage_to_current_turn() {
+        let fixture = concat!(
+            r#"{"timestamp":"2026-06-11T13:04:07.400Z","type":"event_msg","payload":{"type":"user_message","message":"你好"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-11T13:04:11.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"你好呀"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-11T13:04:12.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":400,"output_tokens":120,"reasoning_output_tokens":30},"last_token_usage":{"input_tokens":1500,"cached_input_tokens":400,"output_tokens":120,"reasoning_output_tokens":30},"model_context_window":272000}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-11T13:04:20.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":500,"output_tokens":200,"reasoning_output_tokens":50},"last_token_usage":{"input_tokens":500,"cached_input_tokens":100,"output_tokens":80,"reasoning_output_tokens":20},"model_context_window":272000}}}"#,
+            "\n",
+        );
+        let records = parse_reader(BufReader::new(Cursor::new(fixture))).expect("解析");
+        let tokens = records[1].tokens.expect("应回填 token");
+        // 一个回合内可能多次上报：取最后一次的 last_token_usage。
+        assert_eq!(tokens.input, 400, "500-100=400（未缓存输入）");
+        assert_eq!(tokens.cache_read, 100);
+        assert_eq!(tokens.output, 80);
+        assert_eq!(tokens.reasoning, 20);
+        assert_eq!(tokens.context_window, Some(272000));
+    }
+
+    #[test]
+    fn token_count_without_last_usage_attaches_nothing() {
+        let records = parse_fixture();
+        assert!(records[1].tokens.is_none(), "只有累计值时本轮不回填");
+    }
+
+    #[test]
     fn renders_page_with_cursor() {
         let records = parse_fixture(); // seq: 5(用户) 6-9(助手) 12(用户) 13-14(助手)
         let page = render_page(
@@ -536,6 +618,7 @@ mod tests {
                     time_created: record.time_created,
                     role: record.role,
                     parts: record.parts,
+                    tokens: record.tokens,
                 })
                 .collect(),
             None,

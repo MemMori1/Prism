@@ -1,14 +1,44 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { TimelineRecord } from '../types'
 import { renderMarkdown } from '../markdown'
+import { formatCost, formatTokens } from '../format'
 import ToolCard from './ToolCard.vue'
 
-defineProps<{
+const props = defineProps<{
   record: TimelineRecord
   sessionId: string
   /** 搜索定位命中的消息：短暂高亮。 */
   highlighted?: boolean
 }>()
+
+/** 该轮 token（引擎数据可得时）。 */
+const tokens = computed(() => props.record.tokens ?? null)
+
+const hasTokens = computed(() => {
+  const current = tokens.value
+  if (!current) return false
+  return Boolean(
+    current.input ||
+      current.cacheRead ||
+      current.cacheWrite ||
+      current.output ||
+      current.reasoning ||
+      current.cost,
+  )
+})
+
+/** 上下文用量（窗口已知且用量为正时显示）。 */
+const context = computed(() => {
+  const current = tokens.value
+  if (!current?.contextWindow || current.contextWindow <= 0) return null
+  const used = current.input + current.cacheRead + current.output
+  if (used <= 0) return null
+  return {
+    used,
+    percent: Math.min(100, Math.round((used / current.contextWindow) * 100)),
+  }
+})
 </script>
 
 <template>
@@ -58,6 +88,30 @@ defineProps<{
             class="assistant-text md"
             v-html="renderMarkdown(part.text)"
           />
+        </div>
+
+        <div v-if="tokens && hasTokens" class="turn-tokens">
+          <span class="tt-item" title="未缓存输入">↑ {{ formatTokens(tokens.input) }}</span>
+          <span v-if="tokens.cacheRead" class="tt-item" title="缓存读">
+            ⚡ {{ formatTokens(tokens.cacheRead) }}
+          </span>
+          <span class="tt-item" title="输出">↓ {{ formatTokens(tokens.output) }}</span>
+          <span v-if="tokens.reasoning" class="tt-item" title="思考">
+            ✦ {{ formatTokens(tokens.reasoning) }}
+          </span>
+          <span v-if="tokens.cost" class="tt-item tt-cost" title="该轮成本">
+            {{ formatCost(tokens.cost) }}
+          </span>
+          <span
+            v-if="context"
+            class="tt-ctx"
+            :title="`上下文 ≈ ${formatTokens(context.used)} / 窗口 ${formatTokens(tokens.contextWindow ?? 0)} tokens`"
+          >
+            <span class="tt-ctx-bar">
+              <span class="tt-ctx-fill" :style="{ width: `${context.percent}%` }" />
+            </span>
+            {{ context.percent }}%
+          </span>
         </div>
       </div>
     </template>
@@ -145,5 +199,47 @@ defineProps<{
   color: var(--muted);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* 每轮 token 四联 + 上下文用量条 */
+.turn-tokens {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--faint);
+  user-select: none;
+}
+
+.tt-item {
+  white-space: nowrap;
+}
+
+.tt-cost {
+  color: var(--muted);
+}
+
+.tt-ctx {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tt-ctx-bar {
+  display: inline-block;
+  width: 54px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.tt-ctx-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
 }
 </style>

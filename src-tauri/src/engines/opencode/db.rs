@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::engines::core::{
     ProjectItem, SessionSummary, TimelinePage, TimelinePart, TimelineRecord, ToolDetail,
+    TurnTokens,
 };
 
 type DbResult<T> = Result<T, String>;
@@ -489,6 +490,7 @@ fn map_user_record(id: String, time_created: i64, data: &Value) -> Option<Timeli
         model: None,
         completed: true,
         parts: vec![TimelinePart::Text { text }],
+        tokens: None,
     })
 }
 
@@ -498,6 +500,7 @@ fn map_assistant_record(id: String, time_created: i64, data: &Value) -> Option<T
         .pointer("/model/id")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let tokens = parse_turn_tokens(data);
 
     let mut parts = Vec::new();
     if let Some(content) = data.get("content").and_then(Value::as_array) {
@@ -562,7 +565,45 @@ fn map_assistant_record(id: String, time_created: i64, data: &Value) -> Option<T
         model,
         completed,
         parts,
+        tokens,
     })
+}
+
+/// assistant 消息里的单轮用量（v2：`tokens.{input,output,reasoning,cache.{read,write}}` + `cost`）。
+fn parse_turn_tokens(data: &Value) -> Option<TurnTokens> {
+    let tokens = data.get("tokens")?;
+    let get = |key: &str| {
+        tokens
+            .get(key)
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0)
+    };
+    let cache = |key: &str| {
+        tokens
+            .get("cache")
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0)
+    };
+    let parsed = TurnTokens {
+        input: get("input"),
+        cache_read: cache("read"),
+        cache_write: cache("write"),
+        output: get("output"),
+        reasoning: get("reasoning"),
+        cost: data
+            .get("cost")
+            .and_then(Value::as_f64)
+            .filter(|value| *value > 0.0),
+        context_window: None,
+    };
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
 }
 
 /// 工具卡片的一行摘要：优先取常见字段，取不到就压平 JSON。
@@ -643,6 +684,36 @@ mod tests {
     fn assistant_record_skips_empty_content() {
         let data = json!({"time": {"created": 1}, "content": []});
         assert!(map_assistant_record("m1".to_string(), 0, &data).is_none());
+    }
+
+    #[test]
+    fn assistant_record_parses_turn_tokens() {
+        let data = json!({
+            "time": {"created": 1, "completed": 2},
+            "model": {"id": "deepseek-v4.1-flash-free"},
+            "content": [{"type": "text", "text": "hi"}],
+            "cost": 0.012,
+            "tokens": {"input": 1648, "output": 470, "reasoning": 3491, "cache": {"read": 174080, "write": 12}}
+        });
+        let record = map_assistant_record("m1".to_string(), 5, &data).expect("record");
+        let tokens = record.tokens.expect("应有 token");
+        assert_eq!(tokens.input, 1648);
+        assert_eq!(tokens.cache_read, 174080);
+        assert_eq!(tokens.cache_write, 12);
+        assert_eq!(tokens.output, 470);
+        assert_eq!(tokens.reasoning, 3491);
+        assert_eq!(tokens.cost, Some(0.012));
+        assert!(tokens.context_window.is_none());
+    }
+
+    #[test]
+    fn assistant_record_without_tokens_is_none() {
+        let data = json!({
+            "time": {"created": 1, "completed": 2},
+            "content": [{"type": "text", "text": "hi"}]
+        });
+        let record = map_assistant_record("m1".to_string(), 5, &data).expect("record");
+        assert!(record.tokens.is_none());
     }
 
     #[test]

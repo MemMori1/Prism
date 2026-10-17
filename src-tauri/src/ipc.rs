@@ -625,6 +625,16 @@ pub async fn workshop_read(path: String) -> Result<workshop::AssetFile, String> 
 }
 
 /// 用系统默认程序打开路径（只读操作，不写引擎目录）。
+/// 读取本地交付物（HTML / SVG / 图片）内容，供时间线就地预览。
+#[tauri::command]
+pub async fn read_artifact(path: String) -> Result<crate::artifact::ArtifactData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::artifact::read_artifact(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
 #[tauri::command]
 pub async fn open_path(path: String) -> Result<(), String> {
     let target = PathBuf::from(&path);

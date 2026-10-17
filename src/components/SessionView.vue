@@ -18,6 +18,7 @@ import type { PermissionRequest, SessionSummary, TimelineRecord } from '../types
 import { formatCost, formatTokens, fullTime } from '../format'
 import TimelineItem from './TimelineItem.vue'
 import LiveTurnView from './LiveTurn.vue'
+import ArtifactViewer from './ArtifactViewer.vue'
 
 const props = defineProps<{
   session: SessionSummary | null
@@ -59,6 +60,10 @@ const replyingPermission = ref<string | null>(null)
 const stick = ref(true)
 /** 搜索定位的目标消息（短暂高亮）。 */
 const highlightId = ref<string | null>(null)
+/** 交付物就地预览：当前打开的本地文件路径。 */
+const artifactPath = ref<string | null>(null)
+/** 未吸附底部时累计的新消息数（回底浮标角标）。 */
+const unseen = ref(0)
 
 const running = computed(() => live.value.running)
 const waiting = computed(() => pendingPermissions.value.length)
@@ -374,9 +379,95 @@ function onScroll() {
   const el = scroller.value
   if (!el) return
   stick.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  if (stick.value) unseen.value = 0
   if (loading.value || loadingOlder.value || !hasMore.value) return
   if (el.scrollTop < 120) void loadOlder()
 }
+
+function backToBottom() {
+  unseen.value = 0
+  stick.value = true
+  scrollToBottom()
+}
+
+// ---- 交付物（就地预览） ----
+
+/** 记录增长且未吸附底部时：累计角标。 */
+watch(
+  () => records.value.length,
+  (next, prev) => {
+    if (!stick.value && next > prev) unseen.value += next - prev
+  },
+)
+
+function resolveArtifactPath(raw: string): string {
+  if (raw.startsWith('/')) return raw
+  const base = props.session?.directory
+  if (!base) return raw
+  return `${base.replace(/\/+$/, '')}/${raw.replace(/^\.\//, '')}`
+}
+
+function onTimelineClick(event: MouseEvent) {
+  const target = event.target
+  if (!(target instanceof HTMLElement)) return
+  const card = target.closest('.md-artifact')
+  if (!(card instanceof HTMLElement)) return
+  event.preventDefault()
+  const raw = card.dataset.artifactPath
+  if (raw) artifactPath.value = resolveArtifactPath(raw)
+}
+
+/** 图片类交付物卡片：自动补缩略图（只读读取；超过 4 MiB 不缩略）。 */
+const thumbCache = new Map<string, string | null>()
+let thumbsInFlight = 0
+
+async function loadThumb(card: HTMLElement, path: string) {
+  let url = thumbCache.get(path)
+  if (url === undefined) {
+    try {
+      const data = await api.readArtifact(path)
+      url =
+        data.kind === 'image' && data.base64 && data.size <= 4 * 1024 * 1024
+          ? `data:${data.mime};base64,${data.base64}`
+          : null
+    } catch {
+      url = null
+    }
+    if (thumbCache.size > 300) thumbCache.clear()
+    thumbCache.set(path, url)
+  }
+  if (!url) return
+  const image = document.createElement('img')
+  image.className = 'md-artifact-thumb'
+  image.src = url
+  image.alt = ''
+  card.insertBefore(image, card.firstChild)
+}
+
+async function enhanceArtifacts() {
+  const root = scroller.value
+  if (!root) return
+  const cards = root.querySelectorAll<HTMLElement>(
+    '.md-artifact[data-artifact-kind="image"]:not([data-thumb-done])',
+  )
+  for (const card of Array.from(cards)) {
+    if (thumbsInFlight >= 4) break
+    const raw = card.dataset.artifactPath
+    if (!raw) continue
+    card.dataset.thumbDone = '1'
+    thumbsInFlight += 1
+    void loadThumb(card, resolveArtifactPath(raw)).finally(() => {
+      thumbsInFlight -= 1
+    })
+  }
+}
+
+watch(
+  () => records.value.length,
+  () => {
+    void nextTick(enhanceArtifacts)
+  },
+)
 
 // ---- 输入与运行 ----
 
@@ -532,7 +623,7 @@ watch(
         </div>
       </header>
 
-      <div ref="scroller" class="timeline" @scroll.passive="onScroll">
+      <div ref="scroller" class="timeline" @scroll.passive="onScroll" @click="onTimelineClick">
         <div v-if="loading" class="timeline-hint">加载中…</div>
         <div v-else-if="!records.length && !showLive" class="timeline-hint">
           这个会话还没有消息，直接在下面发一条试试
@@ -562,6 +653,15 @@ watch(
           </div>
         </template>
       </div>
+
+      <button
+        v-if="!stick && records.length"
+        class="to-bottom"
+        :title="unseen ? `${unseen} 条新消息，回到底部` : '回到底部'"
+        @click="backToBottom"
+      >
+        ↓<span v-if="unseen" class="to-bottom-badge">{{ unseen > 99 ? '99+' : unseen }}</span>
+      </button>
 
       <footer class="composer">
         <div v-if="readOnly" class="readonly-bar">
@@ -664,11 +764,13 @@ watch(
         </template>
       </footer>
     </template>
+    <ArtifactViewer :path="artifactPath" @close="artifactPath = null" />
   </main>
 </template>
 
 <style scoped>
 .session-view {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -1040,5 +1142,46 @@ watch(
 
 .session-view.embedded .composer {
   padding: 8px 12px 10px;
+}
+
+/* 回底浮标（未吸附底部时显示） */
+.to-bottom {
+  position: absolute;
+  right: 18px;
+  bottom: 110px;
+  z-index: 5;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow);
+}
+
+.to-bottom:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.to-bottom-badge {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  line-height: 18px;
+  text-align: center;
 }
 </style>
