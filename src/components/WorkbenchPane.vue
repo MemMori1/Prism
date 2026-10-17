@@ -12,6 +12,7 @@ import {
   WORKBENCH_DEFAULT_WIDTH,
 } from '../workbench'
 import type { ProjectItem, SessionSummary } from '../types'
+import SessionComposer from './SessionComposer.vue'
 import SessionView from './SessionView.vue'
 
 const props = defineProps<{
@@ -42,7 +43,6 @@ const scroller = ref<HTMLElement | null>(null)
 const columns = ref<WorkbenchColumn[]>([])
 const flashId = ref<string | null>(null)
 const pickerOpen = ref(false)
-const creating = ref(false)
 
 const runningCount = computed(() => columns.value.filter(column => column.status.running).length)
 const waitingCount = computed(() =>
@@ -163,21 +163,12 @@ function focusColumn(sessionId: string) {
 
 // ---- 新建会话 ----
 
-async function createInProject(project: ProjectItem) {
-  if (creating.value) return
-  creating.value = true
+async function onComposerCreated(sessionId: string) {
   pickerOpen.value = false
-  try {
-    const created = await api.sessionCreate(project.worktree)
-    const summary = await fetchSummaryWithRetry(created.sessionId)
-    if (summary) openColumn(created.sessionId, summary)
-    else report('新会话已创建，但读取概要失败：稍后可从归档打开')
-    emit('settled')
-  } catch (cause) {
-    report(cause)
-  } finally {
-    creating.value = false
-  }
+  const summary = await fetchSummaryWithRetry(sessionId)
+  if (summary) openColumn(sessionId, summary)
+  else openColumn(sessionId)
+  emit('settled')
 }
 
 // ---- 列宽拖拽 ----
@@ -235,10 +226,6 @@ function dotTitle(column: WorkbenchColumn) {
   if (column.status.waiting > 0) return '等待审批'
   if (column.status.running) return '执行中'
   return '空闲'
-}
-
-function projectLabel(project: ProjectItem) {
-  return project.name || project.worktree
 }
 
 // ---- 恢复布局 ----
@@ -322,40 +309,26 @@ defineExpose({ openColumn })
         <div class="wb-empty-hint">
           一屏多列并行盯盘：这里新建一个，或去归档里点会话右上角「⇥ 工作台」
         </div>
-        <button class="new-session-btn" :disabled="creating" @click="pickerOpen = true">
-          {{ creating ? '创建中…' : '新建会话' }}
-        </button>
+        <button class="new-session-btn" @click="pickerOpen = true">新建会话</button>
       </div>
     </div>
 
     <button
       v-if="columns.length"
       class="wb-add"
-      :disabled="creating"
       title="新建会话并开一列"
       @click="pickerOpen = true"
     >
-      {{ creating ? '创建中…' : '＋ 新建会话' }}
+      ＋ 新建会话
     </button>
 
-    <div v-if="pickerOpen" class="wb-picker-backdrop" @click.self="pickerOpen = false">
-      <div class="wb-picker">
-        <div class="wb-picker-title">在哪个项目新建会话？</div>
-        <button
-          v-for="project in projects"
-          :key="project.id"
-          class="wb-picker-item"
-          @click="createInProject(project)"
-        >
-          <span class="wb-picker-name">{{ projectLabel(project) }}</span>
-          <span class="wb-picker-dir">{{ project.worktree }}</span>
-        </button>
-        <div v-if="!projects.length" class="wb-picker-empty">
-          还没有项目：先用 OpenCode 跑一个会话，或到归档刷新
-        </div>
-        <button class="wb-picker-cancel" @click="pickerOpen = false">取消</button>
-      </div>
-    </div>
+    <SessionComposer
+      v-if="pickerOpen"
+      :projects="projects"
+      @close="pickerOpen = false"
+      @created="onComposerCreated"
+      @error="report"
+    />
   </section>
 </template>
 
@@ -568,87 +541,5 @@ defineExpose({ openColumn })
 .wb-add:disabled {
   opacity: 0.5;
   cursor: default;
-}
-
-.wb-picker-backdrop {
-  position: absolute;
-  inset: 0;
-  z-index: 10;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding-top: 64px;
-  background: rgba(10, 8, 20, 0.28);
-}
-
-.wb-picker {
-  width: min(420px, calc(100% - 60px));
-  max-height: calc(100% - 100px);
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--panel);
-  box-shadow: var(--shadow);
-}
-
-.wb-picker-title {
-  padding: 2px 4px 6px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.wb-picker-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel-2);
-  text-align: left;
-  transition: border-color 0.15s ease;
-}
-
-.wb-picker-item:hover {
-  border-color: var(--accent);
-}
-
-.wb-picker-name {
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.wb-picker-dir {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--faint);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
-
-.wb-picker-empty {
-  padding: 10px;
-  text-align: center;
-  color: var(--faint);
-  font-size: 11.5px;
-}
-
-.wb-picker-cancel {
-  padding: 5px;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  font-size: 11.5px;
-}
-
-.wb-picker-cancel:hover {
-  background: var(--panel-2);
-  color: var(--text);
 }
 </style>

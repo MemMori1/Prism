@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::annotations::{self, AnnotationStore};
+use crate::catalog::{self, EngineCatalog};
 use crate::engines::claude;
 use crate::engines::codex;
 use crate::engines::codex::runtime::Runtime as CodexRuntime;
@@ -16,6 +17,7 @@ use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runti
 use crate::engines::quota;
 use crate::engines::usage::{self, UsageSummary};
 use crate::engines::{mcp, workshop};
+use crate::files::{self, FileHit, GitSnapshot};
 use crate::routines::{runner, scheduler::RoutinesState, store};
 use crate::routines::store::{RoutineDefinition, RoutineLogEntry, RoutineView};
 
@@ -446,30 +448,225 @@ pub async fn session_create(
     }
 }
 
+/// 组合器发送的可选项（不传 = 普通纯文本消息）。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendOptions {
+    /// 文件附件（uri 为绝对路径；Codex 侧折算为文本提示）。
+    #[serde(default)]
+    pub files: Vec<FileRef>,
+    /// 模型 id（OpenCode 为 modelID，Codex 为 model）。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 模型提供方（仅 OpenCode 需要）。
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// 推理档位（OpenCode variant / Codex effort）。
+    #[serde(default)]
+    pub variant: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRef {
+    pub uri: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Codex 无结构化附件：折算成文本里的附件清单（模型会自行读取）。
+fn files_to_note(text: &str, files: &[FileRef]) -> String {
+    if files.is_empty() {
+        return text.to_string();
+    }
+    let mut out = text.trim_end().to_string();
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str("[Prism 附件] 请阅读以下文件：");
+    for file in files {
+        if file.name.trim().is_empty() {
+            out.push_str(&format!("\n- {}", file.uri));
+        } else {
+            out.push_str(&format!("\n- {} （{}）", file.uri, file.name));
+        }
+    }
+    out
+}
+
 /// 发送一条用户消息，返回用户消息 id（Codex 无此 id，返回空串）。
+/// options 可带文件附件 / 模型 / 推理档位（组合器）。
 #[tauri::command]
 pub async fn session_send(
     runtime: tauri::State<'_, Runtime>,
     codex_runtime: tauri::State<'_, CodexRuntime>,
     session_id: String,
     text: String,
+    options: Option<SendOptions>,
 ) -> Result<String, String> {
+    let options = options.unwrap_or_default();
     #[cfg(debug_assertions)]
     println!(
-        "[prism] session_send -> {}（{} 字符）",
+        "[prism] session_send -> {}（{} 字符，附件 {}，模型 {:?}）",
         session_id,
-        text.chars().count()
+        text.chars().count(),
+        options.files.len(),
+        options.model
     );
     if is_codex_session(&session_id) {
         let codex_runtime = codex_runtime.inner().clone();
+        let text = files_to_note(&text, &options.files);
         return tauri::async_runtime::spawn_blocking(move || {
-            codex_runtime.send_prompt(&session_id, &text)
+            codex_runtime.send_prompt_with(
+                &session_id,
+                &text,
+                options.model.as_deref(),
+                options.variant.as_deref(),
+            )
         })
         .await
         .map_err(|cause| cause.to_string())?;
     }
     let runtime = runtime.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || runtime.send_prompt(&session_id, &text))
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(model) = options.model.as_deref().filter(|value| !value.trim().is_empty()) {
+            let provider = options
+                .provider
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "指定 OpenCode 模型时缺少提供方".to_string())?;
+            runtime.set_session_model(
+                &session_id,
+                provider,
+                model,
+                options.variant.as_deref(),
+            )?;
+        }
+        let files: Vec<(String, String)> = options
+            .files
+            .iter()
+            .map(|file| (file.uri.clone(), file.name.clone()))
+            .collect();
+        runtime.send_prompt_rich(&session_id, &text, &files)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 引擎能力目录：模型（含推理档位）+ 斜杠命令（组合器数据源）。
+#[tauri::command]
+pub async fn engine_catalog(
+    runtime: tauri::State<'_, Runtime>,
+    codex_runtime: tauri::State<'_, CodexRuntime>,
+    engine: String,
+    directory: String,
+) -> Result<EngineCatalog, String> {
+    match engine.as_str() {
+        "opencode" => {
+            let runtime = runtime.inner().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let models = runtime.list_models(&directory)?;
+                let commands = runtime.list_commands(&directory).unwrap_or_default();
+                Ok(EngineCatalog {
+                    engine: "opencode".to_string(),
+                    available: true,
+                    reason: None,
+                    models,
+                    commands,
+                })
+            })
+            .await
+            .map_err(|cause| cause.to_string())?
+        }
+        "codex" => {
+            let codex_runtime = codex_runtime.inner().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let models = codex_runtime.list_models()?;
+                Ok(EngineCatalog {
+                    engine: "codex".to_string(),
+                    available: true,
+                    reason: None,
+                    models,
+                    commands: Vec::new(),
+                })
+            })
+            .await
+            .map_err(|cause| cause.to_string())?
+        }
+        "claude" => Ok(catalog::unavailable(
+            "claude",
+            "未检测到 Claude Code CLI（运行轴后置），先用 OpenCode / Codex 开工",
+        )),
+        other => Ok(catalog::unavailable(other, format!("未知引擎：{other}"))),
+    }
+}
+
+/// 在会话里直接跑一条 shell 命令（不发给模型）。
+#[tauri::command]
+pub async fn session_shell(
+    runtime: tauri::State<'_, Runtime>,
+    codex_runtime: tauri::State<'_, CodexRuntime>,
+    session_id: String,
+    command: String,
+) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    println!(
+        "[prism] session_shell -> {session_id}（{} 字符）",
+        command.chars().count()
+    );
+    if is_codex_session(&session_id) {
+        let codex_runtime = codex_runtime.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            codex_runtime.shell_command(&session_id, &command)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || runtime.session_shell(&session_id, &command))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 运行一条斜杠命令（OpenCode；text 为命令参数）。
+#[tauri::command]
+pub async fn session_command(
+    runtime: tauri::State<'_, Runtime>,
+    session_id: String,
+    name: String,
+    text: String,
+) -> Result<String, String> {
+    #[cfg(debug_assertions)]
+    println!("[prism] session_command -> {session_id} /{name}");
+    if is_codex_session(&session_id) {
+        return Err("Codex 暂不支持斜杠命令（可直接输入自然语言指令）".to_string());
+    }
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime.session_command(&session_id, &name, &text)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 项目文件索引（@ 补全）：query 为空时按路径序给首批。
+#[tauri::command]
+pub async fn project_files(
+    directory: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<FileHit>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        files::list_project_files(&directory, &query, limit.unwrap_or(30))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// Git 上下文快照（分支 / 变更 / 最近提交），供「＋上下文」快捷插入。
+#[tauri::command]
+pub async fn git_snapshot(directory: String) -> Result<GitSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || files::git_snapshot(&directory))
         .await
         .map_err(|cause| cause.to_string())?
 }

@@ -5,8 +5,11 @@ import type {
   AssetFile,
   AssetItem,
   CreatedSession,
+  EngineCatalog,
   EngineHealth,
+  FileHit,
   GitInfo,
+  GitSnapshot,
   McpProbeResult,
   McpServer,
   PermissionRequest,
@@ -17,6 +20,7 @@ import type {
   RuntimeStatus,
   SearchHit,
   SearchStats,
+  SendOptions,
   SessionLedger,
   SessionSummary,
   TimelinePage,
@@ -46,8 +50,8 @@ export const api = {
   runtimeStatus: () => invoke<RuntimeStatus>('runtime_status'),
   sessionCreate: (directory: string, engine?: string) =>
     invoke<CreatedSession>('session_create', { directory, engine: engine ?? null }),
-  sessionSend: (sessionId: string, text: string) =>
-    invoke<string>('session_send', { sessionId, text }),
+  sessionSend: (sessionId: string, text: string, options?: SendOptions) =>
+    invoke<string>('session_send', { sessionId, text, options: options ?? null }),
   sessionInterrupt: (sessionId: string) => invoke<void>('session_interrupt', { sessionId }),
   sessionPermissions: (sessionId: string) =>
     invoke<PermissionRequest[]>('session_permissions', { sessionId }),
@@ -130,4 +134,13 @@ export const api = {
   quotaSummary: (force: boolean) => invoke<QuotaSummary>('quota_summary', { force }),
   trayStatus: (running: number, waiting: number) =>
     invoke<void>('tray_status', { running, waiting }),
+  engineCatalog: (engine: string, directory: string) =>
+    invoke<EngineCatalog>('engine_catalog', { engine, directory }),
+  sessionShell: (sessionId: string, command: string) =>
+    invoke<void>('session_shell', { sessionId, command }),
+  sessionCommand: (sessionId: string, name: string, text: string) =>
+    invoke<string>('session_command', { sessionId, name, text }),
+  projectFiles: (directory: string, query: string, limit?: number) =>
+    invoke<FileHit[]>('project_files', { directory, query, limit: limit ?? null }),
+  gitSnapshot: (directory: string) => invoke<GitSnapshot>('git_snapshot', { directory }),
 }

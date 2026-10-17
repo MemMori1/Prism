@@ -377,3 +377,58 @@ export interface QuotaSummary {
   codex: EngineQuota
   claude: EngineQuota
 }
+
+// ---------------------------------------------------------------- 组合器（M20）
+
+/** 组合器：引擎可选的模型（含推理档位）。 */
+export interface EngineModel {
+  id: string
+  label: string
+  provider: string | null
+  /** 推理档位 id（OpenCode variant / Codex effort）。 */
+  variants: string[]
+  defaultVariant: string | null
+  isDefault: boolean
+}
+
+/** 组合器：引擎斜杠命令。 */
+export interface EngineCommand {
+  name: string
+  description: string
+}
+
+/** 引擎能力目录（模型 + 命令；不可用时带原因）。 */
+export interface EngineCatalog {
+  engine: string
+  available: boolean
+  reason: string | null
+  models: EngineModel[]
+  commands: EngineCommand[]
+}
+
+/** 项目文件索引条目（@ 补全）。 */
+export interface FileHit {
+  path: string
+  name: string
+}
+
+/** Git 上下文快照（分支 / 变更 / 最近提交）。 */
+export interface GitSnapshot {
+  branch: string | null
+  dirty: string[]
+  commits: string[]
+}
+
+/** 发送附件（uri 为绝对路径）。 */
+export interface SendFileRef {
+  uri: string
+  name: string
+}
+
+/** 组合器发送可选项（模型 / 推理档位 / 附件）。 */
+export interface SendOptions {
+  files?: SendFileRef[]
+  model?: string | null
+  provider?: string | null
+  variant?: string | null
+}

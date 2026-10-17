@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
 use super::locator;
+use crate::catalog;
 use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, RuntimeStatus};
 
 /// 前端订阅的事件名（Tauri 事件），与 OpenCode 运行轴共用。
@@ -266,6 +267,17 @@ impl Runtime {
     /// 发送一条用户消息：空闲时开新轮，进行中则插话（steer）。
     /// 返回空串（Codex 没有 OpenCode 那样的用户消息 id）。
     pub fn send_prompt(&self, session_id: &str, text: &str) -> Result<String, String> {
+        self.send_prompt_with(session_id, text, None, None)
+    }
+
+    /// 发送一条用户消息（带可选的模型 / 推理强度覆盖，对后续轮次持续生效）。
+    pub fn send_prompt_with(
+        &self,
+        session_id: &str,
+        text: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<String, String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("消息内容为空".to_string());
@@ -274,29 +286,7 @@ impl Runtime {
             .ok_or_else(|| format!("不是 Codex 会话：{session_id}"))?
             .to_string();
         let conn = self.ready_conn()?;
-
-        // 历史会话：本进程尚未加载时先 resume（幂等，重复 resume 无副作用）。
-        let is_loaded = self
-            .inner
-            .sessions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .loaded
-            .contains(&thread_id);
-        if !is_loaded {
-            self.call_on(
-                &conn,
-                "thread/resume",
-                json!({ "threadId": thread_id }),
-                CALL_TIMEOUT,
-            )?;
-            self.inner
-                .sessions
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .loaded
-                .insert(thread_id.clone());
-        }
+        self.ensure_thread_loaded(&conn, &thread_id)?;
 
         let input = json!([{ "type": "text", "text": text }]);
 
@@ -329,13 +319,70 @@ impl Runtime {
                 .remove(&thread_id);
         }
 
+        let mut start = json!({ "threadId": thread_id, "input": input });
+        if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+            start["model"] = json!(model);
+        }
+        if let Some(effort) = effort.filter(|value| !value.trim().is_empty() && *value != "default")
+        {
+            start["effort"] = json!(effort);
+        }
+        self.call_on(&conn, "turn/start", start, CALL_TIMEOUT)?;
+        Ok(String::new())
+    }
+
+    /// 未加载的线程先 resume（幂等，重复 resume 无副作用）。
+    fn ensure_thread_loaded(&self, conn: &Arc<Conn>, thread_id: &str) -> Result<(), String> {
+        let is_loaded = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .loaded
+            .contains(thread_id);
+        if is_loaded {
+            return Ok(());
+        }
         self.call_on(
-            &conn,
-            "turn/start",
-            json!({ "threadId": thread_id, "input": input }),
+            conn,
+            "thread/resume",
+            json!({ "threadId": thread_id }),
             CALL_TIMEOUT,
         )?;
-        Ok(String::new())
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .loaded
+            .insert(thread_id.to_string());
+        Ok(())
+    }
+
+    /// 模型目录（每个模型带支持的推理档位）。
+    pub fn list_models(&self) -> Result<Vec<catalog::EngineModel>, String> {
+        let conn = self.ready_conn()?;
+        let result = self.call_on(&conn, "model/list", json!({}), CALL_TIMEOUT)?;
+        Ok(catalog::parse_codex_models(&result))
+    }
+
+    /// 在线程里直接跑一条 shell 命令（不走模型；不继承线程沙箱策略）。
+    pub fn shell_command(&self, session_id: &str, command: &str) -> Result<(), String> {
+        let command = command.trim();
+        if command.is_empty() {
+            return Err("shell 命令为空".to_string());
+        }
+        let thread_id = thread_id_of(session_id)
+            .ok_or_else(|| format!("不是 Codex 会话：{session_id}"))?
+            .to_string();
+        let conn = self.ready_conn()?;
+        self.ensure_thread_loaded(&conn, &thread_id)?;
+        self.call_on(
+            &conn,
+            "thread/shellCommand",
+            json!({ "threadId": thread_id, "command": command }),
+            CALL_TIMEOUT,
+        )?;
+        Ok(())
     }
 
     /// 中断当前执行（没有进行中的轮次时视为已停）。
@@ -1767,6 +1814,168 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
+    /// 目录真机冒烟：model/list 返回模型目录（不发模型请求，不耗额度）。
+    /// `cargo test --lib -- --ignored --nocapture model_list_real`
+    #[test]
+    #[ignore]
+    fn model_list_real() {
+        let runtime = Runtime::unattached_with_args(Vec::new());
+        let models = runtime.list_models().expect("model/list");
+        println!("模型 {} 个：", models.len());
+        for model in &models {
+            println!(
+                "  {} 档位={:?} 默认档={:?} 默认模型={}",
+                model.id,
+                model.variants,
+                model.default_variant,
+                model.is_default
+            );
+        }
+        assert!(!models.is_empty(), "应返回模型目录");
+        assert!(models.iter().any(|model| model.is_default), "应有默认模型");
+        assert!(
+            models.iter().any(|model| !model.variants.is_empty()),
+            "应有带推理档位的模型"
+        );
+        runtime.shutdown();
+    }
+
+    /// 组合器真机冒烟：显式模型 + 推理强度落进发给模型的请求（假模型端点，不耗额度）。
+    /// `cargo test --lib -- --ignored --nocapture overrides_model_and_effort_real`
+    #[test]
+    #[ignore]
+    fn overrides_model_and_effort_real() {
+        use std::net::TcpListener;
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+        let captured: StdArc<StdMutex<Vec<String>>> = StdArc::new(StdMutex::new(Vec::new()));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定假模型端口");
+        let port = listener.local_addr().expect("端口").port();
+        let sink = captured.clone();
+        thread::Builder::new()
+            .name("prism-fake-model".into())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    fake_provider_respond_sink(&mut stream, Some(&sink));
+                }
+            })
+            .expect("启动假模型线程");
+
+        let args = vec![
+            "-c".to_string(),
+            "model_provider=\"prismfake\"".to_string(),
+            "-c".to_string(),
+            format!(
+                "model_providers.prismfake={{ name=\"PrismFake\", wire_api=\"responses\", base_url=\"http://127.0.0.1:{port}/v1\" }}"
+            ),
+        ];
+        let runtime = Runtime::unattached_with_args(args);
+        let events = runtime.subscribe();
+
+        let cwd = std::env::temp_dir().join(format!("prism-m20-codex-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).expect("临时目录");
+        let created = runtime
+            .create_session(cwd.to_str().expect("临时目录路径"))
+            .expect("新建 Codex 会话");
+        let thread_id = created
+            .session_id
+            .strip_prefix("codex:")
+            .expect("codex 前缀")
+            .to_string();
+
+        runtime
+            .send_prompt_with(
+                &created.session_id,
+                "请回复 PONG",
+                Some("gpt-5.4-mini"),
+                Some("low"),
+            )
+            .expect("带模型/强度发送");
+        collect_until(
+            &events,
+            &created.session_id,
+            "session.execution.succeeded",
+            Duration::from_secs(120),
+        )
+        .expect("应完成");
+
+        let bodies = captured.lock().expect("捕获表").clone();
+        let last = bodies.last().cloned().unwrap_or_default();
+        let preview: String = last.chars().take(1000).collect();
+        println!("模型请求体（截断）：{preview}");
+        assert!(last.contains("gpt-5.4-mini"), "请求应带显式模型");
+        assert!(last.contains("\"effort\":\"low\""), "请求应带推理强度");
+
+        if let Ok(conn) = runtime.ready_conn() {
+            let _ = runtime.call_on(
+                &conn,
+                "thread/archive",
+                json!({ "threadId": thread_id }),
+                CALL_TIMEOUT,
+            );
+        }
+        runtime.shutdown();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// 真机组会话 shell：thread/shellCommand 协议可调用（假模型端点，不耗额度）。
+    /// `cargo test --lib -- --ignored --nocapture shell_command_real`
+    #[test]
+    #[ignore]
+    fn shell_command_real() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定假模型端口");
+        let port = listener.local_addr().expect("端口").port();
+        thread::Builder::new()
+            .name("prism-fake-model".into())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    fake_provider_respond(&mut stream);
+                }
+            })
+            .expect("启动假模型线程");
+
+        let args = vec![
+            "-c".to_string(),
+            "model_provider=\"prismfake\"".to_string(),
+            "-c".to_string(),
+            format!(
+                "model_providers.prismfake={{ name=\"PrismFake\", wire_api=\"responses\", base_url=\"http://127.0.0.1:{port}/v1\" }}"
+            ),
+        ];
+        let runtime = Runtime::unattached_with_args(args);
+        let cwd = std::env::temp_dir().join(format!("prism-m20-cshell-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).expect("临时目录");
+        let created = runtime
+            .create_session(cwd.to_str().expect("临时目录路径"))
+            .expect("新建 Codex 会话");
+        let thread_id = created
+            .session_id
+            .strip_prefix("codex:")
+            .expect("codex 前缀")
+            .to_string();
+
+        runtime
+            .shell_command(&created.session_id, "echo prism-shell-ok")
+            .expect("thread/shellCommand 应被接受");
+        assert!(runtime.shell_command(&created.session_id, "   ").is_err());
+        println!("codex shell 已执行");
+
+        if let Ok(conn) = runtime.ready_conn() {
+            let _ = runtime.call_on(
+                &conn,
+                "thread/archive",
+                json!({ "threadId": thread_id }),
+                CALL_TIMEOUT,
+            );
+        }
+        runtime.shutdown();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
     /// 读取事件直到出现目标终止事件（只看目标会话）；超时返回 None。
     fn collect_until(
         receiver: &mpsc::Receiver<Value>,
@@ -1992,6 +2201,14 @@ mod tests {
 
     /// 最小 HTTP 处理：读完整请求 → 按剧本回 SSE。
     fn fake_provider_respond(stream: &mut std::net::TcpStream) {
+        fake_provider_respond_sink(stream, None);
+    }
+
+    /// 假模型响应；可按需把请求体抄送进 sink（断言模型/强度等参数用）。
+    fn fake_provider_respond_sink(
+        stream: &mut std::net::TcpStream,
+        sink: Option<&std::sync::Mutex<Vec<String>>>,
+    ) {
         use std::io::Read;
 
         let mut raw = Vec::new();
@@ -2028,6 +2245,11 @@ mod tests {
         }
         let Some(end) = header_end else { return };
         let body = String::from_utf8_lossy(&raw[end..]).to_string();
+        if let Some(sink) = sink {
+            if let Ok(mut list) = sink.lock() {
+                list.push(body.clone());
+            }
+        }
         let script = fake_script(&body);
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",

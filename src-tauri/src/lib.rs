@@ -1,6 +1,8 @@
 mod annotations;
 mod artifact;
+mod catalog;
 mod engines;
+mod files;
 mod gitinfo;
 mod ipc;
 mod ledger;
@@ -31,6 +33,11 @@ pub fn run() {
             ipc::session_interrupt,
             ipc::session_permissions,
             ipc::session_permission_reply,
+            ipc::engine_catalog,
+            ipc::session_shell,
+            ipc::session_command,
+            ipc::project_files,
+            ipc::git_snapshot,
             ipc::search_stats,
             ipc::search_update_index,
             ipc::search_query,

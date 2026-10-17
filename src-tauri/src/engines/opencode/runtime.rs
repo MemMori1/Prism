@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
 use super::locator;
+use crate::catalog;
 
 /// 前端订阅的事件名（Tauri 事件）。
 pub const EVENT_NAME: &str = "engine-event";
@@ -124,6 +125,15 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
+/// 附件 URI 归一化：绝对路径 → `file://` URI（引擎侧校验要求带 scheme）。
+fn to_file_uri(uri: &str) -> String {
+    if uri.contains("://") {
+        uri.to_string()
+    } else {
+        format!("file://{uri}")
+    }
+}
+
 fn truncate(text: &str, max: usize) -> String {
     let mut result: String = text.chars().take(max).collect();
     if text.chars().count() > max {
@@ -177,6 +187,14 @@ fn send_json(request: reqwest::blocking::RequestBuilder, path: &str) -> Result<V
         return Ok(Value::Null);
     }
     serde_json::from_str(&text).map_err(|cause| format!("解析 {path} 响应失败：{cause}"))
+}
+
+/// 带 `location[directory]` 查询参数的 GET（引擎按目录解析模型/命令/文件）。
+fn fetch_location_json(target: &ServerTarget, path: &str, directory: &str) -> Result<Value, String> {
+    let request = target
+        .request(reqwest::Method::GET, path)
+        .query(&[("location[directory]", directory)]);
+    send_json(request, path)
 }
 
 // ---------------------------------------------------------------- 进程
@@ -366,17 +384,109 @@ impl Runtime {
 
     /// 发送一条用户消息，返回用户消息 id。
     pub fn send_prompt(&self, session_id: &str, text: &str) -> Result<String, String> {
+        self.send_prompt_rich(session_id, text, &[])
+    }
+
+    /// 发送一条用户消息（可带文件附件：uri 为文件绝对路径，name 为展示名）。
+    pub fn send_prompt_rich(
+        &self,
+        session_id: &str,
+        text: &str,
+        files: &[(String, String)],
+    ) -> Result<String, String> {
         let text = text.trim();
-        if text.is_empty() {
+        if text.is_empty() && files.is_empty() {
             return Err("消息内容为空".to_string());
         }
         let target = self.ensure_server()?;
+        let mut body = json!({ "text": text });
+        if !files.is_empty() {
+            let attachments: Vec<Value> = files
+                .iter()
+                .map(|(uri, name)| {
+                    json!({ "uri": to_file_uri(uri), "name": name })
+                })
+                .collect();
+            body["files"] = Value::Array(attachments);
+        }
         let response = target.post_json(
             &format!("/api/session/{session_id}/prompt"),
-            json!({ "text": text }),
+            body,
         )?;
         let data = unwrap_data(response);
         string_field(&data, "id").ok_or_else(|| "prompt 响应缺少消息 id".to_string())
+    }
+
+    /// 可用模型目录（含默认模型标记与推理档位）。
+    pub fn list_models(&self, directory: &str) -> Result<Vec<catalog::EngineModel>, String> {
+        let target = self.ensure_server()?;
+        let value = fetch_location_json(&target, "/api/model", directory)?;
+        let data = unwrap_data(value);
+        let default_ref = fetch_location_json(&target, "/api/model/default", directory)
+            .ok()
+            .map(|value| unwrap_data(value));
+        Ok(catalog::parse_opencode_models(&data, default_ref.as_ref()))
+    }
+
+    /// 斜杠命令列表（内置 + 项目自定义）。
+    pub fn list_commands(&self, directory: &str) -> Result<Vec<catalog::EngineCommand>, String> {
+        let target = self.ensure_server()?;
+        let value = fetch_location_json(&target, "/api/command", directory)?;
+        Ok(catalog::parse_opencode_commands(&unwrap_data(value)))
+    }
+
+    /// 设置会话模型；variant 为推理档位（空串 / "default" 视为不指定）。
+    pub fn set_session_model(
+        &self,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+        variant: Option<&str>,
+    ) -> Result<(), String> {
+        let target = self.ensure_server()?;
+        let mut reference = json!({ "id": model, "providerID": provider });
+        if let Some(variant) = variant.filter(|value| !value.is_empty() && *value != "default") {
+            reference["variant"] = json!(variant);
+        }
+        target.post_json(
+            &format!("/api/session/{session_id}/model"),
+            json!({ "model": reference }),
+        )?;
+        Ok(())
+    }
+
+    /// 在会话里直接跑一条 shell 命令（不发给模型）。
+    pub fn session_shell(&self, session_id: &str, command: &str) -> Result<(), String> {
+        let command = command.trim();
+        if command.is_empty() {
+            return Err("shell 命令为空".to_string());
+        }
+        let target = self.ensure_server()?;
+        target.post_json(
+            &format!("/api/session/{session_id}/shell"),
+            json!({ "command": command }),
+        )?;
+        Ok(())
+    }
+
+    /// 运行一条斜杠命令（如 init / review），text 为命令参数。
+    pub fn session_command(
+        &self,
+        session_id: &str,
+        name: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("命令名为空".to_string());
+        }
+        let target = self.ensure_server()?;
+        let response = target.post_json(
+            &format!("/api/session/{session_id}/command"),
+            json!({ "name": name, "text": text }),
+        )?;
+        let data = unwrap_data(response);
+        Ok(string_field(&data, "id").unwrap_or_default())
     }
 
     /// 中断当前执行。
@@ -743,6 +853,12 @@ mod tests {
     fn truncate_behaviour() {
         assert_eq!(truncate("abc", 5), "abc");
         assert_eq!(truncate("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn normalizes_file_uri() {
+        assert_eq!(to_file_uri("/a/b.txt"), "file:///a/b.txt");
+        assert_eq!(to_file_uri("file:///x/y"), "file:///x/y");
     }
 
     #[test]
@@ -1301,6 +1417,161 @@ mod tests {
             })
             .collect::<String>();
         assert!(text.contains("收到"), "插话后助手应回应『收到』：{text}");
+
+        runtime.delete_session(&sid).expect("delete_session");
+        runtime.shutdown();
+        let removed = cleanup_project(&dir);
+        assert_eq!(removed, 1, "应恰好清理一条测试项目行");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真机目录：模型/命令列表接口（组合器数据源）。
+    /// `cargo test --lib -- --ignored --nocapture lists_models_and_commands_real`
+    #[test]
+    #[ignore]
+    fn lists_models_and_commands_real() {
+        let runtime = Runtime::unattached();
+        let dir = std::env::var("HOME").expect("HOME");
+        let models = runtime.list_models(&dir).expect("list_models");
+        println!("模型 {} 个：", models.len());
+        for model in models.iter().take(8) {
+            println!(
+                "  {}/{} v={:?} default={}",
+                model.provider.clone().unwrap_or_default(),
+                model.id,
+                model.variants,
+                model.is_default
+            );
+        }
+        assert!(!models.is_empty(), "应有模型");
+        assert!(models.iter().any(|model| model.is_default), "应有一个默认模型");
+        let commands = runtime.list_commands(&dir).expect("list_commands");
+        println!("命令：{commands:?}");
+        assert!(
+            commands.iter().any(|command| command.name == "init"),
+            "内置 init 命令应可见：{commands:?}"
+        );
+        runtime.shutdown();
+    }
+
+    /// 真机附件：带 files 的 prompt 能收口成功，助手能答出附件内容。
+    /// `cargo test --lib -- --ignored --nocapture sends_file_attachment_real`
+    #[test]
+    #[ignore]
+    fn sends_file_attachment_real() {
+        let runtime = Runtime::unattached();
+        let events = runtime.subscribe();
+
+        let dir = std::env::temp_dir().join(format!("prism-m20-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        let note_path = dir.join("note.txt");
+        std::fs::write(&note_path, "MAGIC-WORD-2026\n").expect("写附件");
+        let created = runtime
+            .create_session(dir.to_str().expect("临时目录路径"))
+            .expect("create_session");
+        let sid = created.session_id.clone();
+
+        let files = vec![(
+            note_path.to_string_lossy().to_string(),
+            "note.txt".to_string(),
+        )];
+        runtime
+            .send_prompt_rich(
+                &sid,
+                "请读取附件 note.txt，告诉我里面的 MAGIC-WORD 是什么；只回复这一个词。",
+                &files,
+            )
+            .expect("send_prompt_rich");
+
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut terminal = None;
+        while Instant::now() < deadline {
+            let Ok(event) = events.recv_timeout(Duration::from_millis(500)) else {
+                continue;
+            };
+            if event.pointer("/data/sessionID").and_then(Value::as_str) != Some(sid.as_str()) {
+                continue;
+            }
+            match event.get("type").and_then(Value::as_str) {
+                Some(
+                    kind @ ("session.execution.succeeded"
+                    | "session.execution.failed"
+                    | "session.execution.interrupted"),
+                ) => {
+                    terminal = Some(kind.to_string());
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            terminal.as_deref(),
+            Some("session.execution.succeeded"),
+            "带附件的 prompt 应成功收口"
+        );
+
+        // DB 侧：用户消息应保留附件形态（打印供人工核对），助手应答出内容。
+        let db_path = locator::database_path().expect("opencode.db");
+        let mut assistant_ok = false;
+        for _ in 0..20 {
+            let page =
+                crate::engines::opencode::db::read_timeline(&db_path, &sid, None, 50)
+                    .expect("read_timeline");
+            if let Some(user) = page.records.iter().find(|record| record.role == "user") {
+                println!("用户消息 parts：{:?}", user.parts);
+            }
+            let text = page
+                .records
+                .iter()
+                .rev()
+                .find(|record| record.role == "assistant")
+                .map(|record| {
+                    record
+                        .parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            crate::engines::core::TimelinePart::Text { text } => {
+                                Some(text.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            if text.contains("MAGIC-WORD-2026") {
+                assistant_ok = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+        assert!(assistant_ok, "助手应能读到附件内容");
+
+        runtime.delete_session(&sid).expect("delete_session");
+        runtime.shutdown();
+        let removed = cleanup_project(&dir);
+        assert_eq!(removed, 1, "应恰好清理一条测试项目行");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真机组会话 shell：接口可调用（命令落引擎侧，不发给模型）。
+    /// `cargo test --lib -- --ignored --nocapture session_shell_real`
+    #[test]
+    #[ignore]
+    fn session_shell_real() {
+        let runtime = Runtime::unattached();
+        let dir = std::env::temp_dir().join(format!("prism-m20-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        let created = runtime
+            .create_session(dir.to_str().expect("临时目录路径"))
+            .expect("create_session");
+        let sid = created.session_id.clone();
+
+        runtime
+            .session_shell(&sid, "echo prism-shell-ok")
+            .expect("session_shell");
+        // 空命令应被本地拦下
+        assert!(runtime.session_shell(&sid, "   ").is_err());
+        println!("shell 已执行（输出落引擎侧）");
 
         runtime.delete_session(&sid).expect("delete_session");
         runtime.shutdown();

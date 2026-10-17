@@ -2,6 +2,16 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import { annotationFor, ensureAnnotations, isStarred, setStar, setTitle, tagsOf, titleOf } from '../annotations'
+import {
+  applyCompletion,
+  commandInvocation,
+  detectTrigger,
+  fileLabel,
+  modelKeyOf,
+  modelLabel,
+  shellCommand,
+  type Trigger,
+} from '../composer'
 import { onEngineEvent } from '../engineEvents'
 import { createLiveTurn, reduceLiveTurn, type LiveTurn } from '../liveTurn'
 import { pushNotification } from '../notify'
@@ -15,7 +25,15 @@ import {
   type PermissionDecision,
 } from '../permissions'
 import { engineLabel } from '../workshop'
-import type { PermissionRequest, SessionSummary, TimelineRecord } from '../types'
+import type {
+  EngineCatalog,
+  EngineCommand,
+  FileHit,
+  PermissionRequest,
+  SendOptions,
+  SessionSummary,
+  TimelineRecord,
+} from '../types'
 import { formatCost, formatTokens, fullTime } from '../format'
 import TimelineItem from './TimelineItem.vue'
 import LiveTurnView from './LiveTurn.vue'
@@ -67,6 +85,216 @@ const highlightId = ref<string | null>(null)
 const artifactPath = ref<string | null>(null)
 /** 未吸附底部时累计的新消息数（回底浮标角标）。 */
 const unseen = ref(0)
+
+// ---- 组合器（M20）：模型 / 档位 / @ 文件 / / 命令 / ! shell ----
+
+/** 引擎能力目录（模型 + 斜杠命令；聚焦输入框时惰性加载）。 */
+const catalog = ref<EngineCatalog | null>(null)
+const catalogLoading = ref(false)
+/** 已选文件附件（发送时作为引擎结构化附件）。 */
+const attachments = ref<FileHit[]>([])
+/** 当前模型 key（provider::id 或 id；空 = 引擎默认）与推理档位。 */
+const modelKey = ref('')
+const variant = ref('')
+const popup = ref<ComposerPopup | null>(null)
+/** 一次性提示（如 shell 已执行）。 */
+const notice = ref<string | null>(null)
+let popupTimer: number | null = null
+
+interface ComposerPopup {
+  kind: 'file' | 'command'
+  items: (FileHit | EngineCommand)[]
+  active: number
+  trigger: Trigger
+}
+
+const sessionModels = computed(() => catalog.value?.models ?? [])
+const selectedModel = computed(
+  () => sessionModels.value.find(model => modelKeyOf(model) === modelKey.value) ?? null,
+)
+const sessionVariants = computed(() => selectedModel.value?.variants ?? [])
+/** ! 开头 = 本机 shell 直跑。 */
+const shellMode = computed(() => shellCommand(draft.value) !== null)
+/** /name = 斜杠命令调用预览。 */
+const commandPreview = computed(() =>
+  commandInvocation(draft.value.trim(), catalog.value?.commands ?? []),
+)
+
+const PREFS_KEY = 'prism-composer-prefs-v1'
+
+interface ComposerPrefs {
+  modelKey: string
+  variant: string
+}
+
+function readPrefs(engine: string): ComposerPrefs {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY)
+    if (!raw) return { modelKey: '', variant: '' }
+    const all = JSON.parse(raw) as Record<string, ComposerPrefs>
+    return all[engine] ?? { modelKey: '', variant: '' }
+  } catch {
+    return { modelKey: '', variant: '' }
+  }
+}
+
+function writePrefs(engine: string, prefs: ComposerPrefs) {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY)
+    const all = raw ? (JSON.parse(raw) as Record<string, ComposerPrefs>) : {}
+    all[engine] = prefs
+    localStorage.setItem(PREFS_KEY, JSON.stringify(all))
+  } catch {
+    // 存不下就算了：只是偏好。
+  }
+}
+
+watch([modelKey, variant], () => {
+  if (!props.session) return
+  writePrefs(props.session.engine, { modelKey: modelKey.value, variant: variant.value })
+})
+
+/** 惰性加载引擎目录（聚焦输入框 / 用到模型或命令时）。 */
+async function ensureCatalog() {
+  const session = props.session
+  if (!session || catalog.value || catalogLoading.value || readOnly.value) return
+  catalogLoading.value = true
+  try {
+    catalog.value = await api.engineCatalog(session.engine, session.directory)
+  } catch (cause) {
+    report(cause)
+  } finally {
+    catalogLoading.value = false
+  }
+}
+
+function closePopup() {
+  popup.value = null
+  if (popupTimer !== null) {
+    window.clearTimeout(popupTimer)
+    popupTimer = null
+  }
+}
+
+/** 组合器候选列表：在光标处检测触发词并按需拉取。 */
+function onComposerInput() {
+  autoGrow()
+  const el = composerInput.value
+  const trigger = detectTrigger(draft.value, el?.selectionStart ?? draft.value.length)
+  if (!trigger) {
+    closePopup()
+    return
+  }
+  if (trigger.kind === 'command') {
+    if (!catalog.value && !catalogLoading.value) {
+      void ensureCatalog().then(() => onComposerInput())
+      return
+    }
+    const term = trigger.term.toLowerCase()
+    const items = (catalog.value?.commands ?? []).filter(command =>
+      command.name.toLowerCase().includes(term),
+    )
+    popup.value = items.length ? { kind: 'command', items, active: 0, trigger } : null
+    return
+  }
+  // 文件：防抖后向会话目录要索引
+  if (popupTimer !== null) window.clearTimeout(popupTimer)
+  const directory = props.session?.directory
+  if (!directory) return
+  popupTimer = window.setTimeout(async () => {
+    popupTimer = null
+    try {
+      const hits = await api.projectFiles(directory, trigger.term, 20)
+      const current = detectTrigger(draft.value, composerInput.value?.selectionStart ?? 0)
+      if (!current || current.kind !== 'file' || current.start !== trigger.start) return
+      popup.value = hits.length ? { kind: 'file', items: hits, active: 0, trigger: current } : null
+    } catch {
+      popup.value = null
+    }
+  }, 180)
+}
+
+async function pickPopup(index: number) {
+  const current = popup.value
+  const item = current?.items[index]
+  if (!current || !item) return
+  let replacement: string
+  if (current.kind === 'file') {
+    const file = item as FileHit
+    if (!attachments.value.some(entry => entry.path === file.path)) {
+      attachments.value = [...attachments.value, file]
+    }
+    replacement = `@${file.path}`
+  } else {
+    replacement = `/${(item as EngineCommand).name}`
+  }
+  const caret = composerInput.value?.selectionStart ?? draft.value.length
+  const next = applyCompletion(draft.value, current.trigger, replacement, caret)
+  draft.value = next.text
+  closePopup()
+  await nextTick()
+  const el = composerInput.value
+  if (el) {
+    el.focus()
+    el.setSelectionRange(next.caret, next.caret)
+    autoGrow()
+  }
+}
+
+function removeAttachment(file: FileHit) {
+  attachments.value = attachments.value.filter(entry => entry.path !== file.path)
+  const token = `@${file.path}`
+  if (draft.value.includes(token)) {
+    draft.value = draft.value.split(token).join('').replace(/[ \t]{2,}/g, ' ')
+  }
+}
+
+function onComposerKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return
+  if (popup.value?.items.length) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      popup.value.active = (popup.value.active + 1) % popup.value.items.length
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      popup.value.active =
+        (popup.value.active - 1 + popup.value.items.length) % popup.value.items.length
+      return
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault()
+      void pickPopup(popup.value.active)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closePopup()
+      return
+    }
+  }
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    void send()
+  }
+}
+
+/** 解析发送时的模型参数（目录缺位时按 key 形态回退解析 provider::id）。
+ *  只带用户显式选择的档位：未选则交给引擎默认（尊重 config.toml）。 */
+function resolveModel(): { model: string; provider: string | null; variant: string | null } | null {
+  if (!modelKey.value) return null
+  const model = selectedModel.value
+  const chosen = variant.value || null
+  if (model) {
+    return { model: model.id, provider: model.provider, variant: chosen }
+  }
+  const parts = modelKey.value.split('::')
+  if (parts.length === 2) {
+    return { model: parts[1], provider: parts[0], variant: chosen }
+  }
+  return { model: modelKey.value, provider: null, variant: chosen }
+}
 
 /** 标题编辑与标签选择器状态。 */
 const titleEditing = ref(false)
@@ -526,14 +754,58 @@ watch(
 async function send() {
   if (readOnly.value) return
   const sessionId = props.session?.id
+  if (!sessionId || sending.value) return
+
+  // ! 开头：本机 shell 直跑（不发给模型）
+  const shell = shellCommand(draft.value)
+  if (shell !== null) {
+    if (!shell) return
+    sending.value = true
+    try {
+      await api.sessionShell(sessionId, shell)
+      if (props.session?.id !== sessionId) return
+      draft.value = ''
+      closePopup()
+      flashNotice('已在本机执行 shell，输出见时间线')
+      window.setTimeout(() => {
+        if (props.session?.id === sessionId) void refreshTail()
+      }, 900)
+    } catch (cause) {
+      report(cause)
+    } finally {
+      sending.value = false
+    }
+    return
+  }
+
   const content = draft.value.trim()
-  if (!sessionId || !content || sending.value) return
+  if (!content && !attachments.value.length) return
   sending.value = true
   try {
-    // 执行中发送 = 插话：引擎会把消息投递进当前执行（下一步边界送达）。
-    await api.sessionSend(sessionId, content)
+    const directory = (props.session?.directory ?? '').replace(/\/+$/, '')
+    const files = attachments.value.map(file => ({
+      uri: directory ? `${directory}/${file.path}` : file.path,
+      name: fileLabel(file.path),
+    }))
+    const invocation = commandInvocation(content, catalog.value?.commands ?? [])
+    if (invocation) {
+      // 斜杠命令：走引擎命令通道（剩余文本作为命令参数）
+      await api.sessionCommand(sessionId, invocation.name, invocation.text)
+    } else {
+      const options: SendOptions = { files }
+      const picked = resolveModel()
+      if (picked) {
+        options.model = picked.model
+        options.provider = picked.provider
+        if (picked.variant && picked.variant !== 'default') options.variant = picked.variant
+      }
+      // 执行中发送 = 插话：引擎会把消息投递进当前执行（下一步边界送达）。
+      await api.sessionSend(sessionId, content, options)
+    }
     if (props.session?.id !== sessionId) return
     draft.value = ''
+    attachments.value = []
+    closePopup()
     await refreshTail()
     stick.value = true
     scrollToBottom()
@@ -546,6 +818,14 @@ async function send() {
   } finally {
     sending.value = false
   }
+}
+
+/** 一次性提示（4 秒后自动消失）。 */
+function flashNotice(text: string) {
+  notice.value = text
+  window.setTimeout(() => {
+    if (notice.value === text) notice.value = null
+  }, 4000)
 }
 
 /** 回复权限请求：once / always / reject。 */
@@ -574,14 +854,6 @@ async function stop() {
     report(cause)
   } finally {
     stopping.value = false
-  }
-}
-
-function onEnter(event: KeyboardEvent) {
-  if (event.isComposing) return
-  if (!event.shiftKey) {
-    event.preventDefault()
-    void send()
   }
 }
 
@@ -614,9 +886,19 @@ watch(
     tagPickerOpen.value = false
     titleEditing.value = false
     ledgerOpen.value = false
+    // 组合器：换会话时清空附件 / 目录缓存，装载该引擎的上次偏好
+    catalog.value = null
+    attachments.value = []
+    popup.value = null
+    notice.value = null
     if (sessionId) {
+      const prefs = readPrefs(props.session?.engine ?? 'opencode')
+      modelKey.value = prefs.modelKey
+      variant.value = prefs.variant
       void prepareSession(sessionId)
     } else {
+      modelKey.value = ''
+      variant.value = ''
       records.value = []
       cursor.value = null
       hasMore.value = false
@@ -842,48 +1124,128 @@ watch(
           </div>
         </div>
         <div class="composer-box">
-          <textarea
-            ref="composerInput"
-            v-model="draft"
-            class="composer-input"
-            rows="3"
-            spellcheck="false"
-            :placeholder="
-              running
-                ? '执行中：发送 = 插话引导（下一步送达），Shift+Enter 换行'
-                : '发一条指令…（Enter 发送，Shift+Enter 换行）'
-            "
-            :disabled="sending"
-            @input="autoGrow"
-            @keydown.enter="onEnter"
-          />
+          <div class="composer-tools">
+            <label class="tool-select" title="模型（下一轮生效）">
+              <span class="tool-label">模型</span>
+              <select
+                v-model="modelKey"
+                :disabled="sending"
+                @focus="ensureCatalog"
+                @mousedown="ensureCatalog"
+              >
+                <option value="">{{ catalogLoading ? '加载中…' : '默认' }}</option>
+                <option
+                  v-for="model in sessionModels"
+                  :key="modelKeyOf(model)"
+                  :value="modelKeyOf(model)"
+                >
+                  {{ modelLabel(model) }}
+                </option>
+              </select>
+            </label>
+            <label v-if="sessionVariants.length" class="tool-select" title="推理档位（下一轮生效）">
+              <span class="tool-label">档位</span>
+              <select v-model="variant" :disabled="sending">
+                <option value="">默认</option>
+                <option v-for="item in sessionVariants" :key="item" :value="item">{{ item }}</option>
+              </select>
+            </label>
+            <span class="tool-tip" title="@ 选文件 · / 选命令 · ! 直跑 shell">@ 文件 · / 命令 · ! shell</span>
+          </div>
+          <div class="composer-input-wrap">
+            <textarea
+              ref="composerInput"
+              v-model="draft"
+              class="composer-input"
+              rows="3"
+              spellcheck="false"
+              :placeholder="
+                running
+                  ? '执行中：发送 = 插话引导（下一步送达），Shift+Enter 换行'
+                  : '发一条指令…（@ 文件、/ 命令、! shell；Enter 发送）'
+              "
+              :disabled="sending"
+              @input="onComposerInput"
+              @keydown="onComposerKeydown"
+              @focus="ensureCatalog"
+            />
+            <div v-if="popup && popup.items.length" class="composer-popup">
+              <template v-if="popup.kind === 'file'">
+                <button
+                  v-for="(item, index) in popup.items"
+                  :key="(item as FileHit).path"
+                  class="popup-item"
+                  :class="{ active: index === popup.active }"
+                  @mousedown.prevent="pickPopup(index)"
+                >
+                  <span class="popup-main">{{ (item as FileHit).name }}</span>
+                  <span class="popup-sub">{{ (item as FileHit).path }}</span>
+                </button>
+              </template>
+              <template v-else>
+                <button
+                  v-for="(item, index) in popup.items"
+                  :key="(item as EngineCommand).name"
+                  class="popup-item"
+                  :class="{ active: index === popup.active }"
+                  @mousedown.prevent="pickPopup(index)"
+                >
+                  <span class="popup-main">/{{ (item as EngineCommand).name }}</span>
+                  <span class="popup-sub">{{ (item as EngineCommand).description }}</span>
+                </button>
+              </template>
+            </div>
+          </div>
+          <div v-if="attachments.length" class="composer-attachments">
+            <span v-for="file in attachments" :key="file.path" class="attach-chip">
+              @{{ fileLabel(file.path) }}
+              <button class="chip-x" title="移除附件" @click="removeAttachment(file)">✕</button>
+            </span>
+          </div>
           <div class="composer-actions">
             <span v-if="sending" class="composer-hint">发送中…</span>
+            <span v-else-if="notice" class="composer-hint">{{ notice }}</span>
+            <span v-else-if="shellMode" class="composer-hint">
+              ! 开头 = 本机直跑 shell（不发给模型）
+            </span>
             <span v-else-if="running" class="composer-hint">执行中，发送即插话</span>
+            <span v-else-if="commandPreview" class="composer-hint">
+              斜杠命令 /{{ commandPreview.name }}
+            </span>
             <button
-              v-if="running"
-              class="send-btn"
-              :disabled="!draft.trim() || sending"
+              v-if="shellMode"
+              class="send-btn shell-btn"
+              :disabled="!draft.trim().slice(1).trim() || sending"
               @click="send"
             >
-              插话 ⏎
+              运行 shell ⏎
             </button>
-            <button
-              v-if="running"
-              class="stop-btn"
-              :disabled="stopping"
-              @click="stop"
-            >
-              {{ stopping ? '停止中…' : '■ 停止' }}
-            </button>
-            <button
-              v-else
-              class="send-btn"
-              :disabled="!draft.trim() || sending"
-              @click="send"
-            >
-              发送 ⏎
-            </button>
+            <template v-else>
+              <button
+                v-if="running"
+                class="send-btn"
+                :disabled="(!draft.trim() && !attachments.length) || sending"
+                @click="send"
+              >
+                插话 ⏎
+              </button>
+              <button
+                v-if="running"
+                class="stop-btn"
+                :disabled="stopping"
+                @click="stop"
+              >
+                {{ stopping ? '停止中…' : '■ 停止' }}
+              </button>
+              <button
+                v-else
+                class="send-btn"
+                :disabled="(!draft.trim() && !attachments.length) || sending"
+                @click="send"
+              >
+                发送 ⏎
+              </button>
+            </template>
           </div>
         </div>
         </template>
@@ -1277,6 +1639,133 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 7px;
+}
+
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 20px;
+}
+
+.tool-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.tool-select select {
+  max-width: 220px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+.tool-select select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.tool-tip {
+  color: var(--faint);
+  font-size: 10.5px;
+  margin-left: auto;
+}
+
+.composer-input-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.composer-popup {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.popup-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.popup-item.active,
+.popup-item:hover {
+  background: var(--panel-2);
+}
+
+.popup-main {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.popup-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.composer-attachments {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.chip-x {
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  font-size: 10px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.chip-x:hover {
+  color: var(--red);
+}
+
+.send-btn.shell-btn {
+  background: var(--amber);
 }
 
 .composer-input {
