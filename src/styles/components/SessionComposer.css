@@ -1,0 +1,260 @@
+.composer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--overlay);
+}
+
+.composer-panel {
+  width: min(680px, 94vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dialog-title {
+  font-weight: 600;
+}
+
+.close-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.composer-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field.compact {
+  flex: 1;
+  min-width: 0;
+}
+
+.field-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field-input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.engine-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.engine-tab {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.engine-tab.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.engine-tab.dim {
+  opacity: 0.75;
+}
+
+.engine-badge {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--amber);
+}
+
+.engine-reason {
+  font-size: 12px;
+  color: var(--amber);
+}
+
+.catalog-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.draft-wrap {
+  position: relative;
+}
+
+.draft {
+  width: 100%;
+  resize: vertical;
+  min-height: 96px;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.composer-popup {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  max-height: 220px;
+  overflow-y: auto;
+  z-index: 65;
+  display: flex;
+  flex-direction: column;
+}
+
+.popup-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.popup-item.active,
+.popup-item:hover {
+  background: var(--hover);
+}
+
+.popup-main {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.popup-sub {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draft-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ghost-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.attach-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.chip-x {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+
+.dialog-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.foot-hint {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.foot-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.primary-btn {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  border-radius: 8px;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.primary-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

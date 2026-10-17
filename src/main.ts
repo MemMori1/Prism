@@ -4,6 +4,9 @@ import 'katex/dist/katex.min.css'
 import './styles.css'
 import { setSystemNotifier } from './notify'
 import { systemNotify } from './systemNotify'
+import { initTheme } from './theme'
+
+initTheme()
 
 // 通知中心 → 系统通知（非前台判定与权限处理在 systemNotify 内）。
 setSystemNotifier((title, body) => {

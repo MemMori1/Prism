@@ -1,0 +1,123 @@
+.record {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 搜索结果定位：目标消息短暂高亮。 */
+.record.highlighted {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 5px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.role-user {
+  align-items: flex-end;
+}
+
+.user-bubble {
+  max-width: 78%;
+  background: var(--accent-soft);
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  border-radius: var(--radius-lg);
+  border-bottom-right-radius: 4px;
+  padding: 8px 13px;
+}
+
+.system-note {
+  align-self: center;
+  color: var(--faint);
+  font-size: 11.5px;
+  padding: 2px 0;
+}
+
+.assistant-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 860px;
+}
+
+.part {
+  display: flex;
+  flex-direction: column;
+}
+
+.reasoning {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  max-width: 720px;
+}
+
+.reasoning summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.reasoning summary::-webkit-details-marker {
+  display: none;
+}
+
+.reasoning summary::before {
+  content: '▸ ';
+}
+
+.reasoning[open] summary::before {
+  content: '▾ ';
+}
+
+.reasoning-body {
+  padding: 2px 12px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 每轮 token 四联 + 上下文用量条 */
+.turn-tokens {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--faint);
+  user-select: none;
+}
+
+.tt-item {
+  white-space: nowrap;
+}
+
+.tt-cost {
+  color: var(--muted);
+}
+
+.tt-ctx {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tt-ctx-bar {
+  display: inline-block;
+  width: 54px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.tt-ctx-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+}

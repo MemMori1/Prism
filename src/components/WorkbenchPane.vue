@@ -11,12 +11,14 @@ import {
   serializeWorkbenchLayout,
   WORKBENCH_DEFAULT_WIDTH,
 } from '../workbench'
-import type { ProjectItem, SessionSummary } from '../types'
-import SessionComposer from './SessionComposer.vue'
+import type { EngineHealth, ProjectItem, SessionSummary } from '../types'
+import { newestProject } from '../sessionStart'
+import NewSessionPanel from './NewSessionPanel.vue'
 import SessionView from './SessionView.vue'
 
 const props = defineProps<{
   projects: ProjectItem[]
+  health: EngineHealth[]
 }>()
 
 const emit = defineEmits<{
@@ -43,6 +45,25 @@ const scroller = ref<HTMLElement | null>(null)
 const columns = ref<WorkbenchColumn[]>([])
 const flashId = ref<string | null>(null)
 const pickerOpen = ref(false)
+const activeProjectId = ref<string | null>(null)
+const creatingSession = ref(false)
+const sessionError = ref<string | null>(null)
+
+/** 没有显式选择时，默认用最近活跃的项目。 */
+const activeProject = computed(
+  () =>
+    props.projects.find(project => project.id === activeProjectId.value) ??
+    newestProject(props.projects),
+)
+
+watch(
+  () => props.projects.map(project => project.id).join('\n'),
+  () => {
+    if (activeProjectId.value && !props.projects.some(item => item.id === activeProjectId.value)) {
+      activeProjectId.value = null
+    }
+  },
+)
 
 const runningCount = computed(() => columns.value.filter(column => column.status.running).length)
 const waitingCount = computed(() =>
@@ -161,14 +182,30 @@ function focusColumn(sessionId: string) {
   })
 }
 
-// ---- 新建会话 ----
+// ---- 新建会话：先选 Agent，再建空白会话 ----
 
-async function onComposerCreated(sessionId: string) {
-  pickerOpen.value = false
-  const summary = await fetchSummaryWithRetry(sessionId)
-  if (summary) openColumn(sessionId, summary)
-  else openColumn(sessionId)
-  emit('settled')
+function chooseProject(projectId: string) {
+  activeProjectId.value = projectId
+  sessionError.value = null
+}
+
+async function onEngineSelected(engine: string) {
+  const project = activeProject.value
+  if (!project || creatingSession.value) return
+  creatingSession.value = true
+  sessionError.value = null
+  try {
+    const created = await api.sessionCreate(project.worktree, engine)
+    const summary = await fetchSummaryWithRetry(created.sessionId)
+    if (summary) openColumn(created.sessionId, summary)
+    else openColumn(created.sessionId)
+    pickerOpen.value = false
+    emit('settled')
+  } catch (cause) {
+    sessionError.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    creatingSession.value = false
+  }
 }
 
 // ---- 列宽拖拽 ----
@@ -262,7 +299,7 @@ defineExpose({ openColumn })
 
 <template>
   <section class="workbench">
-    <div ref="scroller" class="wb-scroll">
+    <div v-if="columns.length && !pickerOpen" ref="scroller" class="wb-scroll">
       <div
         v-for="column in columns"
         :key="column.sessionId"
@@ -302,244 +339,31 @@ defineExpose({ openColumn })
 
         <div class="wb-resize" title="拖动调整宽度" @pointerdown="startResize($event, column)" />
       </div>
+    </div>
 
-      <div v-if="!columns.length" class="wb-empty">
-        <div class="wb-empty-mark">▦</div>
-        <div class="wb-empty-title">工作台还没有会话</div>
-        <div class="wb-empty-hint">
-          一屏多列并行盯盘：这里新建一个，或去归档里点会话右上角「⇥ 工作台」
-        </div>
-        <button class="new-session-btn" @click="pickerOpen = true">新建会话</button>
-      </div>
+    <div v-else class="wb-picker">
+      <NewSessionPanel
+        :project="activeProject"
+        :projects="projects"
+        :engines="health"
+        :busy="creatingSession"
+        :error="sessionError"
+        :cancelable="columns.length > 0"
+        @select="onEngineSelected"
+        @project="chooseProject"
+        @cancel="pickerOpen = false"
+      />
     </div>
 
     <button
-      v-if="columns.length"
+      v-if="columns.length && !pickerOpen"
       class="wb-add"
       title="新建会话并开一列"
       @click="pickerOpen = true"
     >
       ＋ 新建会话
     </button>
-
-    <SessionComposer
-      v-if="pickerOpen"
-      :projects="projects"
-      @close="pickerOpen = false"
-      @created="onComposerCreated"
-      @error="report"
-    />
   </section>
 </template>
 
-<style scoped>
-.workbench {
-  position: relative;
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  background: var(--bg);
-}
-
-.wb-scroll {
-  display: flex;
-  align-items: stretch;
-  gap: 10px;
-  flex: 1;
-  min-height: 0;
-  overflow-x: auto;
-  padding: 10px;
-}
-
-.wb-column {
-  position: relative;
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel);
-  overflow: hidden;
-  transition: box-shadow 0.25s ease, border-color 0.25s ease;
-}
-
-.wb-column.flash {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
-}
-
-.wb-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  padding: 7px 10px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel-2);
-}
-
-.wb-dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--faint);
-}
-
-.wb-dot.tone-run {
-  background: var(--green);
-  animation: wb-pulse 1.6s ease infinite;
-}
-
-.wb-dot.tone-wait {
-  background: var(--amber);
-  animation: wb-pulse 1.1s ease infinite;
-}
-
-@keyframes wb-pulse {
-  50% {
-    opacity: 0.4;
-  }
-}
-
-.wb-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.wb-waiting {
-  flex: none;
-  padding: 0 7px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent);
-  background: var(--amber-soft);
-  color: var(--amber);
-  font-size: 10.5px;
-  line-height: 16px;
-}
-
-.wb-btn {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  border-radius: 5px;
-  color: var(--faint);
-  font-size: 11px;
-  line-height: 1;
-}
-
-.wb-btn:hover {
-  background: var(--panel);
-  color: var(--text);
-}
-
-.wb-btn.wide {
-  width: auto;
-  height: auto;
-  padding: 4px 12px;
-  border: 1px solid var(--border);
-  font-size: 11.5px;
-}
-
-.wb-missing {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  color: var(--faint);
-  font-size: 12px;
-}
-
-.wb-resize {
-  position: absolute;
-  top: 0;
-  right: -5px;
-  bottom: 0;
-  width: 10px;
-  cursor: col-resize;
-  z-index: 6;
-}
-
-.wb-resize:hover {
-  background: color-mix(in srgb, var(--accent) 25%, transparent);
-}
-
-.wb-empty {
-  margin: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 40px;
-  color: var(--faint);
-}
-
-.wb-empty-mark {
-  font-size: 30px;
-  color: var(--border-strong);
-}
-
-.wb-empty-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--muted);
-}
-
-.wb-empty-hint {
-  max-width: 320px;
-  text-align: center;
-  font-size: 11.5px;
-  line-height: 1.6;
-}
-
-.new-session-btn {
-  margin-top: 6px;
-  padding: 6px 16px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.new-session-btn:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.new-session-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.wb-add {
-  position: absolute;
-  top: 18px;
-  right: 20px;
-  z-index: 5;
-  padding: 5px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  box-shadow: var(--shadow);
-}
-
-.wb-add:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.wb-add:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-</style>
+<style scoped src="../styles/components/WorkbenchPane.css"></style>

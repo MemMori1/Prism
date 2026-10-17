@@ -1,0 +1,152 @@
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--overlay);
+}
+
+.dialog-panel {
+  width: 520px;
+  max-width: calc(100vw - 60px);
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dialog-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.close-btn {
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  transition: all 0.15s ease;
+}
+
+.close-btn:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.field-input {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+
+.field-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.schedule-row {
+  display: flex;
+  gap: 8px;
+}
+
+.preset-select {
+  flex: none;
+  width: 168px;
+}
+
+.mono-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.field-hint {
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.prompt-area {
+  resize: vertical;
+  min-height: 96px;
+  line-height: 1.6;
+}
+
+.dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.mini-btn {
+  padding: 4px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  transition: all 0.15s ease;
+}
+
+.mini-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.primary-btn {
+  padding: 4px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 12px;
+  font-weight: 600;
+  transition: background 0.15s ease;
+}
+
+.primary-btn:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.primary-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

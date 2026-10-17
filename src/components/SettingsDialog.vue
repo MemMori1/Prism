@@ -10,6 +10,7 @@ import { check, type Update } from '@tauri-apps/plugin-updater'
 import { api } from '../api'
 import type { EngineHealth, RuntimeStatus } from '../types'
 import { friendlyUpdateError } from '../updateStatus'
+import { readTheme, setThemeMode, THEME_MODES, type ThemeMode } from '../theme'
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -27,6 +28,18 @@ const updatePhase = ref<UpdatePhase>('idle')
 const updateHandle = ref<Update | null>(null)
 const updateProgress = ref<number | null>(null)
 const updateError = ref<string | null>(null)
+
+const theme = ref<ThemeMode>(readTheme())
+const themeLabels: Record<ThemeMode, string> = {
+  system: '跟随系统',
+  light: '浅色',
+  dark: '深色',
+}
+
+function chooseTheme(mode: ThemeMode) {
+  theme.value = mode
+  setThemeMode(mode)
+}
 
 const opencode = computed(() => engines.value.find(item => item.engineId === 'opencode') ?? null)
 const codex = computed(() => engines.value.find(item => item.engineId === 'codex') ?? null)
@@ -316,6 +329,23 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
         </section>
 
         <section class="settings-section">
+          <div class="section-label">外观</div>
+          <div class="theme-options" role="group" aria-label="主题">
+            <button
+              v-for="mode in THEME_MODES"
+              :key="mode"
+              class="theme-option"
+              :class="{ active: theme === mode }"
+              :aria-pressed="theme === mode"
+              @click="chooseTheme(mode)"
+            >
+              {{ themeLabels[mode] }}
+            </button>
+          </div>
+          <div class="theme-hint">跟随系统时随 macOS 外观自动切换，浅色 / 深色会覆盖系统设置。</div>
+        </section>
+
+        <section class="settings-section">
           <div class="section-label">更新</div>
           <div class="update-row">
             <span class="update-text" :class="{ 'is-error': updatePhase === 'error' }">
@@ -344,229 +374,4 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
   </div>
 </template>
 
-<style scoped>
-.settings-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(10, 8, 20, 0.45);
-  backdrop-filter: blur(3px);
-}
-
-.settings-panel {
-  width: min(560px, calc(100vw - 48px));
-  max-height: calc(100vh - 96px);
-  display: flex;
-  flex-direction: column;
-  border-radius: var(--radius);
-  border: 1px solid var(--border-strong);
-  background: var(--panel);
-  box-shadow: var(--shadow);
-  overflow: hidden;
-}
-
-.settings-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 13px 18px;
-  border-bottom: 1px solid var(--border);
-}
-
-.settings-title {
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.close-btn {
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1;
-  transition: all 0.15s ease;
-}
-
-.close-btn:hover {
-  color: var(--text);
-  background: var(--panel-2);
-}
-
-.settings-body {
-  padding: 6px 18px 16px;
-  overflow-y: auto;
-}
-
-.settings-error {
-  margin: 10px 0 2px;
-  padding: 7px 11px;
-  border-radius: var(--radius-sm);
-  background: var(--red-soft);
-  color: var(--red);
-  font-size: 12px;
-}
-
-.settings-section {
-  margin-top: 14px;
-}
-
-.engine-block + .engine-block {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border);
-}
-
-.engine-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12.5px;
-  font-weight: 650;
-  margin-bottom: 2px;
-}
-
-.engine-tag {
-  padding: 0 5px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--faint);
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-}
-
-.section-label {
-  color: var(--faint);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
-  margin-bottom: 6px;
-}
-
-.info-row {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding: 5px 0;
-}
-
-.info-key {
-  flex: none;
-  width: 72px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.info-value {
-  flex: 1;
-  min-width: 0;
-  font-size: 12.5px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.info-value.mono {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--muted);
-  display: block;
-}
-
-.status-dot {
-  flex: none;
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--faint);
-}
-
-.status-dot.tone-ok {
-  background: var(--green);
-}
-
-.status-dot.tone-warn {
-  background: var(--amber);
-}
-
-.status-dot.tone-error {
-  background: var(--red);
-}
-
-.update-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 5px 0;
-}
-
-.update-text {
-  flex: 1;
-  min-width: 0;
-  color: var(--muted);
-  font-size: 12.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.update-text.is-error {
-  color: var(--red);
-}
-
-.settings-note {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-  color: var(--faint);
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-.settings-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 11px 18px;
-  border-top: 1px solid var(--border);
-  background: var(--panel-2);
-}
-
-.prism-version {
-  color: var(--faint);
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-.recheck-btn {
-  padding: 5px 14px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: var(--panel);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  transition: all 0.15s ease;
-}
-
-.recheck-btn:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.recheck-btn:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-</style>
+<style scoped src="../styles/components/SettingsDialog.css"></style>

@@ -25,6 +25,7 @@ import SessionsPane from './components/SessionsPane.vue'
 import SessionView from './components/SessionView.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import WorkbenchPane from './components/WorkbenchPane.vue'
+import NewSessionPanel from './components/NewSessionPanel.vue'
 import SearchPane from './components/SearchPane.vue'
 import WorkshopPane from './components/WorkshopPane.vue'
 import AutomationPane from './components/AutomationPane.vue'
@@ -173,6 +174,8 @@ const sessions = ref<SessionSummary[]>([])
 const sessionsLoading = ref(false)
 const selectedSessionId = ref<string | null>(null)
 const creating = ref(false)
+const enginePickerOpen = ref(false)
+const createError = ref<string | null>(null)
 
 const selectedProject = computed(
   () => projects.value.find(project => project.id === selectedProjectId.value) ?? null,
@@ -269,13 +272,27 @@ async function loadSessions(projectId: string) {
 
 const delay = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms))
 
-/** 在当前项目目录新建会话并选中（首次会顺带启动运行轴）。 */
-async function createSession() {
+/** 点「＋」先进入 Agent 选择页，不立刻创建会话。 */
+function startCreateSession() {
+  if (!selectedProject.value || creating.value) return
+  enginePickerOpen.value = true
+  createError.value = null
+}
+
+function cancelCreateSession() {
+  if (creating.value) return
+  enginePickerOpen.value = false
+  createError.value = null
+}
+
+/** 选中 Agent 后，在当前项目目录新建空白会话并选中。 */
+async function createSession(engine: string) {
   const project = selectedProject.value
   if (!project || creating.value) return
   creating.value = true
+  createError.value = null
   try {
-    const created = await api.sessionCreate(project.worktree, project.engine)
+    const created = await api.sessionCreate(project.worktree, engine)
     // DB 写入可能稍有延迟：重试几次让新会话出现在列表里。
     for (let attempt = 0; attempt < 6; attempt += 1) {
       const loaded = await api.listSessions(project.id)
@@ -285,12 +302,19 @@ async function createSession() {
       await delay(250)
     }
     selectedSessionId.value = created.sessionId
+    enginePickerOpen.value = false
   } catch (cause) {
-    reportError(cause)
+    createError.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     creating.value = false
   }
 }
+
+// 切项目时关闭选择页，避免把会话建到旧目录。
+watch(selectedProjectId, () => {
+  enginePickerOpen.value = false
+  createError.value = null
+})
 
 function selectSession(sessionId: string) {
   selectedSessionId.value = sessionId
@@ -440,9 +464,19 @@ onBeforeUnmount(stopRoutineEvents)
             :project="selectedProject"
             :creating="creating"
             @select="selectSession"
-            @create="createSession"
+            @create="startCreateSession"
+          />
+          <NewSessionPanel
+            v-if="enginePickerOpen && selectedProject"
+            :project="selectedProject"
+            :engines="health"
+            :busy="creating"
+            :error="createError"
+            @select="createSession"
+            @cancel="cancelCreateSession"
           />
           <SessionView
+            v-else
             :session="selectedSession"
             :has-project="!!selectedProject"
             :jump-message-id="jumpTarget"
@@ -457,6 +491,7 @@ onBeforeUnmount(stopRoutineEvents)
           v-show="view === 'workbench'"
           ref="workbenchRef"
           :projects="projects"
+          :health="health"
           @error="reportError"
           @settled="onSessionSettled"
           @status="wbStatus = $event"
@@ -487,309 +522,4 @@ onBeforeUnmount(stopRoutineEvents)
   </div>
 </template>
 
-<style scoped>
-.app {
-  display: flex;
-  flex-direction: row;
-  height: 100%;
-  min-height: 0;
-}
-
-/* 图标栏贯穿整个窗口高度；顶栏与内容在右侧同列。 */
-.app-main {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-}
-
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 46px;
-  padding: 0 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-  flex: none;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.brand-mark {
-  width: 20px;
-  height: 20px;
-  color: var(--text);
-}
-
-.brand-name {
-  font-weight: 650;
-  font-size: 14px;
-  letter-spacing: 0.2px;
-}
-
-
-.engine-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 12px;
-  transition: all 0.15s ease;
-}
-
-.engine-chip:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.engine-chip .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--faint);
-}
-
-.engine-chip.tone-ok .dot {
-  background: var(--green);
-}
-
-.engine-chip.tone-warn .dot {
-  background: var(--amber);
-}
-
-.engine-chip.tone-error .dot {
-  background: var(--red);
-}
-
-.topbar-spacer {
-  flex: 1;
-}
-
-.refresh-btn {
-  padding: 4px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--muted);
-  transition: all 0.15s ease;
-}
-
-.refresh-btn:hover:not(:disabled) {
-  color: var(--text);
-  border-color: var(--border-strong);
-}
-
-.refresh-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-
-/* ---- 通知中心（M11） ---- */
-
-.notify-wrap {
-  position: relative;
-}
-
-.notify-btn {
-  position: relative;
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-  transition: all 0.15s ease;
-}
-
-.notify-btn:hover {
-  color: var(--text);
-  border-color: var(--border-strong);
-}
-
-.notify-badge {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  min-width: 15px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--red);
-  color: #fff;
-  font-size: 10px;
-  line-height: 15px;
-  font-weight: 700;
-}
-
-.notify-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-}
-
-.notify-panel {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 31;
-  width: 330px;
-  max-height: 60vh;
-  overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel);
-  box-shadow: var(--shadow);
-}
-
-.notify-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--text);
-}
-
-.notify-clear {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.notify-clear:hover:not(:disabled) {
-  color: var(--text);
-}
-
-.notify-clear:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.notify-empty {
-  padding: 14px 12px;
-  color: var(--faint);
-  font-size: 12px;
-  text-align: center;
-}
-
-.notify-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 12px;
-  text-align: left;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
-  transition: background 0.12s ease;
-}
-
-.notify-item:hover {
-  background: var(--panel-2);
-}
-
-.notify-item:last-child {
-  border-bottom: none;
-}
-
-.notify-icon {
-  flex: none;
-  width: 16px;
-  text-align: center;
-  font-size: 12px;
-}
-
-.notify-icon.kind-done {
-  color: var(--green);
-}
-
-.notify-icon.kind-failed {
-  color: var(--red);
-}
-
-.notify-icon.kind-permission {
-  color: var(--amber);
-}
-
-.notify-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-
-.notify-title {
-  font-size: 12px;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.notify-body {
-  font-size: 11px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.notify-time {
-  flex: none;
-  padding-top: 1px;
-  font-size: 11px;
-  color: var(--faint);
-}
-
-.error-banner {
-  position: absolute;
-  top: 54px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 20;
-  max-width: 70%;
-  padding: 8px 16px;
-  border-radius: var(--radius);
-  background: var(--red-soft);
-  color: var(--red);
-  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
-  box-shadow: var(--shadow);
-  font-size: 12px;
-}
-
-.panes {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-}
-
-.archive-view {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-}
-
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-</style>
+<style scoped src="./styles/components/App.css"></style>
