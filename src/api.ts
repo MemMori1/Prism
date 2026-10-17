@@ -16,6 +16,7 @@ import type {
   SessionSummary,
   TimelinePage,
   ToolDetail,
+  UsageSummary,
 } from './types'
 
 /** Tauri IPC 封装：所有后端调用从这里进。 */
@@ -89,6 +90,7 @@ export const api = {
   routineRun: (id: string) => invoke<void>('routine_run', { id }),
   routineLogs: (id: string, limit?: number) =>
     invoke<RoutineLogEntry[]>('routine_logs', { id, limit: limit ?? null }),
+  usageSummary: (days: number) => invoke<UsageSummary>('usage_summary', { days }),
   trayStatus: (running: number, waiting: number) =>
     invoke<void>('tray_status', { running, waiting }),
 }

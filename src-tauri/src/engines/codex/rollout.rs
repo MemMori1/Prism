@@ -28,6 +28,8 @@ const TOOL_OUTPUT_LIMIT: usize = 200_000;
 const SUMMARY_LIMIT: usize = 80;
 /// 尾读 token_count 的最大扫描字节数（取最后一次统计）。
 const TAIL_SCAN_BYTES: u64 = 256 * 1024;
+/// 头读会话信息的最大扫描字节数（session_meta + 首个 turn_context）。
+const HEAD_SCAN_BYTES: u64 = 256 * 1024;
 
 /// 内部解析结果：seq = 行号（1 起），游标对齐 OpenCode 的分页语义。
 struct ParsedRecord {
@@ -375,8 +377,22 @@ fn truncate_chars(text: &str, limit: usize) -> String {
     chars[..limit].iter().collect()
 }
 
-/// 从 rollout 尾部读最后一次 token_count（四类用量）。
-pub fn tail_token_usage(path: &Path) -> Option<(i64, i64, i64)> {
+/// rollout 尾部的 token_count 明细（累计值；缓存读是输入的子集）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenCount {
+    /// 事件时间戳（毫秒）；缺失或解析失败为 0。
+    pub at_ms: i64,
+    /// 累计输入（OpenAI 语义：含缓存命中部分）。
+    pub input: i64,
+    /// 累计输入中命中缓存的部分。
+    pub cached_input: i64,
+    /// 累计输出 / 累计思考。
+    pub output: i64,
+    pub reasoning: i64,
+}
+
+/// 从 rollout 尾部读最后一次 token_count 明细。
+pub fn tail_token_count(path: &Path) -> Option<TokenCount> {
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let start = len.saturating_sub(TAIL_SCAN_BYTES);
@@ -394,21 +410,61 @@ pub fn tail_token_usage(path: &Path) -> Option<(i64, i64, i64)> {
         let Some(usage) = value.pointer("/payload/info/total_token_usage") else {
             continue;
         };
-        let input = usage
-            .get("input_tokens")
-            .and_then(Value::as_i64)
+        let get = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
+        let at_ms = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_iso_ms)
             .unwrap_or(0);
-        let output = usage
-            .get("output_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        let reasoning = usage
-            .get("reasoning_output_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        return Some((input, output, reasoning));
+        return Some(TokenCount {
+            at_ms,
+            input: get("input_tokens"),
+            cached_input: get("cached_input_tokens"),
+            output: get("output_tokens"),
+            reasoning: get("reasoning_output_tokens"),
+        });
     }
     None
+}
+
+/// 从 rollout 尾部读最后一次 token_count（输入 / 输出 / 思考；兼容旧调用）。
+pub fn tail_token_usage(path: &Path) -> Option<(i64, i64, i64)> {
+    tail_token_count(path).map(|count| (count.input, count.output, count.reasoning))
+}
+
+/// 从 rollout 头部读会话信息 `(cwd, model)`；模型取首个 turn_context，缺失记「未知」。
+pub fn head_session_info(path: &Path) -> Option<(String, String)> {
+    let file = File::open(path).ok()?;
+    let mut buffer = String::new();
+    file.take(HEAD_SCAN_BYTES).read_to_string(&mut buffer).ok()?;
+
+    let mut cwd: Option<String> = None;
+    let mut model: Option<String> = None;
+    for line in buffer.lines() {
+        if cwd.is_none() && line.contains("session_meta") {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                cwd = value
+                    .pointer("/payload/cwd")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string);
+            }
+        }
+        if model.is_none() && line.contains("turn_context") {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                model = value
+                    .pointer("/payload/model")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string);
+            }
+        }
+        if cwd.is_some() && model.is_some() {
+            break;
+        }
+    }
+    let cwd = cwd?;
+    Some((cwd, model.unwrap_or_else(|| "未知".to_string())))
 }
 
 #[cfg(test)]
@@ -540,6 +596,36 @@ mod tests {
         let path = dir.join("rollout.jsonl");
         std::fs::write(&path, FIXTURE).expect("写 fixture");
         assert_eq!(tail_token_usage(&path), Some((100, 20, 5)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_token_count_and_head_info() {
+        let dir = std::env::temp_dir().join(format!("prism-rollout-usage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let path = dir.join("rollout.jsonl");
+        let fixture = concat!(
+            r#"{"timestamp":"2026-06-11T13:04:07.118Z","type":"session_meta","payload":{"id":"t1","cwd":"/tmp/demo","cli_version":"0.133.0"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-11T13:04:08.000Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-11T13:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":50,"reasoning_output_tokens":5,"total_tokens":1055}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-11T13:09:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":800,"output_tokens":90,"reasoning_output_tokens":12,"total_tokens":2090}}}}"#,
+            "\n"
+        );
+        std::fs::write(&path, fixture).expect("写 fixture");
+
+        let count = tail_token_count(&path).expect("明细");
+        assert_eq!(count.input, 2000);
+        assert_eq!(count.cached_input, 800);
+        assert_eq!(count.output, 90);
+        assert_eq!(count.reasoning, 12);
+        assert!(count.at_ms > 0, "时间戳应可解析");
+
+        let (cwd, model) = head_session_info(&path).expect("头部信息");
+        assert_eq!(cwd, "/tmp/demo");
+        assert_eq!(model, "gpt-5-codex");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,11 +2,11 @@
 
 > 定位不变：**多引擎 AI 编码 Agent 指挥台** —— 数据只读、自研视觉、干净房间。
 > 2026-10-17 完成一轮功能盘点与差距复核（逐模块核对、关键结论抽查原文），
-> 据此修订功能对照与 M6–M12 开发规划。
+> 据此修订功能对照与 M6–M13 开发规划。
 >
-> 一句话路线：**工作台 → 搜索 → Codex → Claude Code → 工坊 → 自动化 → 平台化发布。**
+> 一句话路线：**工作台 → 搜索 → Codex → Claude Code → 工坊 → 自动化 → 用量面板 → 平台化发布。**
 
-## 0. 现状快照（M1–M12 完成；自动更新已接线待首版验收，Claude 运行轴待 CLI）
+## 0. 现状快照（M1–M13 完成；自动更新已接线待首版验收，Claude 运行轴待 CLI）
 
 | 能力 | 说明 |
 |---|---|
@@ -23,7 +23,8 @@
 | 托盘 | macOS 菜单栏：图标旁待审批计数 + 菜单状态行 / tooltip（前端合并工作台 + 归档视图实时推送，按 sessionId 去重）；菜单含打开 / 退出；**关窗 ≠ 退出**（隐藏窗口，进程与调度继续跑）；Dock 点击唤起 |
 | 三引擎 | OpenCode（全功能）；Codex（浏览 + 运行：发消息 / 流式 / 插话 / 打断 / 审批卡片 / 新建会话）；Claude Code（历史浏览，运行轴待 CLI） |
 | 打磨 | 自研图标、设置面板（双引擎健康）、输入框自适应 |
-| 打包 | `.app` + `.dmg`（v0.2.0，含 M1–M12 全部改动，未签名；Gatekeeper 打开流程见 README）；自动更新已接线（Tauri updater + GitHub Releases，待首版发布验收） |
+| 用量 | 第 6 视图：跨引擎 token 明细（输入 / 输出 / 思考 / 缓存读写）+ 每日柱状曲线 + 按引擎 / 模型分列 + 估算成本（内置价格表，未收录模型标注）；OpenCode / Codex / Claude 本地档案只读统计，不存副本 |
+| 打包 | `.app` + `.dmg`（v0.2.0，含 M1–M12 全部改动，未签名；Gatekeeper 打开流程见 README）；自动更新已接线（Tauri updater，发布源 = gh-pages 镜像 + GitHub Releases 兜底，v0.2.0 已发布，升级验收进行中） |
 
 ## 1. 差距对照（现状 → 去向）
 
@@ -48,9 +49,9 @@
 | 设置多标签 | 🟡 双引擎状态面板 | 随行逐步扩展 |
 | 托盘 | ✅ | M12a 已实现（2026-10-17，见 M12）：Tauri 内置 tray 轻版——状态行 / tooltip / 待审批计数、点击唤起、关窗 ≠ 退出；不引入独立常驻二进制 + LaunchAgent |
 | 小组件 | ❌ | 远期池 |
-| 自动更新 | ✅ | M12c 已接线（2026-10-17）：Tauri updater + GitHub Releases（公钥/端点已配，`scripts/release.sh` 发版并生成 `latest.json`）；待发首版 Release 后做升级验收 |
+| 自动更新 | ✅ | M12c 已接线（2026-10-17）：Tauri updater；更新清单镜像 gh-pages（Fastly CDN，首选）+ GitHub Releases 兜底，`scripts/release.sh` 发版并生成 `latest.json`；v0.2.0 已发布，升级验收进行中 |
 | 主题系统 / i18n | 🟡 自研单主题 + 中文 | i18n 架构预留后置（文案集中化重构，随第一次语言需求启动）；主题远期 |
-| 用量 / 成本统计 / 配额 | 🟡 三类 token 已有 | 远期（配额数据源：Claude usage 接口 / Codex app-server rateLimits） |
+| 用量 / 成本统计 / 配额 | ✅ 用量 + 成本统计 | M13a 已实现（2026-10-17）：第 6 视图「用量」跨引擎 token / 每日曲线 / 成本估算（估算口径见 M13）；配额实时值（Claude usage 接口 / Codex app-server rateLimits）后置 M13b |
 | MCP 双向桥（宿主能力给 agent 用） | ❌ | 远期池（宿主即工具：把审批 / 搜索 / 任务能力暴露给会话内 agent） |
 | 菜单 / 快捷键 / 开机自启 | 🟡 Cmd+W 关闭即隐藏（关窗 ≠ 退出）、Cmd+Q 退出 | 视图快捷键随行；开机自启远期（托盘常驻 + 关窗不退已覆盖多数场景） |
 
@@ -66,7 +67,7 @@
   浏览层走样例档案开发验收；运行轴等安装 CLI 后补真机复测（或与用户约时间装一个）。
 - 若用户先装好了 `claude` CLI，可把 M8 / M9 对调，不受影响。
 
-## 3. 开发规划（M6–M12）
+## 3. 开发规划（M6–M13）
 
 ### M6 工作台：多列并行指挥 ★核心补齐
 > 状态：已实现（2026-10-17）并提交。
@@ -182,20 +183,41 @@
 - 打包（✅）：三处版本号升 0.2.0（`package.json` / `tauri.conf.json` / `Cargo.toml`）；
   `pnpm tauri build` 产出 `.app` + `.dmg`（未签名——无 Apple Developer ID，暂不签名公证；
   README 写清 Gatekeeper「右键 → 打开」流程）。
-- 自动更新（✅ M12c）：Tauri updater + GitHub Releases（stable 通道）。签名密钥已生成
+- 自动更新（✅ M12c）：Tauri updater（stable 通道）。签名密钥已生成
   （私钥 `~/.prism/updater.key` 仅本机、不入库；公钥写入 `tauri.conf.json`）；
-  更新端点 = `releases/latest/download/latest.json`（公开仓库免鉴权）；
+  更新端点首选 gh-pages 镜像 `memmori1.github.io/Prism/latest.json`（Fastly CDN，
+  github.com 直连不稳定时的可达路径），Releases `latest/download` 兜底（公开仓库免鉴权）；
   发版一条命令 `scripts/release.sh`（产出 `.app.tar.gz` + `.sig` + `latest.json`，
-  `--publish` 走 gh 上传）；设置面板「更新」区块：检查更新 / 下载并安装 / 重启生效。
-  待发首版 Release 后做升级闭环验收；自此升级方式 = 自动更新（dmg 覆盖仍可用）。
+  `--publish` 走 gh：创建 Release **并同步 gh-pages 镜像**）；设置面板「更新」区块：
+  检查更新 / 下载并安装 / 重启生效。
 - 菜单与快捷键：Cmd+W（关窗 = 隐藏）/ Cmd+Q 已按 macOS 惯例工作；
   视图快捷键与 i18n 架构预留后置（文案集中化随第一次语言需求启动）。
-- 验收：他人机器可安装（README 流程）✅；自动升级验收 ⏸ 待首版 Release（发布源就绪后按 `docs/RELEASE.md` §4 闭环）。
+- 验收：他人机器可安装（README 流程）✅；v0.2.0 已发布（2026-10-17）✅；
+  自动升级验收 🔄 进行中（装 v0.2.1 → 发布 v0.2.2 → 应用内「检查更新」闭环，
+  按 `docs/RELEASE.md` §4）。
+
+### M13 用量面板：跨引擎 token 统计与成本估算
+> 状态（2026-10-17）：**✅ M13a 已实现（用量 + 成本统计）；配额实时值（M13b）后置**。
+
+- 数据源（全部只读，口径已归一可加总）：
+  - OpenCode：`session_v2` 的 `tokens_*` 列（输入 / 输出 / 思考 / 缓存读写天然分列）；
+  - Codex：`~/.codex/sessions/**/rollout-*.jsonl` 尾部最后一次 `token_count`
+    （累计值；OpenAI 语义里缓存命中是输入的子集 → 归一为「未缓存输入 + 缓存读」）；
+  - Claude：`~/.claude/projects/**/*.jsonl` 的 `message.usage` 累加（含子代理，
+    与浏览层口径一致）。
+- 视图：第 6 视图「用量」——范围（今日 / 7 日 / 30 日 / 全部）、总量卡片（分项
+  明细）、每日柱状图（「全部」最多回看 60 天）、按引擎 / 模型分列（token + 会话数 + 成本）。
+- 成本估算：内置价格表（Claude 4.x 系 / GPT-5 系 / `-free` 后缀记 0；美元 / 百万 token，
+  思考按输出价计）；未收录模型显示「未收录」且不计入合计。
+- 归档口径：按「会话归档时间」过滤与归档（OpenCode = 会话创建时刻；Codex = 最后一次
+  `token_count` 事件时刻；Claude = 档案内最后时间戳）；会话级数据不跨天拆分。
+- 本期不做（→ M13b / 远期池）：配额实时值（Claude usage 接口 / Codex app-server
+  rateLimits）、按项目分组、导出报表、预算告警。
 
 ## 4. 远期池（不排期，按兴趣取用）
 
-监控轨（卡内审批）· 工作台标签页 · 全景图导出 · 赛马 · 用量 / 成本统计 / 配额
-（Claude usage 接口、Codex app-server rateLimits）· 小组件 · 主题系统与主题库 ·
+监控轨（卡内审批）· 工作台标签页 · 全景图导出 · 赛马 · 配额实时值（Claude usage 接口 /
+Codex app-server rateLimits；M13b 后置）· 小组件 · 主题系统与主题库 ·
 AI 元数据（标题 / 标签 / 摘要）· 智能搜索（AI 归纳）· **文件台账（含 git 快照条）** ·
 异步任务面板 · Runner 跑单（孤儿清扫双校验）· 附件 / 图片输入 · 斜杠命令面板 ·
 会话 find bar / 锚点导航 / 置顶提示 · 输入队列（流式期间提交）· 权限四档与问答/计划交互卡 ·

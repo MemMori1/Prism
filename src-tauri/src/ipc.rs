@@ -12,6 +12,7 @@ use crate::engines::core::{
 };
 use crate::engines::opencode;
 use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runtime, RuntimeStatus};
+use crate::engines::usage::{self, UsageSummary};
 use crate::engines::{mcp, workshop};
 use crate::routines::{runner, scheduler::RoutinesState, store};
 use crate::routines::store::{RoutineDefinition, RoutineLogEntry, RoutineView};
@@ -547,6 +548,22 @@ pub async fn search_query(
     #[cfg(debug_assertions)]
     println!("[prism] search_query -> {} 条", hits.len());
     Ok(hits)
+}
+
+// ---------------------------------------------------------------- 用量
+
+/// 用量统计：跨引擎 token 汇总与成本估算（days = 窗口天数，0 = 全部）。
+#[tauri::command]
+pub async fn usage_summary(days: u32) -> Result<UsageSummary, String> {
+    let summary = tauri::async_runtime::spawn_blocking(move || usage::summary(days))
+        .await
+        .map_err(|cause| cause.to_string())??;
+    #[cfg(debug_assertions)]
+    println!(
+        "[prism] usage_summary -> days={} 会话={} 成本≈${:.4}",
+        summary.days, summary.sessions, summary.cost_usd
+    );
+    Ok(summary)
 }
 
 /// 工坊：三引擎资产总览（技能 / 命令 / 子代理 / 记忆 / 插件，只读）。

@@ -216,3 +216,48 @@ export interface RoutineEventPayload {
   error: string | null
   requestId: string | null
 }
+
+/** 跨引擎用量：token 分项（各列口径互不重叠，可直接相加）。 */
+export interface TokenTotals {
+  input: number
+  output: number
+  reasoning: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+export interface UsageModel {
+  model: string
+  tokens: TokenTotals
+  sessions: number
+  /** 估算成本（美元）；价格表未收录为 null。 */
+  costUsd: number | null
+}
+
+export interface UsageEngine {
+  engine: string
+  label: string
+  tokens: TokenTotals
+  sessions: number
+  costUsd: number
+  /** 价格表未收录的模型名（成本显示「未收录」）。 */
+  unpricedModels: string[]
+  models: UsageModel[]
+}
+
+export interface UsageDaily {
+  /** 本地日期 YYYY-MM-DD。 */
+  date: string
+  tokens: TokenTotals
+}
+
+export interface UsageSummary {
+  /** 统计窗口天数；0 = 全部。 */
+  days: number
+  sessions: number
+  totals: TokenTotals
+  costUsd: number
+  engines: UsageEngine[]
+  daily: UsageDaily[]
+  notes: string[]
+}

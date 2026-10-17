@@ -1,0 +1,398 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import { api } from '../api'
+import { barHeights, formatCost, formatTokens, totalTokens } from '../usageFormat'
+import type { TokenTotals, UsageSummary } from '../types'
+
+const emit = defineEmits<{
+  (e: 'error', message: string): void
+}>()
+
+const RANGES = [
+  { days: 1, label: '今日' },
+  { days: 7, label: '7 日' },
+  { days: 30, label: '30 日' },
+  { days: 0, label: '全部' },
+] as const
+
+const days = ref<number>(7)
+const summary = ref<UsageSummary | null>(null)
+const loading = ref(false)
+
+async function load() {
+  loading.value = true
+  try {
+    summary.value = await api.usageSummary(days.value)
+  } catch (cause) {
+    emit('error', String(cause))
+  } finally {
+    loading.value = false
+  }
+}
+
+function pickRange(value: number) {
+  if (days.value === value) return
+  days.value = value
+  void load()
+}
+
+onMounted(() => {
+  void load()
+})
+
+const dailyTotals = computed(() => (summary.value?.daily ?? []).map(item => totalTokens(item.tokens)))
+const heights = computed(() => barHeights(dailyTotals.value))
+const hasUnpriced = computed(() =>
+  (summary.value?.engines ?? []).some(engine => engine.unpricedModels.length > 0),
+)
+const unpricedNames = computed(() => {
+  const names = new Set<string>()
+  for (const engine of summary.value?.engines ?? []) {
+    for (const name of engine.unpricedModels) names.add(name)
+  }
+  return [...names].join('、')
+})
+
+function breakdown(tokens: TokenTotals): string {
+  return [
+    `输入 ${formatTokens(tokens.input)}`,
+    `输出 ${formatTokens(tokens.output)}`,
+    `思考 ${formatTokens(tokens.reasoning)}`,
+    `缓存读 ${formatTokens(tokens.cacheRead)}`,
+    `缓存写 ${formatTokens(tokens.cacheWrite)}`,
+  ].join(' · ')
+}
+
+function barTitle(index: number): string {
+  const item = summary.value?.daily[index]
+  if (!item) return ''
+  return `${item.date} · 合计 ${formatTokens(dailyTotals.value[index] ?? 0)}\n${breakdown(item.tokens)}`
+}
+</script>
+
+<template>
+  <section class="usage-pane">
+    <header class="usage-head">
+      <div class="range-tabs">
+        <button
+          v-for="range in RANGES"
+          :key="range.days"
+          class="range-btn"
+          :class="{ active: days === range.days }"
+          @click="pickRange(range.days)"
+        >
+          {{ range.label }}
+        </button>
+      </div>
+      <span class="usage-hint">只读统计：数据直接来自各引擎本地档案</span>
+      <button class="refresh" :disabled="loading" @click="load">
+        {{ loading ? '统计中…' : '刷新' }}
+      </button>
+    </header>
+
+    <div v-if="summary" class="usage-body">
+      <div class="cards">
+        <div class="card">
+          <div class="card-label">总 tokens</div>
+          <div class="card-value">{{ formatTokens(totalTokens(summary.totals)) }}</div>
+          <div class="card-note">{{ breakdown(summary.totals) }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">估算成本</div>
+          <div class="card-value">{{ formatCost(summary.costUsd) }}</div>
+          <div class="card-note">
+            {{ hasUnpriced ? `未收录模型不计入：${unpricedNames}` : '内置价格表 · 美元估算' }}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-label">会话数</div>
+          <div class="card-value">{{ summary.sessions }}</div>
+          <div class="card-note">{{ days === 0 ? '全部时间' : `最近 ${days} 天` }}</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">每日用量（token 合计）</div>
+        <div v-if="summary.daily.length" class="chart">
+          <div
+            v-for="(item, index) in summary.daily"
+            :key="item.date"
+            class="chart-col"
+            :title="barTitle(index)"
+          >
+            <div class="chart-bar" :style="{ height: `${heights[index]}%` }" />
+          </div>
+        </div>
+        <div v-else class="panel-empty">暂无数据</div>
+        <div v-if="summary.daily.length" class="chart-axis">
+          <span>{{ summary.daily[0]?.date }}</span>
+          <span>{{ summary.daily[summary.daily.length - 1]?.date }}</span>
+        </div>
+      </div>
+
+      <div v-if="summary.engines.length" class="panel">
+        <div class="panel-title">按引擎 / 模型</div>
+        <div v-for="engine in summary.engines" :key="engine.engine" class="engine-block">
+          <div class="engine-head">
+            <span class="engine-name">{{ engine.label }}</span>
+            <span class="engine-meta">
+              {{ formatTokens(totalTokens(engine.tokens)) }} tokens · {{ engine.sessions }} 会话 ·
+              {{ formatCost(engine.costUsd) }}
+            </span>
+          </div>
+          <div v-for="model in engine.models" :key="model.model" class="model-row">
+            <span class="model-name" :title="model.model">{{ model.model }}</span>
+            <span class="model-tokens" :title="breakdown(model.tokens)">
+              {{ formatTokens(totalTokens(model.tokens)) }}
+              <span class="model-sessions">/ {{ model.sessions }} 会话</span>
+            </span>
+            <span class="model-cost" :class="{ unpriced: model.costUsd === null }">
+              {{ formatCost(model.costUsd) }}
+            </span>
+          </div>
+          <div v-if="engine.unpricedModels.length" class="engine-note">
+            未收录价格：{{ engine.unpricedModels.join('、') }}
+          </div>
+        </div>
+      </div>
+      <div v-else class="panel panel-empty">所选范围内暂无用量数据。</div>
+
+      <ul v-if="summary.notes.length" class="notes">
+        <li v-for="note in summary.notes" :key="note">{{ note }}</li>
+      </ul>
+    </div>
+    <div v-else class="panel panel-empty">
+      {{ loading ? '统计中…' : '暂无数据，点「刷新」重试。' }}
+    </div>
+  </section>
+</template>
+
+<style scoped>
+.usage-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.usage-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.range-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.range-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.range-btn.active {
+  color: var(--accent-text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.usage-hint {
+  color: var(--faint);
+  font-size: 11px;
+  margin-left: auto;
+}
+
+.refresh {
+  padding: 3px 12px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.refresh:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.usage-body {
+  flex: 1;
+  overflow: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cards {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.card {
+  flex: 1;
+  min-width: 200px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 12px;
+}
+
+.card-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.card-value {
+  font-size: 22px;
+  font-weight: 650;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-note {
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 6px;
+  line-height: 1.6;
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 12px;
+}
+
+.panel-title {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.panel-empty {
+  color: var(--faint);
+  font-size: 12px;
+  text-align: center;
+  padding: 24px 0;
+}
+
+.chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 110px;
+}
+
+.chart-col {
+  flex: 1;
+  min-width: 2px;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+
+.chart-bar {
+  width: 100%;
+  min-height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  opacity: 0.75;
+}
+
+.chart-col:hover .chart-bar {
+  opacity: 1;
+}
+
+.chart-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.engine-block + .engine-block {
+  margin-top: 14px;
+}
+
+.engine-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.engine-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.engine-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 72px;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 0;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+}
+
+.model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.model-tokens {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-sessions {
+  color: var(--faint);
+}
+
+.model-cost {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-cost.unpriced {
+  color: var(--faint);
+}
+
+.engine-note {
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.notes {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.8;
+}
+</style>

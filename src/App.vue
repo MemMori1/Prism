@@ -28,17 +28,19 @@ import WorkbenchPane from './components/WorkbenchPane.vue'
 import SearchPane from './components/SearchPane.vue'
 import WorkshopPane from './components/WorkshopPane.vue'
 import AutomationPane from './components/AutomationPane.vue'
+import UsagePane from './components/UsagePane.vue'
 
 const health = ref<EngineHealth[]>([])
 const error = ref<string | null>(null)
 const showSettings = ref(false)
 
-type AppView = 'archive' | 'workbench' | 'search' | 'workshop' | 'automation'
+type AppView = 'archive' | 'workbench' | 'search' | 'usage' | 'workshop' | 'automation'
 const VIEW_KEY = 'prism-view'
 const storedView = localStorage.getItem(VIEW_KEY)
 const view = ref<AppView>(
   storedView === 'workbench' ||
     storedView === 'search' ||
+    storedView === 'usage' ||
     storedView === 'workshop' ||
     storedView === 'automation'
     ? storedView
@@ -378,6 +380,14 @@ onBeforeUnmount(stopRoutineEvents)
         </button>
         <button
           class="view-btn"
+          :class="{ active: view === 'usage' }"
+          title="用量：跨引擎 token 消耗与成本估算（只读统计引擎本地档案）"
+          @click="setView('usage')"
+        >
+          用量
+        </button>
+        <button
+          class="view-btn"
           :class="{ active: view === 'workshop' }"
           title="工坊：引擎资产（技能 / 命令 / 子代理 / 记忆 / 插件）只读浏览"
           @click="setView('workshop')"
@@ -504,6 +514,7 @@ onBeforeUnmount(stopRoutineEvents)
         @error="reportError"
         @open-hit="openSearchHit"
       />
+      <UsagePane v-show="view === 'usage'" @error="reportError" />
       <WorkshopPane v-show="view === 'workshop'" @error="reportError" />
       <AutomationPane
         v-show="view === 'automation'"
