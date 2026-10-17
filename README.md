@@ -9,8 +9,23 @@ Prism 是一个桌面应用（Tauri 2 + Vue 3 + Rust），不自己实现 Agent�
 | 引擎 | 状态 | 数据（只读） | 运行 |
 |---|---|---|---|
 | OpenCode | ✅ 完整支持 | `~/.local/share/opencode/opencode.db` | `opencode-cli serve`（HTTP + SSE） |
-| Claude Code | 规划中 | `~/.claude/projects/`（JSONL） | `claude` CLI（stream-json） |
-| Codex | 规划中 | `~/.codex/sessions/`（rollout） | `codex app-server`（JSON-RPC） |
+| Codex | ✅ 完整支持 | `~/.codex/sessions/`（rollout） | `codex app-server`（JSON-RPC） |
+| Claude Code | 🟡 历史浏览 | `~/.claude/projects/`（JSONL） | `claude` CLI（stream-json，待安装） |
+
+## 安装（v0.2.0）
+
+发布产物在 `src-tauri/target/release/bundle/`：
+`macos/Prism.app` 与 `dmg/Prism_0.2.0_aarch64.dmg`（未签名）。
+
+双击 dmg，把 Prism 拖入「应用程序」即可。未签名版本首次打开会被 Gatekeeper 拦下
+（"Apple 无法检查其是否包含恶意软件"）：
+
+- 打开方式：在 **访达 → 应用程序** 里对 Prism **右键 → 打开**，弹窗再点一次「打开」
+  （只需一次；直接双击会被拦）。
+- 或命令行：`xattr -dr com.apple.quarantine /Applications/Prism.app`。
+
+> 自动更新（Tauri updater + GitHub Releases）尚未接入——需要发布源与签名密钥；
+> 当前升级方式 = 下载新版 dmg 覆盖安装。发版流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 开发
 
@@ -23,6 +38,9 @@ pnpm tauri build   # 打包（macOS：.app + .dmg）
 
 桌面图标为自研生成：`python3 scripts/make-icon.py app-icon.png`，再
 `pnpm tauri icon app-icon.png` 生成全套平台尺寸。
+
+菜单栏（托盘）图标同为自研生成（单色模板，44×44）：
+`node src-tauri/icons/tray-icon.cjs src-tauri/icons/tray.png`。
 
 ## 设计原则
 

@@ -55,6 +55,8 @@ fn session_id_of(thread_id: &str) -> String {
     format!("{SESSION_PREFIX}{thread_id}")
 }
 
+/// 调试追踪用：截断长文本打印（仅 debug 构建引用）。
+#[cfg(debug_assertions)]
 fn truncate(text: &str, max: usize) -> String {
     let mut result: String = text.chars().take(max).collect();
     if text.chars().count() > max {
@@ -584,9 +586,12 @@ fn spawn_app_server(inner: &Arc<Inner>, extra_args: &[String]) -> Result<Arc<Con
         .name("prism-codex-err".into())
         .spawn(move || {
             for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
+                if line.is_err() {
+                    break; // 管道关闭
+                }
+                // 仅 debug 构建回显 app-server 的 stderr，便于排查。
                 #[cfg(debug_assertions)]
-                {
+                if let Ok(line) = &line {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
                         println!("[prism] app-server (stderr): {trimmed}");
