@@ -115,6 +115,12 @@ pub struct TimelineRecord {
     pub role: String,
     pub time_created: i64,
     pub model: Option<String>,
+    /// 模型提供方（OpenCode 的 providerID；其他引擎为空）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    /// 该轮推理档位（OpenCode variant / Codex effort）；界面用来回显当前选择。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
     /// 助手消息是否已完结（无 time.completed 视为进行中/中断）。
     pub completed: bool,
     pub parts: Vec<TimelinePart>,

@@ -4,6 +4,9 @@ import {
   commandInvocation,
   detectTrigger,
   fileLabel,
+  modelKeyLabel,
+  modelKeyOf,
+  recordModelKey,
   shellCommand,
 } from '../src/composer'
 
@@ -93,5 +96,32 @@ describe('fileLabel', () => {
   it('取末段', () => {
     expect(fileLabel('src/components/App.vue')).toBe('App.vue')
     expect(fileLabel('README.md')).toBe('README.md')
+  })
+})
+
+describe('recordModelKey', () => {
+  it('provider + id 组成与下拉一致的 key', () => {
+    expect(recordModelKey({ model: 'deepseek', modelProvider: 'opencode' })).toBe('opencode::deepseek')
+    expect(recordModelKey({ model: 'gpt-5.2' })).toBe('gpt-5.2')
+    expect(recordModelKey({ model: 'gpt-5.2', modelProvider: null })).toBe('gpt-5.2')
+  })
+
+  it('没有模型时返回 null（保留原选择）', () => {
+    expect(recordModelKey({ model: null })).toBeNull()
+    expect(recordModelKey({ model: '   ' })).toBeNull()
+  })
+
+  it('与 modelKeyOf 生成同一套编码', () => {
+    expect(recordModelKey({ model: 'x', modelProvider: 'p' })).toBe(
+      modelKeyOf({ provider: 'p', id: 'x' }),
+    )
+  })
+})
+
+describe('modelKeyLabel', () => {
+  it('catalog 缺位时只显示 id，档位附在后面', () => {
+    expect(modelKeyLabel('opencode::deepseek-v4.1')).toBe('deepseek-v4.1')
+    expect(modelKeyLabel('gpt-5.2')).toBe('gpt-5.2')
+    expect(modelKeyLabel('opencode::deepseek-v4.1', 'max')).toBe('deepseek-v4.1 · max')
   })
 })

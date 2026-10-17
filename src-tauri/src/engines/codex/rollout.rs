@@ -40,8 +40,19 @@ struct ParsedRecord {
     time_created: i64,
     role: &'static str,
     parts: Vec<TimelinePart>,
+    /// 该轮的模型与推理档位（取自同轮的 `turn_context`）。
+    model: Option<String>,
+    variant: Option<String>,
     /// 该轮最后一次模型调用的用量（token_count 事件回填）。
     tokens: Option<TurnTokens>,
+}
+
+/// 当前轮的模型上下文（`turn_context` 事件更新）。
+#[derive(Debug, Clone, Default)]
+struct TurnMeta {
+    model: Option<String>,
+    /// 推理强度（Codex 称 effort）。
+    variant: Option<String>,
 }
 
 /// 时间线分页：与 OpenCode 语义一致（`before_seq` 严格递减；正序返回）。
@@ -84,7 +95,9 @@ fn render_page(
                 id: record.seq.to_string(),
                 role: record.role.to_string(),
                 time_created: record.time_created,
-                model: None,
+                model: record.model,
+                model_provider: None,
+                variant: record.variant,
                 completed: true,
                 parts: record.parts,
                 tokens: record.tokens,
@@ -99,6 +112,8 @@ fn render_page(
 fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
     let mut records: Vec<ParsedRecord> = Vec::new();
     let mut current: Option<ParsedRecord> = None;
+    // 当前轮的模型上下文：每次 `turn_context` 覆盖，随记录一起落到时间线上。
+    let mut turn = TurnMeta::default();
     // call_id → (记录下标, parts 下标)；用于把输出回填到对应工具卡片。
     let mut call_index: HashMap<String, (usize, usize)> = HashMap::new();
 
@@ -122,6 +137,18 @@ fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
         let payload_type = payload.get("type").and_then(Value::as_str);
 
         match (kind, payload_type) {
+            ("turn_context", _) => {
+                turn.model = payload
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string);
+                turn.variant = payload
+                    .get("effort")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string);
+            }
             ("event_msg", Some("user_message")) => {
                 let text = payload
                     .get("message")
@@ -137,6 +164,8 @@ fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
                         parts: vec![TimelinePart::Text {
                             text: text.to_string(),
                         }],
+                        model: turn.model.clone(),
+                        variant: turn.variant.clone(),
                         tokens: None,
                     });
                 }
@@ -144,7 +173,7 @@ fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
             ("response_item", Some("reasoning")) => {
                 let text = reasoning_text(payload);
                 if !text.is_empty() {
-                    ensure_current(&mut current, seq, time_ms)
+                    ensure_current(&mut current, seq, time_ms, &turn)
                         .parts
                         .push(TimelinePart::Reasoning { text });
                 }
@@ -155,7 +184,7 @@ fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
                 if payload.get("role").and_then(Value::as_str) == Some("assistant") {
                     let text = message_text(payload);
                     if !text.is_empty() {
-                        ensure_current(&mut current, seq, time_ms)
+                        ensure_current(&mut current, seq, time_ms, &turn)
                             .parts
                             .push(TimelinePart::Text { text });
                     }
@@ -177,7 +206,7 @@ fn parse_reader<R: BufRead>(reader: R) -> ParseResult<Vec<ParsedRecord>> {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let summary = tool_summary(arguments);
-                let record = ensure_current(&mut current, seq, time_ms);
+                let record = ensure_current(&mut current, seq, time_ms, &turn);
                 let part_index = record.parts.len();
                 record.parts.push(TimelinePart::Tool {
                     name,
@@ -281,6 +310,7 @@ fn ensure_current<'a>(
     current: &'a mut Option<ParsedRecord>,
     seq: i64,
     time_created: i64,
+    turn: &TurnMeta,
 ) -> &'a mut ParsedRecord {
     if current.is_none() {
         *current = Some(ParsedRecord {
@@ -288,6 +318,8 @@ fn ensure_current<'a>(
             time_created,
             role: "assistant",
             parts: Vec::new(),
+            model: turn.model.clone(),
+            variant: turn.variant.clone(),
             tokens: None,
         });
     }
@@ -619,6 +651,8 @@ mod tests {
                     time_created: record.time_created,
                     role: record.role,
                     parts: record.parts,
+                    model: record.model,
+                    variant: record.variant,
                     tokens: record.tokens,
                 })
                 .collect(),
@@ -640,6 +674,26 @@ mod tests {
         assert_eq!(page.records.len(), 2);
         assert_eq!(page.next_cursor, None);
         assert!(page.records[0].id == "5");
+    }
+
+    #[test]
+    fn turn_context_fills_model_and_effort() {
+        let text = concat!(
+            r#"{"timestamp":"2026-06-11T13:04:07.400Z","type":"turn_context","payload":{"model":"gpt-5.2","effort":"high"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-11T13:04:07.500Z","type":"event_msg","payload":{"type":"user_message","message":"hi"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-11T13:04:08.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}"#,
+            "\n",
+        );
+        let records = parse_reader(BufReader::new(Cursor::new(text))).expect("解析");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].model.as_deref(), Some("gpt-5.2"));
+        assert_eq!(records[0].variant.as_deref(), Some("high"));
+
+        let page = render_page(records, None, 10);
+        assert_eq!(page.records[1].model.as_deref(), Some("gpt-5.2"));
+        assert_eq!(page.records[1].variant.as_deref(), Some("high"));
     }
 
     #[test]

@@ -9,6 +9,7 @@ import {
   fileLabel,
   modelKeyOf,
   modelLabel,
+  recordModelKey,
   shellCommand,
   type Trigger,
 } from '../composer'
@@ -40,7 +41,8 @@ import LiveTurnView from './LiveTurn.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import TagPicker from './TagPicker.vue'
 import LedgerPane from './LedgerPane.vue'
-import SelectMenu from './SelectMenu.vue'
+import ModelMenu from './ModelMenu.vue'
+import BranchPicker from './BranchPicker.vue'
 
 const props = defineProps<{
   session: SessionSummary | null
@@ -57,6 +59,8 @@ const emit = defineEmits<{
   (e: 'jumpConsumed'): void
   (e: 'openWorkbench', sessionId: string): void
   (e: 'status', status: { running: boolean; waiting: number }): void
+  /** 切了分支：外层刷新项目列表，让分支徽标跟着变。 */
+  (e: 'branchChanged', branch: string): void
 }>()
 
 const scroller = ref<HTMLElement | null>(null)
@@ -114,14 +118,15 @@ const selectedModel = computed(
   () => sessionModels.value.find(model => modelKeyOf(model) === modelKey.value) ?? null,
 )
 const sessionVariants = computed(() => selectedModel.value?.variants ?? [])
-/** 底部工具条的两个下拉选项。 */
+/** 底部工具条「模型 + 推理强度」合并下拉的模型选项。
+ *  label 给弹层（带 provider / 默认标记），short 给触发器（模型 id，避免把档位挤掉）。 */
 const modelOptions = computed(() => [
-  { value: '', label: catalogLoading.value ? '加载中…' : '默认' },
-  ...sessionModels.value.map(model => ({ value: modelKeyOf(model), label: modelLabel(model) })),
-])
-const variantOptions = computed(() => [
-  { value: '', label: '默认' },
-  ...sessionVariants.value.map(item => ({ value: item, label: item })),
+  { value: '', label: catalogLoading.value ? '加载中…' : '默认', short: '默认' },
+  ...sessionModels.value.map(model => ({
+    value: modelKeyOf(model),
+    label: modelLabel(model),
+    short: model.id,
+  })),
 ])
 /** ! 开头 = 本机 shell 直跑。 */
 const shellMode = computed(() => shellCommand(draft.value) !== null)
@@ -159,10 +164,46 @@ function writePrefs(engine: string, prefs: ComposerPrefs) {
   }
 }
 
-watch([modelKey, variant], () => {
+/**
+ * 偏好只记「用户显式选择」；打开会话时的回显不写，避免把某个会话的状态
+ * 当成这个引擎的默认偏好。
+ */
+function savePrefs() {
   if (!props.session) return
   writePrefs(props.session.engine, { modelKey: modelKey.value, variant: variant.value })
-})
+}
+
+function setModel(value: string) {
+  if (value === modelKey.value) return
+  modelKey.value = value
+  // 换模型时该档位若不在新模型的档位表里就回默认；目录未收录的模型不动档位
+  // （回显值来自引擎本身，可能不在 catalog 里，不能凭目录缺失就清掉）。
+  const next = sessionModels.value.find(model => modelKeyOf(model) === value)
+  if (variant.value && next && !next.variants.includes(variant.value)) variant.value = ''
+  savePrefs()
+}
+
+function setVariant(value: string) {
+  if (value === variant.value) return
+  variant.value = value
+  savePrefs()
+}
+
+/**
+ * 回显：拿该会话最近一轮真实用过的模型 / 档位初始化下拉。
+ * 历史里没有模型信息时保留上面装载的引擎偏好。
+ */
+function hydrateModelPick(list: TimelineRecord[]) {
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const record = list[index]
+    if (record.role !== 'assistant') continue
+    const key = recordModelKey(record)
+    if (!key) continue
+    modelKey.value = key
+    variant.value = record.variant ?? ''
+    return
+  }
+}
 
 /** 惰性加载引擎目录（聚焦输入框 / 用到模型或命令时）。 */
 async function ensureCatalog() {
@@ -561,6 +602,12 @@ function onLedgerJump(recordId: string) {
   void performJump(recordId)
 }
 
+/** 分支切换成功：轻提示 + 让外层刷新项目列表里的分支徽标。 */
+function onBranchChanged(branch: string) {
+  notice.value = `已切换到分支 ${branch}`
+  emit('branchChanged', branch)
+}
+
 const starred = computed(() => (props.session ? isStarred(props.session.id) : false))
 const sessionTags = computed(() => (props.session ? tagsOf(props.session.id) : []))
 
@@ -827,6 +874,7 @@ async function loadInitial(sessionId: string) {
     const page = await api.readTimeline(sessionId)
     if (props.session?.id !== sessionId) return
     records.value = page.records
+    hydrateModelPick(page.records)
     cursor.value = page.nextCursor
     hasMore.value = page.hasMore
     scrollToBottom()
@@ -1314,6 +1362,7 @@ watch(
         </div>
         <div class="session-meta">
           <span class="meta-dir" :title="session.directory">{{ session.directory }}</span>
+          <BranchPicker :directory="session.directory" @changed="onBranchChanged" />
           <span v-if="session.model" class="meta-chip">{{ session.model }}</span>
           <span class="meta-chip">
             ↓{{ formatTokens(session.tokensInput + session.tokensReasoning) }}
@@ -1531,35 +1580,19 @@ watch(
             <span class="composer-hint" role="status">{{ composerHint }}</span>
 
             <div class="composer-right">
-              <span class="tool-select model-pick" title="模型（下一轮生效）">
-                <span class="tool-label">模型</span>
-                <SelectMenu
-                  v-model="modelKey"
-                  :options="modelOptions"
-                  :disabled="sending"
-                  size="xs"
-                  shape="pill"
-                  inline
-                  max-width="200px"
-                  @open="ensureCatalog"
-                />
-              </span>
-              <span
-                v-if="sessionVariants.length"
-                class="tool-select effort-pick"
-                title="推理强度（下一轮生效）"
-              >
-                <span class="tool-label">推理</span>
-                <SelectMenu
-                  v-model="variant"
-                  :options="variantOptions"
-                  :disabled="sending"
-                  size="xs"
-                  shape="pill"
-                  inline
-                  max-width="112px"
-                />
-              </span>
+              <ModelMenu
+                class="model-pick"
+                :model-value="modelKey"
+                :variant="variant"
+                :options="modelOptions"
+                :variants="sessionVariants"
+                :loading="catalogLoading"
+                :disabled="sending"
+                title="模型 / 推理强度（下一轮生效）"
+                @update:model-value="setModel"
+                @update:variant="setVariant"
+                @open="ensureCatalog"
+              />
               <button
                 v-if="running"
                 class="stop-btn"

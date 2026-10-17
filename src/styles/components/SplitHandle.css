@@ -1,0 +1,71 @@
+/* 两栏之间的竖向分隔条。
+   本身宽度为 0，不参与布局——两栏仍然紧贴，接缝上那条 1px 边框就是唯一的分隔线，
+   不会像「占位式分隔条」那样透出一条页面底色的缝。
+   手感靠内部 .split-hit 跨两侧各 3px 接住指针，悬停 / 拖动时把那条边框点亮。 */
+.split {
+  position: relative;
+  flex: none;
+  width: 0;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: col-resize;
+  /* 触控板拖拽时别触发横向滚动 / 手势缩放 */
+  touch-action: none;
+  z-index: 3;
+}
+
+.split-hit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  display: block;
+  background: none;
+}
+
+/* 高亮线：正好压在左栏的 border-right 上（该边框位于 -1 ~ 0） */
+.split::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 1px;
+  background: transparent;
+  pointer-events: none;
+  transition:
+    background 0.12s ease,
+    width 0.12s ease;
+}
+
+.split:hover::after,
+.split:focus-visible::after,
+.split.dragging::after {
+  width: 2px;
+  background: var(--accent);
+}
+
+.split:focus-visible {
+  outline: none;
+}
+
+.split.dragging {
+  cursor: col-resize;
+}
+
+/* 拖动期间整窗锁光标和选区，鼠标滑出分隔条也不会闪回箭头 */
+:global(body.resizing),
+:global(body.resizing *) {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .split::after {
+    transition: none;
+  }
+}

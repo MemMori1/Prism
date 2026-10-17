@@ -8,6 +8,7 @@ import type {
   EngineCatalog,
   EngineHealth,
   FileHit,
+  GitBranches,
   GitInfo,
   GitSnapshot,
   McpProbeResult,
@@ -143,4 +144,7 @@ export const api = {
   projectFiles: (directory: string, query: string, limit?: number) =>
     invoke<FileHit[]>('project_files', { directory, query, limit: limit ?? null }),
   gitSnapshot: (directory: string) => invoke<GitSnapshot>('git_snapshot', { directory }),
+  gitBranches: (directory: string) => invoke<GitBranches>('git_branches', { directory }),
+  gitSwitchBranch: (directory: string, branch: string, create = false) =>
+    invoke<GitSnapshot>('git_switch_branch', { directory, branch, create }),
 }

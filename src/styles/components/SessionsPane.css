@@ -88,6 +88,7 @@
 }
 
 .session-item {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -173,22 +174,40 @@
   align-items: center;
   gap: 5px;
   min-width: 0;
+  /* 右上角的星标是绝对定位的，这里给它留出固定宽度，标题截断点才不会随星标状态跳动。 */
+  padding-right: 20px;
 }
 
 .star-btn {
-  flex: none;
-  width: 15px;
+  position: absolute;
+  top: 5px;
+  right: 3px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
   font-size: 12px;
   line-height: 1;
   color: var(--faint);
   opacity: 0;
-  cursor: pointer;
-  user-select: none;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    color 0.12s ease,
+    background 0.12s ease;
 }
 
 .session-item:hover .star-btn,
 .star-btn.on {
   opacity: 1;
+  pointer-events: auto;
+}
+
+.star-btn:hover {
+  color: var(--amber);
+  background: var(--hover);
 }
 
 .star-btn.on {
@@ -202,22 +221,3 @@
   border-radius: 50%;
 }
 
-.branch-inline {
-  margin-left: 5px;
-  padding: 0 5px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 9.5px;
-  font-family: var(--font-mono);
-  font-weight: 400;
-  letter-spacing: 0;
-  line-height: 15px;
-  display: inline-block;
-  vertical-align: 1px;
-  max-width: 110px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}

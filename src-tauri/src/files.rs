@@ -52,6 +52,32 @@ pub struct GitSnapshot {
     pub commits: Vec<String>,
 }
 
+/// 一个本地分支（切换弹层用）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranch {
+    pub name: String,
+    /// 该分支 tip 的提交摘要（列表里的次级信息）。
+    pub subject: String,
+    /// tip 的提交时间（Unix 秒；解析失败为 0）。
+    pub time: i64,
+}
+
+/// 本地分支概览。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBranches {
+    /// 当前分支（detached 时为短 sha 或空）。
+    pub current: Option<String>,
+    /// 未提交改动条数（切换前提示）。
+    pub dirty: usize,
+    /// 按最近提交时间倒序。
+    pub branches: Vec<GitBranch>,
+}
+
+/// 分支列表上限（本地分支通常远小于这个数）。
+const MAX_BRANCHES: usize = 300;
+
 fn basename(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
@@ -177,9 +203,8 @@ fn git_lines(directory: &str, args: &[&str], max: usize) -> Vec<String> {
         .collect()
 }
 
-/// Git 上下文快照（分支 / 变更 / 最近提交）。
-pub fn git_snapshot(directory: &str) -> Result<GitSnapshot, String> {
-    let directory = directory.trim();
+/// 目录必须落在 Git 工作树里（否则后续命令都没意义）。
+fn ensure_repo(directory: &str) -> Result<(), String> {
     if directory.is_empty() {
         return Err("目录为空".to_string());
     }
@@ -194,20 +219,170 @@ pub fn git_snapshot(directory: &str) -> Result<GitSnapshot, String> {
     if !inside {
         return Err("该目录不是 Git 仓库".to_string());
     }
+    Ok(())
+}
 
-    let branch = {
-        let current = git_lines(directory, &["branch", "--show-current"], 1);
-        if let Some(name) = current.first().filter(|name| !name.is_empty()) {
-            Some(name.clone())
-        } else {
-            git_lines(directory, &["rev-parse", "--short", "HEAD"], 1).into_iter().next()
-        }
-    };
+/// Git 上下文快照（分支 / 变更 / 最近提交）。
+pub fn git_snapshot(directory: &str) -> Result<GitSnapshot, String> {
+    let directory = directory.trim();
+    ensure_repo(directory)?;
+
     Ok(GitSnapshot {
-        branch,
+        branch: current_branch(directory),
         dirty: git_lines(directory, &["status", "--porcelain=v1", "-uall"], 25),
         commits: git_lines(directory, &["log", "--oneline", "-8"], 8),
     })
+}
+
+/// 目录对应的当前分支（detached 时回落短 sha）。
+fn current_branch(directory: &str) -> Option<String> {
+    git_lines(directory, &["branch", "--show-current"], 1)
+        .into_iter()
+        .next()
+        .or_else(|| {
+            git_lines(directory, &["rev-parse", "--short", "HEAD"], 1)
+                .into_iter()
+                .next()
+        })
+}
+
+/// 本地分支列表 + 当前分支 + 未提交改动条数。
+pub fn git_branches(directory: &str) -> Result<GitBranches, String> {
+    let directory = directory.trim();
+    ensure_repo(directory)?;
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args([
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)\t%(committerdate:unix)\t%(subject)",
+            "refs/heads",
+        ])
+        .output()
+        .map_err(|cause| format!("无法运行 git：{cause}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "读取分支失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let branches: Vec<GitBranch> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(MAX_BRANCHES)
+        .map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let name = fields.next().unwrap_or_default().trim().to_string();
+            let time = fields
+                .next()
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .unwrap_or(0);
+            let subject = fields.next().unwrap_or_default().trim().to_string();
+            GitBranch { name, subject, time }
+        })
+        .filter(|branch| !branch.name.is_empty())
+        .collect();
+
+    let dirty = git_lines(directory, &["status", "--porcelain=v1", "-uall"], 999).len();
+
+    Ok(GitBranches {
+        current: current_branch(directory),
+        dirty,
+        branches,
+    })
+}
+
+/// 分支名合法性（挡掉选项注入与明显非法的 ref 名；权威校验仍由 git 完成）。
+fn validate_branch_name(name: &str) -> Result<&str, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("分支名不能为空".to_string());
+    }
+    if name.starts_with('-') {
+        return Err("分支名不能以 - 开头".to_string());
+    }
+    if name.len() > 200 {
+        return Err("分支名过长".to_string());
+    }
+    if name
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_control() || matches!(ch, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
+    {
+        return Err("分支名包含非法字符".to_string());
+    }
+    if name.contains("..") || name.contains("//") || name.ends_with('/') || name.ends_with(".lock") {
+        return Err("分支名不符合 Git 规范".to_string());
+    }
+    Ok(name)
+}
+
+/// 运行 git 子命令，失败时把 stderr 交给上层（如「本地改动会被覆盖」）。
+fn run_git(directory: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .output()
+        .map_err(|cause| format!("无法运行 git：{cause}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().replace('\n', " ");
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().replace('\n', " ");
+    let message = if stderr.is_empty() { stdout } else { stderr };
+    Err(if message.is_empty() {
+        "git 命令执行失败".to_string()
+    } else {
+        message
+    })
+}
+
+/// 切换分支（`create` = 基于当前 HEAD 新建并切过去）。成功后返回新的快照。
+pub fn git_switch_branch(
+    directory: &str,
+    branch: &str,
+    create: bool,
+) -> Result<GitSnapshot, String> {
+    let directory = directory.trim();
+    ensure_repo(directory)?;
+    let branch = validate_branch_name(branch)?;
+
+    // `git switch` 需要 2.23+；旧版本回落 `git checkout`。
+    let modern = |extra: &[&str]| {
+        let mut args: Vec<&str> = vec!["switch"];
+        args.extend_from_slice(extra);
+        args.push(branch);
+        run_git(directory, &args)
+    };
+    let legacy = |extra: &[&str]| {
+        let mut args: Vec<&str> = vec!["checkout"];
+        args.extend_from_slice(extra);
+        args.push(branch);
+        run_git(directory, &args)
+    };
+
+    let result = if create {
+        modern(&["-c"]).or_else(|cause| {
+            if cause.contains("not a git command") {
+                legacy(&["-b"])
+            } else {
+                Err(cause)
+            }
+        })
+    } else {
+        modern(&[]).or_else(|cause| {
+            if cause.contains("not a git command") {
+                legacy(&[])
+            } else {
+                Err(cause)
+            }
+        })
+    };
+    result?;
+    git_snapshot(directory)
 }
 
 #[cfg(test)]
@@ -313,5 +488,74 @@ mod tests {
         assert!(git_snapshot(plain.to_str().expect("路径")).is_err());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&plain);
+    }
+
+    /// 建一个空提交（测试机没有配置 user 时也能跑）。
+    fn commit_empty(root: &Path, message: &str) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Prism Test",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                message,
+            ])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn git_branches_lists_switches_and_creates() {
+        let root = temp_dir("branches");
+        let init = Command::new("git").arg("-C").arg(&root).args(["init", "-q"]).status();
+        if !init.map(|s| s.success()).unwrap_or(false) {
+            return; // 无 git 环境则跳过
+        }
+        assert!(commit_empty(&root, "first"), "初始化提交");
+        let path = root.to_str().expect("路径");
+
+        let created = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["branch", "feature"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(created, "建一个已有分支");
+
+        let list = git_branches(path).expect("分支列表");
+        assert!(list.current.is_some());
+        assert_eq!(list.dirty, 0);
+        assert!(
+            list.branches.iter().any(|branch| branch.name == "feature"),
+            "应列出 feature：{:?}",
+            list.branches
+        );
+        assert!(
+            list.branches
+                .iter()
+                .any(|branch| Some(&branch.name) == list.current.as_ref()),
+            "当前分支应在列表里"
+        );
+        assert!(!list.branches[0].subject.is_empty(), "分支应带简要提交说明");
+
+        let switched = git_switch_branch(path, "feature", false).expect("切换分支");
+        assert_eq!(switched.branch.as_deref(), Some("feature"));
+
+        let fresh = git_switch_branch(path, "prism-test/new", true).expect("新建并切换");
+        assert_eq!(fresh.branch.as_deref(), Some("prism-test/new"));
+
+        assert!(git_switch_branch(path, "--detach", false).is_err(), "拒绝选项注入");
+        assert!(git_switch_branch(path, "  ", false).is_err(), "拒绝空名");
+        assert!(git_branches(temp_dir("not-a-repo").to_str().expect("路径")).is_err());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -38,6 +38,8 @@ pub fn run() {
             ipc::session_command,
             ipc::project_files,
             ipc::git_snapshot,
+            ipc::git_branches,
+            ipc::git_switch_branch,
             ipc::search_stats,
             ipc::search_update_index,
             ipc::search_query,

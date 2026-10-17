@@ -2,7 +2,7 @@
  * 组合器纯逻辑：@ 文件 / / 命令触发检测、补全应用、! shell 直跑、
  * 斜杠命令调用解析（全部纯函数，可单测）。
  */
-import type { EngineModel } from './types'
+import type { EngineModel, TimelineRecord } from './types'
 
 export interface Trigger {
   kind: 'file' | 'command'
@@ -86,4 +86,24 @@ export function modelLabel(model: EngineModel): string {
   const name = model.label && model.label !== model.id ? `${model.label}（${model.id}）` : model.id
   const provider = model.provider ? `${model.provider}/` : ''
   return model.isDefault ? `${provider}${name} · 默认` : `${provider}${name}`
+}
+
+/**
+ * 从时间线记录反推模型 key（编码与 modelKeyOf 一致，`provider::id`）。
+ * 记录里没有模型时返回 null，调用方保留原选择。
+ */
+export function recordModelKey(
+  record: Pick<TimelineRecord, 'model' | 'modelProvider'>,
+): string | null {
+  const id = record.model?.trim()
+  if (!id) return null
+  const provider = record.modelProvider?.trim()
+  return provider ? `${provider}::${id}` : id
+}
+
+/** 模型 key 的兜底展示名（catalog 未加载 / 模型已下架时用），档位附在后面。 */
+export function modelKeyLabel(key: string, variant = ''): string {
+  const id = key.includes('::') ? key.slice(key.indexOf('::') + 2) : key
+  const base = id || '默认'
+  return variant ? `${base} · ${variant}` : base
 }

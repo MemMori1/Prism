@@ -17,7 +17,7 @@ use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runti
 use crate::engines::quota;
 use crate::engines::usage::{self, UsageSummary};
 use crate::engines::{mcp, workshop};
-use crate::files::{self, FileHit, GitSnapshot};
+use crate::files::{self, FileHit, GitBranches, GitSnapshot};
 use crate::routines::{runner, scheduler::RoutinesState, store};
 use crate::routines::store::{RoutineDefinition, RoutineLogEntry, RoutineView};
 
@@ -669,6 +669,28 @@ pub async fn git_snapshot(directory: String) -> Result<GitSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || files::git_snapshot(&directory))
         .await
         .map_err(|cause| cause.to_string())?
+}
+
+/// 本地分支列表（会话头部的分支切换弹层）。
+#[tauri::command]
+pub async fn git_branches(directory: String) -> Result<GitBranches, String> {
+    tauri::async_runtime::spawn_blocking(move || files::git_branches(&directory))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 切换（或新建并切换）分支；成功后返回新的快照。
+#[tauri::command]
+pub async fn git_switch_branch(
+    directory: String,
+    branch: String,
+    create: Option<bool>,
+) -> Result<GitSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        files::git_switch_branch(&directory, &branch, create.unwrap_or(false))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
 }
 
 /// 中断当前执行。

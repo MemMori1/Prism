@@ -461,23 +461,6 @@
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-.tool-select {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  color: var(--faint);
-  font-size: 10px;
-}
-
-.tool-label {
-  flex: none;
-  color: var(--faint);
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-}
-
 .composer-input-wrap {
   position: relative;
   display: flex;
@@ -691,20 +674,15 @@
   min-width: 0;
 }
 
-.composer-right .tool-select,
 .composer-right .sel {
   flex: 0 1 auto;
   min-width: 0;
 }
 
-/* 模型名可以省略，但至少保留能认出来的宽度；推理档位通常很短，不参与压缩 */
-.composer-right .tool-select.model-pick {
+/* 模型名可以缩，但至少留出能认出来的宽度；档位并进同一个触发器，不再单独占位 */
+.composer-right .model-pick {
   min-width: 96px;
-}
-
-.composer-right .tool-select.effort-pick,
-.composer-right .tool-select.effort-pick .sel {
-  flex: none;
+  max-width: 232px;
 }
 
 .send-btn {
@@ -1017,10 +995,6 @@
 }
 
 /* 工作台列通常只有 380–520px：去掉标签、收紧内边距，让模型与发送按钮不被挤掉 */
-.session-view.embedded .tool-label {
-  display: none;
-}
-
 .session-view.embedded .composer-input {
   min-height: 54px;
   padding: 10px 11px 2px;

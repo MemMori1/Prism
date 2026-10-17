@@ -43,3 +43,10 @@ export function gitInfoOf(path: string | null | undefined): GitInfo | null {
   if (!path) return null
   return cache.get(path) ?? null
 }
+
+/** 丢弃某个目录的缓存并重新查询（切换分支后调用，否则徽标会一直停在旧分支）。 */
+export async function refreshGitInfo(path: string | null | undefined): Promise<void> {
+  if (!path) return
+  cache.delete(path)
+  await ensureGitInfo([path])
+}

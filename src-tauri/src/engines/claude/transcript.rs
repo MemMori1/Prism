@@ -473,6 +473,8 @@ fn render_page(records: Vec<ParsedRecord>, before_seq: Option<i64>, limit: i64) 
                 role: record.role.to_string(),
                 time_created: record.time_created,
                 model: record.model,
+                model_provider: None,
+                variant: None,
                 completed: true,
                 parts: record.parts,
                 tokens: record.tokens,

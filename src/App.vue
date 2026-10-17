@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, computed, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, computed, watch, nextTick } from 'vue'
 import { api } from './api'
 import { relativeTime } from './format'
+import { refreshGitInfo } from './gitInfo'
 import { mergeTrayCounts, type ArchiveStatus, type WorkbenchStatus } from './trayStatus'
 import {
   notifications,
@@ -13,6 +14,16 @@ import {
 } from './notify'
 import { onRoutineEvent } from './routineEvents'
 import { engineLabel } from './workshop'
+import {
+  fitWidths,
+  paneWidths,
+  resetPaneWidth,
+  resizeWidths,
+  savePaneWidths,
+  setPaneWidths,
+  type PaneKind,
+  type PaneWidths,
+} from './panes'
 import type {
   EngineHealth,
   ProjectItem,
@@ -22,6 +33,7 @@ import type {
 } from './types'
 import ProjectsPane from './components/ProjectsPane.vue'
 import SessionsPane from './components/SessionsPane.vue'
+import SplitHandle from './components/SplitHandle.vue'
 import SessionView from './components/SessionView.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import WorkbenchPane from './components/WorkbenchPane.vue'
@@ -232,6 +244,16 @@ async function loadProjects() {
   }
 }
 
+/**
+ * 会话里换了分支：刷新项目列表，让归档里的分支徽标跟着更新。
+ * 会话本身属于原工作区，不重载时间线。
+ */
+function onBranchChanged() {
+  // 目录 → 分支的缓存是不失效的正缓存，不主动清就会一直显示切换前的分支。
+  void refreshGitInfo(selectedSession.value?.directory ?? selectedProject.value?.worktree)
+  void loadProjects()
+}
+
 async function selectProject(projectId: string) {
   if (selectedProjectId.value === projectId) return
   selectedProjectId.value = projectId
@@ -342,8 +364,51 @@ async function reload() {
   }
 }
 
+// ---- 三栏宽度：项目栏 / 会话栏可拖拽，宽度记在 localStorage ----
+
+const panesEl = ref<HTMLElement | null>(null)
+/** 起手时的宽度快照，拖动全程都以它为基准，避免累积误差。 */
+let dragStart: PaneWidths | null = null
+
+function availableWidth(): number {
+  return panesEl.value?.clientWidth ?? 0
+}
+
+function beginResize(): void {
+  dragStart = { ...paneWidths.value }
+  document.body.classList.add('resizing')
+}
+
+function applyResize(kind: PaneKind, deltaX: number): void {
+  setPaneWidths(resizeWidths(kind, dragStart ?? paneWidths.value, deltaX, availableWidth()))
+}
+
+function endResize(): void {
+  dragStart = null
+  document.body.classList.remove('resizing')
+  savePaneWidths()
+}
+
+function resetResize(kind: PaneKind): void {
+  resetPaneWidth(kind)
+  // 恢复默认后仍要保证装得下（窗口很窄时按预算再收一次）。
+  setPaneWidths(fitWidths(paneWidths.value, availableWidth()))
+  savePaneWidths()
+}
+
+/** 窗口变窄时把两栏收回来，避免主区域被挤没。 */
+function fitPanes(): void {
+  const next = fitWidths(paneWidths.value, availableWidth())
+  if (next.projects !== paneWidths.value.projects || next.sessions !== paneWidths.value.sessions) {
+    setPaneWidths(next)
+  }
+}
+
 onMounted(() => {
   void reload()
+  // 首帧再量一次：窗口比记录值窄时要先把两栏收进来。
+  void nextTick(() => fitPanes())
+  window.addEventListener('resize', fitPanes)
 })
 
 // 例行任务事件（Rust 调度器广播）：通知中心 + 刷新由各视图自行订阅。
@@ -351,7 +416,10 @@ const stopRoutineEvents = onRoutineEvent(payload => {
   void handleRoutineEvent(payload).catch(reportError)
 })
 
-onBeforeUnmount(stopRoutineEvents)
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', fitPanes)
+  stopRoutineEvents()
+})
 </script>
 
 <template>
@@ -459,7 +527,7 @@ onBeforeUnmount(stopRoutineEvents)
         <div v-if="error" class="error-banner">{{ error }}</div>
       </transition>
 
-      <div class="panes">
+      <div ref="panesEl" class="panes">
         <HomePane
           v-show="view === 'home'"
           :projects="projects"
@@ -469,12 +537,22 @@ onBeforeUnmount(stopRoutineEvents)
         />
         <div v-show="view === 'archive'" class="archive-view">
           <ProjectsPane
+            :style="{ width: `${paneWidths.projects}px` }"
             :projects="projects"
             :selected-id="selectedProjectId"
             :loading="projectsLoading"
             @select="selectProject"
           />
+          <SplitHandle
+            kind="projects"
+            :width="paneWidths.projects"
+            @start="beginResize"
+            @drag="applyResize('projects', $event)"
+            @commit="endResize"
+            @reset="resetResize('projects')"
+          />
           <SessionsPane
+            :style="{ width: `${paneWidths.sessions}px` }"
             :sessions="sessions"
             :selected-id="selectedSessionId"
             :loading="sessionsLoading"
@@ -482,6 +560,14 @@ onBeforeUnmount(stopRoutineEvents)
             :creating="creating"
             @select="selectSession"
             @create="startCreateSession"
+          />
+          <SplitHandle
+            kind="sessions"
+            :width="paneWidths.sessions"
+            @start="beginResize"
+            @drag="applyResize('sessions', $event)"
+            @commit="endResize"
+            @reset="resetResize('sessions')"
           />
           <NewSessionPanel
             v-if="enginePickerOpen && selectedProject"
@@ -502,6 +588,7 @@ onBeforeUnmount(stopRoutineEvents)
             @open-workbench="openInWorkbench"
             @jump-consumed="pendingJump = null"
             @status="archiveStatus = $event"
+            @branch-changed="onBranchChanged"
           />
         </div>
         <WorkbenchPane

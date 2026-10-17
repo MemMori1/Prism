@@ -53,6 +53,10 @@ export interface TimelineRecord {
   role: RecordRole
   timeCreated: number
   model: string | null
+  /** 模型提供方（OpenCode 的 providerID；其他引擎为 null/缺省）。 */
+  modelProvider?: string | null
+  /** 该轮推理档位（OpenCode variant / Codex effort）。 */
+  variant?: string | null
   completed: boolean
   parts: TimelinePart[]
   /** 该轮 token 用量（引擎数据可得时）。 */
@@ -417,6 +421,24 @@ export interface GitSnapshot {
   branch: string | null
   dirty: string[]
   commits: string[]
+}
+
+/** 本地分支（切换弹层用）。 */
+export interface GitBranch {
+  name: string
+  /** tip 的提交摘要。 */
+  subject: string
+  /** tip 的提交时间（Unix 秒）。 */
+  time: number
+}
+
+/** 分支概览。 */
+export interface GitBranches {
+  current: string | null
+  /** 未提交改动条数（切换前提示）。 */
+  dirty: number
+  /** 按最近提交时间倒序。 */
+  branches: GitBranch[]
 }
 
 /** 发送附件（uri 为绝对路径）。 */

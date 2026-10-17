@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import type { ProjectItem, SessionSummary } from '../types'
 import { basename, formatTokens, relativeTime } from '../format'
 import { ensureAnnotations, isStarred, setStar, tagsOf, titleOf } from '../annotations'
-import { ensureGitInfo, gitInfoOf } from '../gitInfo'
 import SelectMenu from './SelectMenu.vue'
 import {
   filterSessionsByRange,
@@ -56,17 +55,6 @@ onMounted(() => {
   void ensureAnnotations()
 })
 
-/** 当前项目的分支（用于标题行标注）。 */
-const projectBranch = computed(() => gitInfoOf(props.project?.worktree)?.branch ?? null)
-
-watch(
-  () => props.project?.worktree,
-  path => {
-    if (path) void ensureGitInfo([path])
-  },
-  { immediate: true },
-)
-
 async function toggleStar(sessionId: string) {
   try {
     await setStar(sessionId, !isStarred(sessionId))
@@ -104,13 +92,6 @@ function shortModel(model: string | null): string {
     <div class="pane-header">
       <span class="pane-title">
         {{ project ? `${project.name || basename(project.worktree)} 的会话` : '会话' }}
-        <span
-          v-if="projectBranch"
-          class="branch-inline"
-          :title="`当前分支：${projectBranch}`"
-        >
-          ⑂{{ projectBranch }}
-        </span>
       </span>
       <span class="pane-actions">
         <span v-if="sessions.length" class="pane-count">{{ sessions.length }}</span>

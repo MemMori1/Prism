@@ -489,6 +489,8 @@ fn map_user_record(id: String, time_created: i64, data: &Value) -> Option<Timeli
         role: "user".to_string(),
         time_created,
         model: None,
+        model_provider: None,
+        variant: None,
         completed: true,
         parts: vec![TimelinePart::Text { text }],
         tokens: None,
@@ -497,8 +499,17 @@ fn map_user_record(id: String, time_created: i64, data: &Value) -> Option<Timeli
 
 fn map_assistant_record(id: String, time_created: i64, data: &Value) -> Option<TimelineRecord> {
     let completed = data.pointer("/time/completed").is_some();
+    // `model` 是对象：{"id","providerID","variant"}；variant 即推理档位。
     let model = data
         .pointer("/model/id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let model_provider = data
+        .pointer("/model/providerID")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let variant = data
+        .pointer("/model/variant")
         .and_then(Value::as_str)
         .map(str::to_string);
     let tokens = parse_turn_tokens(data);
@@ -564,6 +575,8 @@ fn map_assistant_record(id: String, time_created: i64, data: &Value) -> Option<T
         role: "assistant".to_string(),
         time_created,
         model,
+        model_provider,
+        variant,
         completed,
         parts,
         tokens,
@@ -853,7 +866,7 @@ mod tests {
     fn assistant_record_maps_parts_and_completion() {
         let data = json!({
             "time": {"created": 1, "completed": 2},
-            "model": {"id": "deepseek-v4.1-flash-free"},
+            "model": {"id": "deepseek-v4.1-flash-free", "providerID": "opencode", "variant": "max"},
             "content": [
                 {"type": "reasoning", "text": "think…"},
                 {"type": "text", "text": "hello"},
@@ -865,6 +878,8 @@ mod tests {
         assert!(record.completed);
         assert_eq!(record.role, "assistant");
         assert_eq!(record.model.as_deref(), Some("deepseek-v4.1-flash-free"));
+        assert_eq!(record.model_provider.as_deref(), Some("opencode"));
+        assert_eq!(record.variant.as_deref(), Some("max"));
         assert_eq!(record.parts.len(), 3);
         assert!(matches!(record.parts[0], TimelinePart::Reasoning { .. }));
         assert!(matches!(record.parts[1], TimelinePart::Text { .. }));
@@ -988,6 +1003,23 @@ mod tests {
         );
         for record in &page.records {
             assert!(record.role == "user" || record.role == "assistant");
+        }
+        // 最近一轮的模型上下文：界面用它回显「模型 · 档位」。
+        // 这个会话可能还没有助手记录，找一个有的来核对。
+        for candidate in list_sessions(&db_path, &project.id, 30).expect("probe sessions") {
+            let probe = read_timeline(&db_path, &candidate.id, None, 150).expect("probe timeline");
+            let Some(last) = probe.records.iter().rev().find(|record| record.model.is_some()) else {
+                continue;
+            };
+            println!(
+                "最近一轮模型: {:?} / provider={:?} / 档位={:?}",
+                last.model, last.model_provider, last.variant
+            );
+            assert!(
+                last.model_provider.is_some(),
+                "OpenCode 的模型记录应带 providerID"
+            );
+            break;
         }
 
         // 分页：翻到更早一页，两页不重叠且时间有序。
