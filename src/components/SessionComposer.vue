@@ -18,6 +18,7 @@ import type {
   SendOptions,
 } from '../types'
 import type { Trigger } from '../composer'
+import SelectMenu from './SelectMenu.vue'
 
 const props = defineProps<{
   projects: ProjectItem[]
@@ -61,6 +62,19 @@ const selectedModel = computed<EngineModel | null>(() => {
 })
 const variants = computed(() => selectedModel.value?.variants ?? [])
 const hasContent = computed(() => !!draft.value.trim() || attachments.value.length > 0)
+
+/** 三个下拉的选项（含空值 = 引擎默认）。 */
+const projectOptions = computed(() =>
+  props.projects.map(item => ({ value: item.id, label: item.name || item.worktree })),
+)
+const modelOptions = computed(() => [
+  { value: '', label: '（引擎默认）' },
+  ...models.value.map(model => ({ value: modelKeyOf(model), label: modelLabel(model) })),
+])
+const variantOptions = computed(() => [
+  { value: '', label: '（引擎默认）' },
+  ...variants.value.map(item => ({ value: item, label: item })),
+])
 
 // ---- 目录加载 ----
 
@@ -299,14 +313,10 @@ onBeforeUnmount(() => {
 
       <div class="dialog-body composer-body">
         <div class="row">
-          <label class="field compact">
+          <div class="field compact">
             <span class="field-label">项目</span>
-            <select v-model="projectId" class="field-input">
-              <option v-for="item in projects" :key="item.id" :value="item.id">
-                {{ item.name || item.worktree }}
-              </option>
-            </select>
-          </label>
+            <SelectMenu v-model="projectId" :options="projectOptions" title="工作目录" />
+          </div>
         </div>
 
         <div v-if="!projects.length" class="catalog-hint">
@@ -336,22 +346,24 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="row">
-          <label class="field compact">
+          <div class="field compact">
             <span class="field-label">模型</span>
-            <select v-model="modelKey" class="field-input" :disabled="catalogLoading || !models.length">
-              <option value="">（引擎默认）</option>
-              <option v-for="model in models" :key="modelKeyOf(model)" :value="modelKeyOf(model)">
-                {{ modelLabel(model) }}
-              </option>
-            </select>
-          </label>
-          <label class="field compact">
+            <SelectMenu
+              v-model="modelKey"
+              :options="modelOptions"
+              :disabled="catalogLoading || !models.length"
+              title="模型"
+            />
+          </div>
+          <div class="field compact">
             <span class="field-label">推理档位</span>
-            <select v-model="variant" class="field-input" :disabled="!variants.length">
-              <option value="">（引擎默认）</option>
-              <option v-for="item in variants" :key="item" :value="item">{{ item }}</option>
-            </select>
-          </label>
+            <SelectMenu
+              v-model="variant"
+              :options="variantOptions"
+              :disabled="!variants.length"
+              title="推理档位"
+            />
+          </div>
         </div>
         <div v-if="catalogLoading" class="catalog-hint">正在读取引擎目录…</div>
 

@@ -49,22 +49,6 @@
   flex: none;
 }
 
-.mini-select {
-  height: 22px;
-  padding: 0 4px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--panel);
-  color: var(--muted);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.mini-select:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
 .new-btn {
   width: 20px;
   height: 20px;

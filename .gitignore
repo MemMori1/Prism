@@ -12,3 +12,9 @@ src-tauri/icons/ios
 
 # 发版产物（不进仓库；随 GitHub Release 上传）
 release-artifacts/
+
+# 本地临时产物（预览截图、node 编译缓存等）
+.tmp/
+
+# 本地工作记忆（agent 上下文，因人而异）
+.workbuddy/

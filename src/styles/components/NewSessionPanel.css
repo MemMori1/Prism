@@ -18,31 +18,23 @@
   background: var(--panel);
 }
 
-.project-chip,
-.project-select {
-  max-width: 210px;
-  height: 22px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 10.5px;
-  line-height: 20px;
-}
-
 .project-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  max-width: 210px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 22px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.project-select {
-  outline: none;
-  cursor: pointer;
 }
 
 .project-dot {

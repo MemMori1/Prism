@@ -4,6 +4,7 @@ import { api } from '../api'
 import { SCHEDULE_PRESETS, describeCron } from '../routines'
 import { ASSET_ENGINE_LABELS } from '../workshop'
 import type { RoutineDefinition } from '../types'
+import SelectMenu from './SelectMenu.vue'
 
 const props = defineProps<{
   mode: 'create' | 'edit'
@@ -28,11 +29,21 @@ const preset = ref(
     : 'custom',
 )
 
-function applyPreset() {
-  if (preset.value !== 'custom') {
-    schedule.value = preset.value
+function applyPreset(value: string) {
+  preset.value = value
+  if (value !== 'custom') {
+    schedule.value = value
   }
 }
+
+/** 计划预设 / 引擎 下拉选项。 */
+const presetOptions = computed(() => [
+  ...SCHEDULE_PRESETS.map(option => ({ value: option.cron, label: option.label })),
+  { value: 'custom', label: '自定义（cron）' },
+])
+const engineOptions = computed(() =>
+  Object.entries(ASSET_ENGINE_LABELS).map(([value, label]) => ({ value, label })),
+)
 
 const scheduleHint = computed(() => {
   const text = schedule.value.trim()
@@ -105,15 +116,16 @@ onBeforeUnmount(() => {
           <input v-model="name" class="field-input" placeholder="例如：每日站会摘要" />
         </label>
 
-        <label class="field">
+        <div class="field">
           <span class="field-label">计划</span>
           <div class="schedule-row">
-            <select v-model="preset" class="field-input preset-select" @change="applyPreset">
-              <option v-for="option in SCHEDULE_PRESETS" :key="option.cron" :value="option.cron">
-                {{ option.label }}
-              </option>
-              <option value="custom">自定义（cron）</option>
-            </select>
+            <SelectMenu
+              v-model="preset"
+              :options="presetOptions"
+              class="preset-select"
+              title="计划预设"
+              @update:model-value="applyPreset"
+            />
             <input
               v-model="schedule"
               class="field-input mono-input"
@@ -122,17 +134,13 @@ onBeforeUnmount(() => {
             />
           </div>
           <span class="field-hint">当前：{{ scheduleHint }}</span>
-        </label>
+        </div>
 
-        <label class="field">
+        <div class="field">
           <span class="field-label">引擎</span>
-          <select v-model="engine" class="field-input">
-            <option v-for="(label, id) in ASSET_ENGINE_LABELS" :key="id" :value="id">
-              {{ label }}
-            </option>
-          </select>
+          <SelectMenu v-model="engine" :options="engineOptions" title="引擎" />
           <span class="field-hint">任务在 Prism 例行工作区（~/.prism/routine-workspace）里运行。</span>
-        </label>
+        </div>
 
         <label class="field">
           <span class="field-label">提示词</span>

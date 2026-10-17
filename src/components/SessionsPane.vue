@@ -4,6 +4,7 @@ import type { ProjectItem, SessionSummary } from '../types'
 import { basename, formatTokens, relativeTime } from '../format'
 import { ensureAnnotations, isStarred, setStar, tagsOf, titleOf } from '../annotations'
 import { ensureGitInfo, gitInfoOf } from '../gitInfo'
+import SelectMenu from './SelectMenu.vue'
 import {
   filterSessionsByRange,
   rangeToSince,
@@ -29,6 +30,27 @@ const sortKey = ref<SessionSort>('recent')
 const rangeKey = ref<TimeRange>('all')
 /** 只看星标会话。 */
 const starOnly = ref(false)
+
+const SORT_OPTIONS = [
+  { value: 'recent', label: '最近活动' },
+  { value: 'created', label: '创建时间' },
+  { value: 'tokens', label: 'Token' },
+]
+
+const RANGE_OPTIONS = [
+  { value: 'all', label: '全部时间' },
+  { value: 'today', label: '今天' },
+  { value: 'week', label: '本周' },
+  { value: 'month', label: '本月' },
+]
+
+function setSort(value: string): void {
+  sortKey.value = value as SessionSort
+}
+
+function setRange(value: string): void {
+  rangeKey.value = value as TimeRange
+}
 
 onMounted(() => {
   void ensureAnnotations()
@@ -104,17 +126,22 @@ function shortModel(model: string | null): string {
     </div>
 
     <div v-if="sessions.length" class="list-toolbar">
-      <select v-model="sortKey" class="mini-select" title="排序方式">
-        <option value="recent">最近活动</option>
-        <option value="created">创建时间</option>
-        <option value="tokens">Token</option>
-      </select>
-      <select v-model="rangeKey" class="mini-select" title="时间范围">
-        <option value="all">全部时间</option>
-        <option value="today">今天</option>
-        <option value="week">本周</option>
-        <option value="month">本月</option>
-      </select>
+      <SelectMenu
+        :model-value="sortKey"
+        :options="SORT_OPTIONS"
+        size="xs"
+        inline
+        title="排序方式"
+        @update:model-value="setSort"
+      />
+      <SelectMenu
+        :model-value="rangeKey"
+        :options="RANGE_OPTIONS"
+        size="xs"
+        inline
+        title="时间范围"
+        @update:model-value="setRange"
+      />
       <button
         class="mini-toggle"
         :class="{ on: starOnly }"

@@ -4,6 +4,7 @@ import type { EngineHealth, ProjectItem } from '../types'
 import { basename } from '../format'
 import { engineChoices } from '../sessionStart'
 import EngineChoicePanel from './EngineChoicePanel.vue'
+import SelectMenu from './SelectMenu.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -54,26 +55,31 @@ function selectEngine(engine: string) {
   emit('select', engine)
 }
 
-function pickProject(event: Event) {
-  emit('project', (event.target as HTMLSelectElement).value)
-}
+/** 多项目时头部可切换工作目录。 */
+const projectOptions = computed(() => [
+  ...(props.project
+    ? []
+    : [{ value: '', label: '选择项目', disabled: true }]),
+  ...props.projects.map(item => ({
+    value: item.id,
+    label: item.name || basename(item.worktree),
+  })),
+])
 </script>
 
 <template>
   <section class="new-session">
     <header class="new-session-head">
-      <select
+      <SelectMenu
         v-if="projects.length > 1"
-        class="project-select"
-        :value="project?.id ?? ''"
+        :model-value="project?.id ?? ''"
+        :options="projectOptions"
+        size="sm"
+        inline
         title="选择工作目录"
-        @change="pickProject"
-      >
-        <option v-if="!project" value="" disabled>选择项目</option>
-        <option v-for="item in projects" :key="item.id" :value="item.id">
-          {{ item.name || basename(item.worktree) }}
-        </option>
-      </select>
+        max-width="210px"
+        @update:model-value="emit('project', $event)"
+      />
       <span v-else-if="project" class="project-chip" :title="project.worktree">
         <span class="project-dot" />
         {{ projectName }}

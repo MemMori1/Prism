@@ -40,6 +40,7 @@ import LiveTurnView from './LiveTurn.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import TagPicker from './TagPicker.vue'
 import LedgerPane from './LedgerPane.vue'
+import SelectMenu from './SelectMenu.vue'
 
 const props = defineProps<{
   session: SessionSummary | null
@@ -113,6 +114,15 @@ const selectedModel = computed(
   () => sessionModels.value.find(model => modelKeyOf(model) === modelKey.value) ?? null,
 )
 const sessionVariants = computed(() => selectedModel.value?.variants ?? [])
+/** 底部工具条的两个下拉选项。 */
+const modelOptions = computed(() => [
+  { value: '', label: catalogLoading.value ? '加载中…' : '默认' },
+  ...sessionModels.value.map(model => ({ value: modelKeyOf(model), label: modelLabel(model) })),
+])
+const variantOptions = computed(() => [
+  { value: '', label: '默认' },
+  ...sessionVariants.value.map(item => ({ value: item, label: item })),
+])
 /** ! 开头 = 本机 shell 直跑。 */
 const shellMode = computed(() => shellCommand(draft.value) !== null)
 /** /name = 斜杠命令调用预览。 */
@@ -179,6 +189,7 @@ function closePopup() {
 /** 组合器候选列表：在光标处检测触发词并按需拉取。 */
 function onComposerInput() {
   autoGrow()
+  if (composerMenu.value) closeComposerMenu()
   const el = composerInput.value
   const trigger = detectTrigger(draft.value, el?.selectionStart ?? draft.value.length)
   if (!trigger) {
@@ -248,6 +259,248 @@ function removeAttachment(file: FileHit) {
     draft.value = draft.value.split(token).join('').replace(/[ \t]{2,}/g, ' ')
   }
 }
+
+// ---- 输入框工具条：+ 命令菜单 / 文件引用菜单 / 模型与档位 / 发送 ----
+
+type ComposerMenu = 'command' | 'file'
+
+const composerBox = ref<HTMLElement | null>(null)
+const composerMenuEl = ref<HTMLElement | null>(null)
+const commandBtn = ref<HTMLButtonElement | null>(null)
+const fileBtn = ref<HTMLButtonElement | null>(null)
+const menuSearch = ref<HTMLInputElement | null>(null)
+/** 当前展开的工具条菜单（null = 都收起）。 */
+const composerMenu = ref<ComposerMenu | null>(null)
+const menuQuery = ref('')
+const menuActive = ref(0)
+const menuFiles = ref<FileHit[]>([])
+const menuFilesLoading = ref(false)
+const composerFocused = ref(false)
+let fileSearchTimer: number | null = null
+let fileSearchToken = 0
+
+const menuCommands = computed(() => {
+  const list = catalog.value?.commands ?? []
+  const term = menuQuery.value.trim().toLowerCase()
+  if (!term) return list
+  return list.filter(
+    command =>
+      command.name.toLowerCase().includes(term) ||
+      (command.description ?? '').toLowerCase().includes(term),
+  )
+})
+
+/** 当前菜单的候选数（键盘导航/空态共用）。 */
+const menuCount = computed(() =>
+  composerMenu.value === 'file' ? menuFiles.value.length : menuCommands.value.length,
+)
+
+/** 发送按钮可用性：`!` 直跑要求命令非空，其余要求有文字或附件。 */
+const canSend = computed(() => {
+  const shell = shellCommand(draft.value)
+  if (shell !== null) return shell.length > 0
+  return !!draft.value.trim() || attachments.value.length > 0
+})
+
+/** 工具条左侧的实时提示（发送中 / shell 模式 / 斜杠命令预览…）。 */
+const composerHint = computed(() => {
+  if (sending.value) return '发送中…'
+  if (notice.value) return notice.value
+  if (shellMode.value) return '! 开头 = 本机直跑 shell（不发给模型）'
+  if (running.value) return '执行中，发送即插话'
+  if (commandPreview.value) return `斜杠命令 /${commandPreview.value.name}`
+  return ''
+})
+
+function onComposerFocus() {
+  composerFocused.value = true
+  void ensureCatalog()
+}
+
+function scheduleFileSearch(query: string) {
+  if (fileSearchTimer !== null) window.clearTimeout(fileSearchTimer)
+  // 每次调度都推进 token：上一次还在路上的请求回来时会被丢弃。
+  const token = ++fileSearchToken
+  const directory = props.session?.directory
+  if (!directory) {
+    menuFiles.value = []
+    menuFilesLoading.value = false
+    return
+  }
+  menuFilesLoading.value = true
+  fileSearchTimer = window.setTimeout(() => {
+    fileSearchTimer = null
+    void loadMenuFiles(query, token)
+  }, 160)
+}
+
+async function loadMenuFiles(query: string, token: number) {
+  const directory = props.session?.directory
+  if (!directory) return
+  try {
+    const hits = await api.projectFiles(directory, query, 30)
+    if (token !== fileSearchToken) return
+    menuFiles.value = hits
+    menuActive.value = 0
+  } catch {
+    if (token === fileSearchToken) menuFiles.value = []
+  } finally {
+    if (token === fileSearchToken) menuFilesLoading.value = false
+  }
+}
+
+function scrollMenuActive() {
+  const node = composerMenuEl.value?.querySelectorAll<HTMLElement>('.menu-item')[menuActive.value]
+  node?.scrollIntoView({ block: 'nearest' })
+}
+
+async function toggleComposerMenu(kind: ComposerMenu) {
+  if (composerMenu.value === kind) {
+    closeComposerMenu()
+    return
+  }
+  composerMenu.value = kind
+  menuQuery.value = ''
+  menuActive.value = 0
+  closePopup()
+  if (kind === 'command') {
+    await ensureCatalog()
+  } else {
+    scheduleFileSearch('')
+  }
+  await nextTick()
+  menuSearch.value?.focus()
+}
+
+function closeComposerMenu(refocus = false) {
+  if (fileSearchTimer !== null) {
+    window.clearTimeout(fileSearchTimer)
+    fileSearchTimer = null
+  }
+  if (!composerMenu.value) return
+  composerMenu.value = null
+  menuQuery.value = ''
+  menuActive.value = 0
+  if (refocus) void nextTick(() => composerInput.value?.focus())
+}
+
+/** 在光标处插入内容（自动补一个前导空格），插完把光标放到末尾。 */
+function insertComposerToken(token: string) {
+  const el = composerInput.value
+  const start = el?.selectionStart ?? draft.value.length
+  const end = el?.selectionEnd ?? start
+  const before = draft.value.slice(0, start)
+  const after = draft.value.slice(end)
+  const pad = before && !/\s$/.test(before) ? ' ' : ''
+  const inserted = `${pad}${token}`
+  draft.value = before + inserted + after
+  void nextTick(() => {
+    const input = composerInput.value
+    if (!input) return
+    const caret = start + inserted.length
+    input.focus()
+    input.setSelectionRange(caret, caret)
+    autoGrow()
+  })
+}
+
+/**
+ * 选中命令：斜杠命令只有在整段文本开头才会被识别，
+ * 所以统一放到最前面（已有命令则替换命令名，保留后面当参数）。
+ */
+function pickMenuCommand(command: EngineCommand) {
+  const token = `/${command.name} `
+  const rest = draft.value.trimStart()
+  if (!rest) {
+    draft.value = token
+  } else if (rest.startsWith('/')) {
+    draft.value = `${token}${rest.replace(/^\/\S*\s*/, '')}`
+  } else {
+    draft.value = `${token}${rest}`
+  }
+  closeComposerMenu()
+  void nextTick(() => {
+    const input = composerInput.value
+    if (!input) return
+    const caret = draft.value.length
+    input.focus()
+    input.setSelectionRange(caret, caret)
+    autoGrow()
+  })
+}
+
+function pickMenuFile(file: FileHit) {
+  if (!attachments.value.some(entry => entry.path === file.path)) {
+    attachments.value = [...attachments.value, file]
+  }
+  insertComposerToken(`@${file.path} `)
+  closeComposerMenu()
+}
+
+function pickMenuActive() {
+  if (composerMenu.value === 'file') {
+    const file = menuFiles.value[menuActive.value]
+    if (file) pickMenuFile(file)
+    return
+  }
+  const command = menuCommands.value[menuActive.value]
+  if (command) pickMenuCommand(command)
+}
+
+function onMenuKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return
+  const total = menuCount.value
+  if (event.key === 'ArrowDown' && total) {
+    event.preventDefault()
+    menuActive.value = (menuActive.value + 1) % total
+    scrollMenuActive()
+    return
+  }
+  if (event.key === 'ArrowUp' && total) {
+    event.preventDefault()
+    menuActive.value = (menuActive.value - 1 + total) % total
+    scrollMenuActive()
+    return
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    pickMenuActive()
+    return
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeComposerMenu(true)
+    return
+  }
+  if (event.key === 'Tab') closeComposerMenu()
+}
+
+function onDocPointerDown(event: PointerEvent) {
+  if (!composerMenu.value) return
+  const target = event.target as Node | null
+  if (!target) return
+  if (
+    commandBtn.value?.contains(target) ||
+    fileBtn.value?.contains(target) ||
+    composerMenuEl.value?.contains(target)
+  ) {
+    return
+  }
+  closeComposerMenu()
+}
+
+watch(menuQuery, value => {
+  menuActive.value = 0
+  if (composerMenu.value === 'file') scheduleFileSearch(value)
+})
+
+onMounted(() => {
+  window.addEventListener('pointerdown', onDocPointerDown, true)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('pointerdown', onDocPointerDown, true)
+})
 
 function onComposerKeydown(event: KeyboardEvent) {
   if (event.isComposing) return
@@ -891,6 +1144,8 @@ watch(
     attachments.value = []
     popup.value = null
     notice.value = null
+    closeComposerMenu()
+    menuFiles.value = []
     if (sessionId) {
       const prefs = readPrefs(props.session?.engine ?? 'opencode')
       modelKey.value = prefs.modelKey
@@ -957,37 +1212,91 @@ watch(
           >
             {{ titleOf(session.id, session.title) }}
           </h1>
-          <button
-            class="icon-btn"
-            :class="{ on: starred }"
-            :title="starred ? '取消星标' : '加星标'"
-            @click="toggleHeaderStar"
-          >
-            {{ starred ? '★' : '☆' }}
-          </button>
-          <button
-            v-if="!titleEditing"
-            class="icon-btn"
-            title="编辑标题"
-            @click="startTitleEdit"
-          >
-            ✎
-          </button>
-          <button
-            class="icon-btn"
-            :class="{ on: ledgerOpen }"
-            title="文件账本：这个会话动过哪些文件"
-            @click.stop="ledgerOpen = !ledgerOpen"
-          >
-            🗂
-          </button>
-          <button
-            class="open-wb-btn"
-            title="在工作台打开：多列并行盯着多个会话"
-            @click="emit('openWorkbench', session.id)"
-          >
-            ⇥ 工作台
-          </button>
+          <div class="head-actions">
+            <div class="icon-group">
+              <button
+                class="icon-btn"
+                :class="{ 'on-star': starred }"
+                :aria-pressed="starred"
+                :title="starred ? '取消星标' : '加星标'"
+                :aria-label="starred ? '取消星标' : '加星标'"
+                @click="toggleHeaderStar"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  :fill="starred ? 'currentColor' : 'none'"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M12 3.2l2.6 5.4 5.9.85-4.3 4.2 1.02 5.9L12 16.75 6.78 19.55 7.8 13.65 3.5 9.45l5.9-.85L12 3.2Z" />
+                </svg>
+              </button>
+              <button
+                v-if="!titleEditing"
+                class="icon-btn"
+                title="编辑标题"
+                aria-label="编辑标题"
+                @click="startTitleEdit"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" />
+                  <path d="M13.5 6.5 17 10" />
+                </svg>
+              </button>
+              <button
+                class="icon-btn"
+                :class="{ on: ledgerOpen }"
+                :aria-pressed="ledgerOpen"
+                title="文件账本：这个会话动过哪些文件"
+                aria-label="文件账本"
+                @click.stop="ledgerOpen = !ledgerOpen"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z" />
+                  <path d="m3 12.5 9 4.5 9-4.5" />
+                  <path d="m3 17.5 9 4.5 9-4.5" />
+                </svg>
+              </button>
+            </div>
+            <button
+              class="open-wb-btn"
+              title="在工作台打开：多列并行盯着多个会话"
+              @click="emit('openWorkbench', session.id)"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="4.5" width="18" height="15" rx="2.2" />
+                <path d="M9.5 4.5v15M15 4.5v15" />
+              </svg>
+              工作台
+            </button>
+          </div>
         </div>
         <div class="session-tags">
           <span v-for="tag in sessionTags" :key="tag.id" class="tag-chip">
@@ -1123,35 +1432,11 @@ watch(
             </div>
           </div>
         </div>
-        <div class="composer-box">
-          <div class="composer-tools">
-            <label class="tool-select" title="模型（下一轮生效）">
-              <span class="tool-label">模型</span>
-              <select
-                v-model="modelKey"
-                :disabled="sending"
-                @focus="ensureCatalog"
-                @mousedown="ensureCatalog"
-              >
-                <option value="">{{ catalogLoading ? '加载中…' : '默认' }}</option>
-                <option
-                  v-for="model in sessionModels"
-                  :key="modelKeyOf(model)"
-                  :value="modelKeyOf(model)"
-                >
-                  {{ modelLabel(model) }}
-                </option>
-              </select>
-            </label>
-            <label v-if="sessionVariants.length" class="tool-select" title="推理档位（下一轮生效）">
-              <span class="tool-label">档位</span>
-              <select v-model="variant" :disabled="sending">
-                <option value="">默认</option>
-                <option v-for="item in sessionVariants" :key="item" :value="item">{{ item }}</option>
-              </select>
-            </label>
-            <span class="tool-tip" title="@ 选文件 · / 选命令 · ! 直跑 shell">@ 文件 · / 命令 · ! shell</span>
-          </div>
+        <div
+          ref="composerBox"
+          class="composer-box"
+          :class="{ 'is-focused': composerFocused, 'is-menu': !!composerMenu }"
+        >
           <div class="composer-input-wrap">
             <textarea
               ref="composerInput"
@@ -1162,12 +1447,13 @@ watch(
               :placeholder="
                 running
                   ? '执行中：发送 = 插话引导（下一步送达），Shift+Enter 换行'
-                  : '发一条指令…（@ 文件、/ 命令、! shell；Enter 发送）'
+                  : '发一条指令…（Enter 发送，! 开头直接跑本机 shell）'
               "
               :disabled="sending"
               @input="onComposerInput"
               @keydown="onComposerKeydown"
-              @focus="ensureCatalog"
+              @focus="onComposerFocus"
+              @blur="composerFocused = false"
             />
             <div v-if="popup && popup.items.length" class="composer-popup">
               <template v-if="popup.kind === 'file'">
@@ -1196,56 +1482,201 @@ watch(
               </template>
             </div>
           </div>
+
           <div v-if="attachments.length" class="composer-attachments">
             <span v-for="file in attachments" :key="file.path" class="attach-chip">
-              @{{ fileLabel(file.path) }}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21.4 11.05 12.9 19.5a5 5 0 0 1-7.07-7.07l8.49-8.49a3.5 3.5 0 1 1 4.95 4.95l-8.49 8.49a2 2 0 0 1-2.83-2.83l7.78-7.78" />
+              </svg>
+              <span class="chip-label">{{ fileLabel(file.path) }}</span>
               <button class="chip-x" title="移除附件" @click="removeAttachment(file)">✕</button>
             </span>
           </div>
-          <div class="composer-actions">
-            <span v-if="sending" class="composer-hint">发送中…</span>
-            <span v-else-if="notice" class="composer-hint">{{ notice }}</span>
-            <span v-else-if="shellMode" class="composer-hint">
-              ! 开头 = 本机直跑 shell（不发给模型）
-            </span>
-            <span v-else-if="running" class="composer-hint">执行中，发送即插话</span>
-            <span v-else-if="commandPreview" class="composer-hint">
-              斜杠命令 /{{ commandPreview.name }}
-            </span>
-            <button
-              v-if="shellMode"
-              class="send-btn shell-btn"
-              :disabled="!draft.trim().slice(1).trim() || sending"
-              @click="send"
-            >
-              运行 shell ⏎
-            </button>
-            <template v-else>
+
+          <div class="composer-bar">
+            <div class="composer-rail">
               <button
-                v-if="running"
-                class="send-btn"
-                :disabled="(!draft.trim() && !attachments.length) || sending"
-                @click="send"
+                ref="commandBtn"
+                class="rail-btn"
+                :class="{ on: composerMenu === 'command' }"
+                :disabled="sending"
+                :aria-expanded="composerMenu === 'command'"
+                aria-haspopup="dialog"
+                title="斜杠命令（/）"
+                aria-label="插入斜杠命令"
+                @click="toggleComposerMenu('command')"
               >
-                插话 ⏎
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
               </button>
+              <button
+                ref="fileBtn"
+                class="rail-btn"
+                :class="{ on: composerMenu === 'file' }"
+                :disabled="sending"
+                :aria-expanded="composerMenu === 'file'"
+                aria-haspopup="dialog"
+                title="引用文件（@）"
+                aria-label="引用项目文件"
+                @click="toggleComposerMenu('file')"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21.4 11.05 12.9 19.5a5 5 0 0 1-7.07-7.07l8.49-8.49a3.5 3.5 0 1 1 4.95 4.95l-8.49 8.49a2 2 0 0 1-2.83-2.83l7.78-7.78" />
+                </svg>
+                <span v-if="attachments.length && composerMenu !== 'file'" class="rail-dot" />
+              </button>
+            </div>
+
+            <span class="composer-hint" role="status">{{ composerHint }}</span>
+
+            <div class="composer-right">
+              <span class="tool-select model-pick" title="模型（下一轮生效）">
+                <span class="tool-label">模型</span>
+                <SelectMenu
+                  v-model="modelKey"
+                  :options="modelOptions"
+                  :disabled="sending"
+                  size="xs"
+                  shape="pill"
+                  inline
+                  max-width="200px"
+                  @open="ensureCatalog"
+                />
+              </span>
+              <span
+                v-if="sessionVariants.length"
+                class="tool-select effort-pick"
+                title="推理强度（下一轮生效）"
+              >
+                <span class="tool-label">推理</span>
+                <SelectMenu
+                  v-model="variant"
+                  :options="variantOptions"
+                  :disabled="sending"
+                  size="xs"
+                  shape="pill"
+                  inline
+                  max-width="112px"
+                />
+              </span>
               <button
                 v-if="running"
                 class="stop-btn"
                 :disabled="stopping"
+                title="停止当前回合"
+                aria-label="停止当前回合"
                 @click="stop"
               >
-                {{ stopping ? '停止中…' : '■ 停止' }}
+                <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+                  <rect x="7" y="7" width="10" height="10" rx="2" />
+                </svg>
               </button>
               <button
-                v-else
                 class="send-btn"
-                :disabled="(!draft.trim() && !attachments.length) || sending"
+                :class="{ 'shell-btn': shellMode }"
+                :disabled="!canSend || sending"
+                :title="
+                  shellMode
+                    ? '运行 shell（Enter）'
+                    : running
+                      ? '插话（Enter）'
+                      : '发送（Enter）'
+                "
+                :aria-label="shellMode ? '运行 shell' : running ? '插话' : '发送'"
                 @click="send"
               >
-                发送 ⏎
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" />
+                </svg>
               </button>
-            </template>
+            </div>
+          </div>
+
+          <div
+            v-if="composerMenu"
+            ref="composerMenuEl"
+            class="composer-menu"
+            :class="`composer-menu-${composerMenu}`"
+          >
+            <div class="menu-head">
+              <span class="menu-title">{{ composerMenu === 'command' ? '斜杠命令' : '引用文件' }}</span>
+              <span v-if="session" class="menu-engine">{{ engineLabel(session.engine) }}</span>
+              <button class="menu-close" title="关闭" aria-label="关闭菜单" @click="closeComposerMenu(true)">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
+
+            <label class="menu-search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
+              </svg>
+              <input
+                ref="menuSearch"
+                v-model="menuQuery"
+                type="text"
+                spellcheck="false"
+                :placeholder="composerMenu === 'command' ? '搜索命令…' : '搜索项目文件…'"
+                @keydown="onMenuKeydown"
+              />
+            </label>
+
+            <div class="menu-list">
+              <template v-if="composerMenu === 'command'">
+                <div v-if="catalogLoading" class="menu-empty">正在读取引擎命令…</div>
+                <div v-else-if="!catalog" class="menu-empty">
+                  读不到这个引擎的命令目录
+                  <span class="menu-empty-sub">可以直接在输入框输入 / 触发补全</span>
+                </div>
+                <div v-else-if="!menuCommands.length" class="menu-empty">
+                  {{ menuQuery.trim() ? `没有匹配「${menuQuery.trim()}」的命令` : `${engineLabel(session?.engine ?? '')} 没有可列举的斜杠命令` }}
+                  <span v-if="!menuQuery.trim()" class="menu-empty-sub">
+                    也可以直接在输入框输入 / 或 @ 触发补全
+                  </span>
+                </div>
+                <template v-else>
+                  <button
+                    v-for="(command, index) in menuCommands"
+                    :key="command.name"
+                    class="menu-item"
+                    :class="{ active: index === menuActive }"
+                    @pointerenter="menuActive = index"
+                    @click="pickMenuCommand(command)"
+                  >
+                    <span class="menu-item-main mono">/{{ command.name }}</span>
+                    <span class="menu-item-sub">{{ command.description }}</span>
+                  </button>
+                </template>
+              </template>
+
+              <template v-else>
+                <div v-if="menuFilesLoading" class="menu-empty">正在索引项目文件…</div>
+                <div v-else-if="!session?.directory" class="menu-empty">这个会话没有可引用的工作目录</div>
+                <div v-else-if="!menuFiles.length" class="menu-empty">
+                  {{ menuQuery.trim() ? `没有匹配「${menuQuery.trim()}」的文件` : '这个目录里没有可引用的文件' }}
+                </div>
+                <template v-else>
+                  <button
+                    v-for="(file, index) in menuFiles"
+                    :key="file.path"
+                    class="menu-item"
+                    :class="{ active: index === menuActive }"
+                    @pointerenter="menuActive = index"
+                    @click="pickMenuFile(file)"
+                  >
+                    <span class="menu-item-main">{{ file.name }}</span>
+                    <span class="menu-item-sub mono">{{ file.path }}</span>
+                  </button>
+                </template>
+              </template>
+            </div>
+
+            <div class="menu-foot">
+              <span>↑↓ 选择 · Enter {{ composerMenu === 'command' ? '插入' : '引用' }} · Esc 关闭</span>
+            </div>
           </div>
         </div>
         </template>

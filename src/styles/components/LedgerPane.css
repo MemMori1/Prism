@@ -108,15 +108,37 @@
 }
 
 .ledger-file + .ledger-file {
-  margin-top: 2px;
+  margin-top: 1px;
+}
+
+/* 段头：看全部时把「有改动」和「只读」分开，只读沉到后面 */
+.ledger-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 6px 3px;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.4px;
+}
+
+.ledger-section-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.ledger-hint {
+  font-size: 10.5px;
+  color: var(--faint);
 }
 
 .file-head {
   width: 100%;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
-  padding: 6px 6px;
+  padding: 5px 6px;
   border-radius: var(--radius-sm);
   text-align: left;
   cursor: pointer;
@@ -129,6 +151,7 @@
 .file-caret {
   flex: none;
   width: 12px;
+  line-height: 15px;
   color: var(--faint);
   font-size: 10px;
 }
@@ -137,35 +160,76 @@
   flex: 1;
   min-width: 0;
   display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.file-line {
+  display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 7px;
+  min-width: 0;
 }
 
 .file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   font-weight: 560;
+  line-height: 17px;
+}
+
+/* 只读文件在「全部」里降级显示，避免和改动抢注意力 */
+.file-head.is-read .file-name {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.file-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  line-height: 15px;
+}
+
+.file-head.is-read .file-count {
+  color: var(--faint);
 }
 
 .file-dir {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--faint);
-  font-size: 10.5px;
-}
-
-.file-badges {
-  flex: none;
-  display: inline-flex;
-  gap: 5px;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 10px;
+  line-height: 14px;
 }
 
-.file-times {
+.file-time {
+  flex: none;
   color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 累计增删：明确是「累计」，避免被读成净增行数 */
+.file-sum {
+  flex: none;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  white-space: nowrap;
+  line-height: 14px;
 }
 
 .delta-plus {

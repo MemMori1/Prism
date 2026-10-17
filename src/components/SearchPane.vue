@@ -5,6 +5,7 @@ import { parseSnippet, type SnippetSegment } from '../search'
 import { rangeToSince, type TimeRange } from '../sessionList'
 import type { ProjectItem, SearchHit, SearchStats } from '../types'
 import { basename, relativeTime } from '../format'
+import SelectMenu from './SelectMenu.vue'
 
 const props = defineProps<{
   projects: ProjectItem[]
@@ -26,6 +27,23 @@ const tookMs = ref(0)
 const stats = ref<SearchStats | null>(null)
 const updating = ref(false)
 const inputEl = ref<HTMLInputElement | null>(null)
+
+/** 过滤条两个下拉的选项。 */
+const RANGE_OPTIONS = [
+  { value: 'all', label: '全部时间' },
+  { value: 'today', label: '今天' },
+  { value: 'week', label: '本周' },
+  { value: 'month', label: '本月' },
+]
+
+const projectOptions = computed(() => [
+  { value: '', label: '全部项目' },
+  ...props.projects.map(item => ({ value: item.id, label: item.name || basename(item.worktree) })),
+])
+
+function setRange(value: string): void {
+  range.value = value as TimeRange
+}
 
 const indexSummary = computed(() => {
   const current = stats.value
@@ -215,31 +233,30 @@ onMounted(async () => {
 
       <div class="search-controls">
         <div class="filter-group">
-          <label class="filter-chip">
+          <div class="filter-chip">
             <span class="filter-label">项目</span>
-            <select v-model="projectId" class="filter-select" aria-label="按项目过滤">
-              <option value="">全部项目</option>
-              <option v-for="project in projects" :key="project.id" :value="project.id">
-                {{ project.name || basename(project.worktree) }}
-              </option>
-            </select>
-            <svg class="filter-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="m6 9 6 6 6-6" />
-            </svg>
-          </label>
+            <SelectMenu
+              v-model="projectId"
+              :options="projectOptions"
+              size="sm"
+              tone="ghost"
+              inline
+              title="按项目过滤"
+            />
+          </div>
 
-          <label class="filter-chip">
+          <div class="filter-chip">
             <span class="filter-label">时间</span>
-            <select v-model="range" class="filter-select" aria-label="按时间范围过滤">
-              <option value="all">全部时间</option>
-              <option value="today">今天</option>
-              <option value="week">本周</option>
-              <option value="month">本月</option>
-            </select>
-            <svg class="filter-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="m6 9 6 6 6-6" />
-            </svg>
-          </label>
+            <SelectMenu
+              :model-value="range"
+              :options="RANGE_OPTIONS"
+              size="sm"
+              tone="ghost"
+              inline
+              title="按时间范围过滤"
+              @update:model-value="setRange"
+            />
+          </div>
 
           <label class="filter-toggle" :class="{ 'is-active': onlyTitle }">
             <input v-model="onlyTitle" type="checkbox" class="toggle-input" />

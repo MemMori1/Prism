@@ -241,36 +241,9 @@
   font-weight: 600;
 }
 
-.filter-select {
+/* 下拉由 SelectMenu 提供，这里只约束宽度，避免长项目名把 chip 撑爆 */
+.filter-chip :deep(.sel) {
   max-width: 190px;
-  margin: 0;
-  padding: 0 15px 0 0;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: inherit;
-  font-family: inherit;
-  font-size: 11.5px;
-  font-weight: 600;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
-  appearance: none;
-  cursor: pointer;
-}
-
-.filter-select option {
-  background: var(--panel);
-  color: var(--text);
-}
-
-.filter-chevron {
-  position: absolute;
-  right: 7px;
-  width: 12px;
-  height: 12px;
-  color: var(--faint);
-  pointer-events: none;
 }
 
 .filter-toggle {
@@ -678,7 +651,7 @@
     padding-top: 0;
   }
 
-  .filter-select {
+  .filter-chip :deep(.sel) {
     max-width: 140px;
   }
 
@@ -705,9 +678,8 @@
     display: none;
   }
 
-  .filter-select {
+  .filter-chip :deep(.sel) {
     max-width: 120px;
-    padding-right: 14px;
   }
 
   .index-btn {

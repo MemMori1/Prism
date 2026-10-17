@@ -16,18 +16,21 @@
 .tag-query {
   flex: none;
   margin: 9px 10px 6px;
-  height: 26px;
-  padding: 0 8px;
+  height: 28px;
+  padding: 0 9px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
   color: var(--text);
   font-size: 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 
 .tag-query:focus {
   outline: none;
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  border-color: var(--accent);
+  background: var(--panel);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .tag-picker-list {

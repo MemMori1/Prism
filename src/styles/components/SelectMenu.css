@@ -1,0 +1,255 @@
+/* 自绘下拉：触发器 + Teleport 弹层。原生 <select> 的展开菜单由系统绘制，无法跟随主题，故整体替换。 */
+
+.sel {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.sel.is-inline {
+  display: inline-block;
+  width: auto;
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+/* ---------- 触发器 ---------- */
+
+.sel-trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.sel-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.sel-label.is-placeholder {
+  color: var(--faint);
+}
+
+.sel-chevron {
+  position: absolute;
+  right: 9px;
+  width: 12px;
+  height: 12px;
+  color: var(--faint);
+  pointer-events: none;
+  transition:
+    transform 0.16s ease,
+    color 0.15s ease;
+}
+
+.sel-trigger:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.sel-trigger:hover:not(:disabled) .sel-chevron {
+  color: var(--muted);
+}
+
+.sel-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.sel.is-open .sel-trigger {
+  border-color: var(--accent);
+  background-color: var(--panel);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.sel.is-open .sel-chevron {
+  color: var(--accent-text);
+  transform: rotate(180deg);
+}
+
+.sel.is-disabled .sel-trigger {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ---------- 尺寸 ---------- */
+
+.sel-xs .sel-trigger {
+  height: 22px;
+  padding: 0 18px 0 7px;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.sel-xs .sel-chevron {
+  right: 5px;
+  width: 10px;
+  height: 10px;
+}
+
+.sel-sm .sel-trigger {
+  height: 26px;
+  padding: 0 23px 0 8px;
+  font-size: 11.5px;
+}
+
+.sel-sm .sel-chevron {
+  right: 7px;
+  width: 11px;
+  height: 11px;
+}
+
+/* ---------- 形状 ---------- */
+
+.sel-pill .sel-trigger {
+  border-radius: 999px;
+  padding-left: 11px;
+}
+
+.sel-pill.sel-xs .sel-trigger {
+  padding-left: 9px;
+}
+
+/* ---------- 无边框：塞进已有 chip 里 ---------- */
+
+.sel-ghost .sel-trigger {
+  height: 20px;
+  padding: 0 15px 0 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.sel-ghost .sel-chevron {
+  right: 0;
+  width: 12px;
+  height: 12px;
+}
+
+.sel-ghost.is-open .sel-trigger {
+  background: transparent;
+  box-shadow: none;
+}
+
+.sel-ghost .sel-label.is-placeholder {
+  color: inherit;
+  opacity: 0.7;
+}
+
+/* ---------- 弹层 ---------- */
+
+.sel-popup {
+  position: fixed;
+  z-index: 80;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: sel-pop 0.12s ease-out;
+}
+
+@keyframes sel-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.sel-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sel-option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sel-option.active {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.sel-option.selected {
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.sel-option.selected.active {
+  background: var(--accent-soft);
+}
+
+.sel-option:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.sel-check {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+/* 弹层可能出现在窗口底部，给最后一项留点呼吸 */
+.sel-popup::after {
+  content: '';
+  display: block;
+  height: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sel-popup {
+    animation: none;
+  }
+
+  .sel-chevron {
+    transition: none;
+  }
+}

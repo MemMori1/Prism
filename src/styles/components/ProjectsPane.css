@@ -11,12 +11,21 @@
   flex: none;
 }
 
+/* 头部：标题行 + 筛选框（筛选常驻，避免多一步展开） */
 .pane-header {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 8px 8px;
+  flex: none;
+}
+
+.pane-headline {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px 6px;
-  flex: none;
+  gap: 8px;
+  padding: 0 6px;
 }
 
 .pane-title {
@@ -30,6 +39,68 @@
 .pane-count {
   font-size: 11px;
   color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.pane-filter {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.filter-icon {
+  position: absolute;
+  left: 8px;
+  width: 11px;
+  height: 11px;
+  color: var(--faint);
+  pointer-events: none;
+}
+
+.filter-input {
+  width: 100%;
+  height: 28px;
+  padding: 0 22px 0 25px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.filter-input::placeholder {
+  color: var(--faint);
+}
+
+.filter-input:hover {
+  border-color: var(--border-strong);
+}
+
+.filter-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--panel);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.filter-clear {
+  position: absolute;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.filter-clear:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 
 .pane-body {
@@ -44,22 +115,65 @@
   color: var(--faint);
   font-size: 12px;
   line-height: 1.7;
+  word-break: break-word;
 }
 
 .hint {
   font-size: 11px;
 }
 
+/* ---------- 分段标题（置顶 / 全部项目） ---------- */
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 6px 3px;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.5px;
+}
+
+.section-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.section-icon {
+  width: 10px;
+  height: 10px;
+  color: var(--accent-text);
+}
+
+.section-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 行1：项目名 / 引擎徽标 / 会话数；行2：路径（左侧省略，尾部可见）+ 分支（右侧悬浮）
+   列位必须写死：只给 grid-row 不给 grid-column 时，带确定行的元素会被优先放进
+   第 1 列，结果徽标跑到最左边、项目名被挤到后面只剩省略号。 */
 .project-item {
+  position: relative;
   display: grid;
-  grid-template-columns: 1fr auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   grid-template-rows: auto auto;
-  gap: 1px 8px;
+  gap: 2px 6px;
   width: 100%;
   text-align: left;
   padding: 7px 9px;
   border-radius: var(--radius-sm);
+  cursor: pointer;
+  user-select: none;
   transition: background 0.12s ease;
+}
+
+.project-item:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .group-head {
@@ -85,14 +199,19 @@
 }
 
 .project-item.in-group {
+  width: calc(100% - 7px);
   margin-left: 7px;
   padding-left: 8px;
   border-left: 2px solid var(--border);
 }
 
 .branch-chip {
-  align-self: center;
-  max-width: 96px;
+  position: absolute;
+  right: 9px;
+  bottom: 6px;
+  justify-self: end;
+  max-width: 88px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -103,7 +222,7 @@
   color: var(--muted);
   font-size: 9.5px;
   font-family: var(--font-mono);
-  line-height: 15px;
+  line-height: 14px;
 }
 
 .wt-mark {
@@ -119,16 +238,36 @@
 }
 
 .project-name {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
   font-weight: 560;
   font-size: 12.5px;
+}
+
+.project-name-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* 置顶行的常驻标记（悬停按钮只在 hover 时出现） */
+.pin-mark {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  color: var(--accent-text);
+}
+
 .engine-badge {
-  grid-row: 1 / 2;
+  grid-column: 2;
+  grid-row: 1;
   align-self: center;
+  white-space: nowrap;
   padding: 0 4px;
   border-radius: 4px;
   border: 1px solid var(--border);
@@ -136,7 +275,8 @@
   color: var(--faint);
   font-size: 9.5px;
   font-weight: 650;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
+  line-height: 15px;
 }
 
 .engine-badge.engine-codex {
@@ -153,8 +293,12 @@
   color: var(--accent-text);
 }
 
+/* 路径：从左往右读，但溢出时省略号出现在左侧、保留末尾目录名。
+   需要配合模板里的 <bdi>，否则开头的 "/" 会被 RTL 规则甩到行尾。 */
 .project-path {
-  grid-column: 1 / 2;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
   font-size: 10.5px;
   color: var(--faint);
   font-family: var(--font-mono);
@@ -165,8 +309,13 @@
   text-align: left;
 }
 
+.project-item.has-branch .project-path {
+  padding-right: 96px;
+}
+
 .project-count {
-  grid-row: 1 / 2;
+  grid-column: 3;
+  grid-row: 1;
   align-self: center;
   font-size: 10.5px;
   color: var(--faint);
@@ -174,11 +323,109 @@
   border: 1px solid var(--border);
   padding: 0 6px;
   border-radius: 999px;
-  line-height: 16px;
+  line-height: 15px;
+  transition: opacity 0.12s ease;
 }
 
 .project-item.active .project-count {
   background: var(--panel);
   color: var(--accent-text);
   border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ---------- 置顶按钮：悬停时顶替会话数徽标，不额外占位 ---------- */
+
+.project-pin {
+  position: absolute;
+  right: 6px;
+  top: 5px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.project-pin svg {
+  width: 11px;
+  height: 11px;
+}
+
+.project-item:hover .project-pin,
+.project-pin:focus-visible {
+  opacity: 1;
+}
+
+.project-item:hover .project-count {
+  opacity: 0;
+}
+
+.project-pin:hover {
+  color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.project-pin.is-pinned {
+  color: var(--accent-text);
+}
+
+/* ---------- 右键菜单（替代浏览器自带菜单） ---------- */
+
+.project-menu {
+  position: fixed;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  max-width: 232px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+}
+
+.menu-path {
+  padding: 3px 7px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.menu-item svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--muted);
+}
+
+.menu-item:hover {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.menu-item:hover svg {
+  color: var(--accent-text);
 }

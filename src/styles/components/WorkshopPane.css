@@ -201,19 +201,30 @@
 
 .filter {
   width: 100%;
-  padding: 5px 9px;
+  height: 30px;
+  padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
   color: var(--text);
   font-family: inherit;
   font-size: 12.5px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.filter::placeholder {
+  color: var(--faint);
+}
+
+.filter:hover {
+  border-color: var(--border-strong);
 }
 
 .filter:focus {
   outline: none;
   border-color: var(--accent);
   background: var(--panel);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .asset-row {

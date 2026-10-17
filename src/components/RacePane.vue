@@ -7,6 +7,7 @@ import type { ProjectItem, TimelineRecord } from '../types'
 import { basename, formatCost, formatTokens } from '../format'
 import LiveTurnView from './LiveTurn.vue'
 import TimelineItem from './TimelineItem.vue'
+import SelectMenu from './SelectMenu.vue'
 
 const props = defineProps<{
   projects: ProjectItem[]
@@ -339,63 +340,86 @@ function elapsedLabel(ms: number): string {
 function opencodeLabel(engine: string): string {
   return ENGINE_LABELS[engine] ?? engine
 }
+
+/** 参赛引擎下拉选项。 */
+const engineOptions = computed(() =>
+  RACE_ENGINES.map(engine => ({ value: engine, label: opencodeLabel(engine) })),
+)
 </script>
 
 <template>
   <section class="race">
     <div v-if="!columns.length" class="race-config">
-      <h2 class="race-title">赛马</h2>
-      <p class="race-desc">
-        同一个问题同时发给多个引擎，答案、用时、token 与成本并排对比。开跑即新建各自会话，随时可中断。
-      </p>
+      <header class="config-head">
+        <span class="config-badge" aria-hidden="true">🏁</span>
+        <div class="config-head-text">
+          <h2 class="race-title">赛马</h2>
+          <p class="race-desc">同一个问题同时发给多个引擎，答案、用时、token 与成本并排对比。</p>
+        </div>
+      </header>
 
-      <label class="field">
-        <span class="field-label">问题</span>
-        <textarea
-          v-model="prompt"
-          class="prompt-input"
-          rows="4"
-          placeholder="例如：给这个仓库加一个 /healthz 健康检查端点，并写一条测试。"
-        />
-      </label>
+      <div class="config-body">
+        <label class="field">
+          <span class="field-label">问题</span>
+          <textarea
+            v-model="prompt"
+            class="prompt-input"
+            rows="4"
+            placeholder="例如：给这个仓库加一个 /healthz 健康检查端点，并写一条测试。"
+          />
+        </label>
 
-      <label class="field">
-        <span class="field-label">工作目录</span>
-        <select v-model="directory" class="dir-select">
-          <option v-for="option in directoryOptions" :key="option.value" :value="option.value">
-            {{ option.label }}
-          </option>
-        </select>
-      </label>
+        <div class="field">
+          <span class="field-label">工作目录</span>
+          <span class="select-wrap">
+            <SelectMenu
+              v-model="directory"
+              :options="directoryOptions"
+              title="工作目录"
+            />
+          </span>
+        </div>
 
-      <div class="field">
-        <span class="field-label">参赛选手（{{ targets.length }} 列）</span>
-        <div class="targets">
-          <div v-for="target in targets" :key="target.key" class="target">
-            <select v-model="target.engine" class="engine-select">
-              <option v-for="engine in RACE_ENGINES" :key="engine" :value="engine">
-                {{ opencodeLabel(engine) }}
-              </option>
-            </select>
-            <button
-              class="target-remove"
-              title="移除这列"
-              :disabled="targets.length <= 1"
-              @click="removeTarget(target.key)"
-            >
-              ✕
+        <div class="field">
+          <span class="field-label">
+            参赛选手
+            <span class="label-count">{{ targets.length }} 列</span>
+          </span>
+          <div class="targets">
+            <div v-for="target in targets" :key="target.key" class="target">
+              <span class="select-wrap">
+                <SelectMenu
+                  v-model="target.engine"
+                  :options="engineOptions"
+                  title="参赛引擎"
+                />
+              </span>
+              <button
+                class="target-remove"
+                title="移除这列"
+                :disabled="targets.length <= 1"
+                @click="removeTarget(target.key)"
+              >
+                ✕
+              </button>
+            </div>
+            <button class="target-add" :disabled="targets.length >= 4" @click="addTarget">
+              ＋ 加一列
             </button>
           </div>
-          <button class="target-add" :disabled="targets.length >= 4" @click="addTarget">
-            ＋ 加一列
-          </button>
         </div>
       </div>
 
-      <button class="start-btn" :disabled="!canStart" @click="start">🏁 开跑</button>
-      <p v-if="!props.projects.length" class="race-hint">
-        还没有可用工作目录：先在归档里浏览一次项目，或让引擎在该目录新建过会话。
-      </p>
+      <footer class="config-foot">
+        <p class="foot-hint" :class="{ warn: !props.projects.length }">
+          {{
+            props.projects.length
+              ? '开跑后各列各自新建会话，随时可中断。'
+              : '还没有可用工作目录：先在归档里浏览一次项目，或让引擎在该目录新建过会话。'
+          }}
+        </p>
+        <button class="start-btn" :disabled="!canStart" @click="start">开跑</button>
+      </footer>
     </div>
 
     <template v-else>

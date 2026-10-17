@@ -64,30 +64,71 @@
   outline: none;
 }
 
+/* 标题右侧动作区：图标组 + 工作台入口 */
+.head-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 三个图标按钮拼成一段，共用外框，避免三个独立描边互相挤压 */
+.icon-group {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
 .icon-btn {
   flex: none;
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  color: var(--faint);
-  font-size: 13px;
+  padding: 0;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
   line-height: 1;
   cursor: pointer;
+  transition:
+    color 0.14s ease,
+    background 0.14s ease;
+}
+
+.icon-btn:first-child {
+  border-left: none;
+}
+
+.icon-btn svg {
+  width: 14.5px;
+  height: 14.5px;
 }
 
 .icon-btn:hover {
   color: var(--text);
-  border-color: var(--border-strong);
+  background: var(--panel);
 }
 
+.icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* 账本打开：紫色态 */
 .icon-btn.on {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+/* 星标：保留琥珀色，和账本区分开 */
+.icon-btn.on-star {
   color: var(--amber);
-  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
   background: var(--amber-soft);
 }
 
@@ -135,18 +176,38 @@
 
 .open-wb-btn {
   flex: none;
-  padding: 3px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--muted);
   font-size: 11.5px;
-  transition: all 0.15s ease;
+  font-weight: 550;
+  cursor: pointer;
+  transition:
+    color 0.14s ease,
+    border-color 0.14s ease,
+    background 0.14s ease;
+}
+
+.open-wb-btn svg {
+  width: 13.5px;
+  height: 13.5px;
 }
 
 .open-wb-btn:hover {
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--accent-soft);
+}
+
+.open-wb-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .session-meta {
@@ -375,56 +436,53 @@
   background: var(--red-soft);
 }
 
+/* ---------- 输入框：整体一个圆角容器，工具条沉到底部 ---------- */
+
 .composer-box {
+  position: relative;
   max-width: 1000px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.composer-tools {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  min-height: 20px;
+.composer-box:hover {
+  border-color: var(--border-strong);
+}
+
+.composer-box.is-focused,
+.composer-box.is-menu {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .tool-select {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
+  min-width: 0;
   color: var(--faint);
-  font-size: 11px;
+  font-size: 10px;
 }
 
-.tool-select select {
-  max-width: 220px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 11px;
-  padding: 2px 6px;
-  cursor: pointer;
-}
-
-.tool-select select:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.tool-tip {
+.tool-label {
+  flex: none;
   color: var(--faint);
-  font-size: 10.5px;
-  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
 }
 
 .composer-input-wrap {
   position: relative;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .composer-popup {
@@ -438,9 +496,9 @@
   max-height: 240px;
   overflow-y: auto;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: var(--panel);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-md);
 }
 
 .popup-item {
@@ -458,7 +516,7 @@
 
 .popup-item.active,
 .popup-item:hover {
-  background: var(--panel-2);
+  background: var(--accent-soft);
 }
 
 .popup-main {
@@ -477,23 +535,42 @@
 
 .composer-attachments {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
+  padding: 0 12px 2px;
 }
 
 .attach-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
-  border: 1px solid var(--border);
+  max-width: 240px;
+  padding: 1px 7px 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
   border-radius: 999px;
-  background: var(--panel-2);
-  color: var(--accent);
-  font-size: 11px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+.attach-chip svg {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  opacity: 0.85;
+}
+
+.chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
 }
 
 .chip-x {
+  flex: none;
   border: none;
   background: transparent;
   color: var(--faint);
@@ -506,75 +583,201 @@
   color: var(--red);
 }
 
-.send-btn.shell-btn {
-  background: var(--amber);
-  color: var(--on-amber);
-}
-
 .composer-input {
   width: 100%;
+  min-height: 66px;
   resize: none;
   max-height: 172px;
   overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel-2);
+  border: 0;
+  background: transparent;
   color: var(--text);
   font-family: inherit;
-  font-size: 12.5px;
-  line-height: 1.55;
-  padding: 8px 11px;
-  transition: border-color 0.15s ease;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 12px 14px 4px;
 }
 
 .composer-input:focus {
   outline: none;
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
 }
 
 .composer-input:disabled {
   opacity: 0.6;
 }
 
-.composer-actions {
+.composer-bar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 8px 8px;
 }
 
-.composer-hint {
-  color: var(--faint);
-  font-size: 11px;
+.composer-rail {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
 }
 
-.send-btn {
-  padding: 5px 16px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 12px;
-  font-weight: 600;
-  transition: opacity 0.15s ease;
+.rail-btn {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
 }
 
-.send-btn:hover:not(:disabled) {
-  opacity: 0.9;
+.rail-btn svg {
+  width: 15px;
+  height: 15px;
 }
 
-.send-btn:disabled {
-  opacity: 0.45;
+.rail-btn:hover:not(:disabled) {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.rail-btn.on {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  color: var(--accent-text);
+}
+
+.rail-btn:disabled {
+  opacity: 0.4;
   cursor: default;
 }
 
+/* 有附件时在纸张图标右下角点一个小圆点：不抢位、不遮图标 */
+.rail-dot {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--panel);
+  pointer-events: none;
+}
+
+.composer-hint {
+  flex: 1 1 0;
+  min-width: 0;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.composer-right .tool-select,
+.composer-right .sel {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* 模型名可以省略，但至少保留能认出来的宽度；推理档位通常很短，不参与压缩 */
+.composer-right .tool-select.model-pick {
+  min-width: 96px;
+}
+
+.composer-right .tool-select.effort-pick,
+.composer-right .tool-select.effort-pick .sel {
+  flex: none;
+}
+
+.send-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 35%, transparent);
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+
+.send-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.send-btn:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.send-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.send-btn:disabled {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--faint);
+  box-shadow: none;
+  cursor: default;
+}
+
+.send-btn.shell-btn {
+  background: var(--amber);
+  color: var(--on-amber);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--amber) 35%, transparent);
+}
+
+.send-btn.shell-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--amber) 86%, black);
+}
+
+.send-btn.shell-btn:disabled {
+  background: var(--amber-soft);
+  border-color: color-mix(in srgb, var(--amber) 26%, var(--border));
+  color: var(--amber);
+  box-shadow: none;
+}
+
 .stop-btn {
-  padding: 5px 16px;
-  border-radius: var(--radius-sm);
-  border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--red) 42%, transparent);
   background: var(--red-soft);
   color: var(--red);
-  font-size: 12px;
-  font-weight: 600;
+}
+
+.stop-btn svg {
+  width: 13px;
+  height: 13px;
 }
 
 .stop-btn:hover:not(:disabled) {
@@ -586,6 +789,224 @@
   cursor: default;
 }
 
+/* ---------- 工具条菜单（+ 命令 / 引用文件） ---------- */
+
+.composer-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 45;
+  width: min(430px, 100%);
+  max-height: min(420px, 60vh);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  animation: composer-menu-rise 0.12s ease-out;
+}
+
+.composer-menu-command {
+  width: min(380px, 100%);
+}
+
+@keyframes composer-menu-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.menu-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 9px 7px 12px;
+}
+
+.menu-title {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.menu-engine {
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 15px;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.menu-close {
+  margin-left: auto;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.menu-close svg {
+  width: 12px;
+  height: 12px;
+}
+
+.menu-close:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.menu-search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 10px 6px;
+  padding: 0 8px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.menu-search:focus-within {
+  border-color: var(--accent);
+  background: var(--panel);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.menu-search svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--faint);
+}
+
+.menu-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.menu-search input::placeholder {
+  color: var(--faint);
+}
+
+.menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 264px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 6px 6px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item.active {
+  background: var(--accent-soft);
+}
+
+.menu-item-main {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.menu-item.active .menu-item-main {
+  color: var(--accent-text);
+}
+
+.menu-item-sub {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.menu-item-main.mono,
+.menu-item-sub.mono {
+  font-family: var(--font-mono);
+}
+
+.menu-empty {
+  padding: 16px 12px;
+  color: var(--faint);
+  font-size: 11.5px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.menu-empty-sub {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  opacity: 0.8;
+}
+
+.menu-foot {
+  flex: none;
+  padding: 5px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--faint);
+  font-size: 10px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-menu {
+    animation: none;
+  }
+}
+
 /* 工作台列内嵌：更紧凑的内边距 */
 .session-view.embedded .timeline {
   padding: 10px 12px 28px;
@@ -593,6 +1014,21 @@
 
 .session-view.embedded .composer {
   padding: 8px 12px 10px;
+}
+
+/* 工作台列通常只有 380–520px：去掉标签、收紧内边距，让模型与发送按钮不被挤掉 */
+.session-view.embedded .tool-label {
+  display: none;
+}
+
+.session-view.embedded .composer-input {
+  min-height: 54px;
+  padding: 10px 11px 2px;
+}
+
+.session-view.embedded .composer-bar {
+  gap: 5px;
+  padding: 2px 6px 6px;
 }
 
 /* 回底浮标（未吸附底部时显示） */
