@@ -73,6 +73,12 @@ function setView(next: AppView) {
   }
 }
 
+/** 从设置里的快捷入口跳到对应工作区，先关闭设置。 */
+function openSettingsView(next: AppView) {
+  showSettings.value = false
+  setView(next)
+}
+
 // ---- 通知中心（M11）：顶栏铃铛 + 跳转 ----
 
 const notifyOpen = ref(false)
@@ -495,7 +501,11 @@ onBeforeUnmount(stopRoutineEvents)
       </div>
     </div>
 
-    <SettingsDialog v-if="showSettings" @close="showSettings = false" />
+    <SettingsDialog
+      v-if="showSettings"
+      @close="showSettings = false"
+      @open-view="openSettingsView"
+    />
   </div>
 </template>
 
