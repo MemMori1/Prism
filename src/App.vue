@@ -31,33 +31,15 @@ import AutomationPane from './components/AutomationPane.vue'
 import UsagePane from './components/UsagePane.vue'
 import RacePane from './components/RacePane.vue'
 import HomePane from './components/HomePane.vue'
+import AppRail from './components/AppRail.vue'
+import { VIEW_KEY, isAppView, type AppView } from './nav'
 
 const health = ref<EngineHealth[]>([])
 const error = ref<string | null>(null)
 const showSettings = ref(false)
 
-type AppView =
-  | 'home'
-  | 'archive'
-  | 'workbench'
-  | 'search'
-  | 'usage'
-  | 'workshop'
-  | 'automation'
-  | 'race'
-const VIEW_KEY = 'prism-view'
 const storedView = localStorage.getItem(VIEW_KEY)
-const view = ref<AppView>(
-  storedView === 'home' ||
-    storedView === 'workbench' ||
-    storedView === 'search' ||
-    storedView === 'usage' ||
-    storedView === 'workshop' ||
-    storedView === 'automation' ||
-    storedView === 'race'
-    ? storedView
-    : 'home',
-)
+const view = ref<AppView>(isAppView(storedView) ? storedView : 'home')
 const workbenchRef = ref<InstanceType<typeof WorkbenchPane> | null>(null)
 const wbStatus = ref<WorkbenchStatus>({ running: 0, waiting: 0, runningIds: [], waitingIds: [] })
 const archiveStatus = ref<ArchiveStatus>({ running: false, waiting: 0 })
@@ -349,227 +331,156 @@ onBeforeUnmount(stopRoutineEvents)
 
 <template>
   <div class="app">
-    <header class="topbar">
-      <div class="brand">
-        <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true">
-          <path d="M22 14 L42 50 L2 50 Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round" />
-          <path d="M0 33 H21" stroke="currentColor" stroke-width="4" stroke-linecap="round" />
-          <path d="M39 27 L62 16" stroke="#8b5cf6" stroke-width="3.6" stroke-linecap="round" />
-          <path d="M41 33 H62" stroke="#22d3ee" stroke-width="3.6" stroke-linecap="round" />
-          <path d="M39 39 L62 50" stroke="#f472b6" stroke-width="3.6" stroke-linecap="round" />
-        </svg>
-        <span class="brand-name">Prism</span>
-      </div>
+    <AppRail
+      :view="view"
+      :wb-status="wbStatus"
+      @select="setView"
+      @settings="showSettings = true"
+    />
 
-      <div class="view-switch">
+    <div class="app-main">
+      <header class="topbar">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true">
+            <path d="M22 14 L42 50 L2 50 Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round" />
+            <path d="M0 33 H21" stroke="currentColor" stroke-width="4" stroke-linecap="round" />
+            <path d="M39 27 L62 16" stroke="#8b5cf6" stroke-width="3.6" stroke-linecap="round" />
+            <path d="M41 33 H62" stroke="#22d3ee" stroke-width="3.6" stroke-linecap="round" />
+            <path d="M39 39 L62 50" stroke="#f472b6" stroke-width="3.6" stroke-linecap="round" />
+          </svg>
+          <span class="brand-name">Prism</span>
+        </div>
+
         <button
-          class="view-btn"
-          :class="{ active: view === 'home' }"
-          title="首页仪表盘：token 脉搏 / 工作节奏 / 28 天热力图 / 模型分布 / 项目活跃"
-          @click="setView('home')"
+          v-for="item in engineChips"
+          :key="item.engineId"
+          class="engine-chip"
+          :class="`tone-${item.status.tone}`"
+          :title="`${item.cliPath ?? '未找到 CLI'}\n点击查看引擎详情`"
+          @click="showSettings = true"
         >
-          首页
+          <span class="dot" />
+          <span>{{ item.displayName }} · {{ item.status.label }}</span>
         </button>
-        <button
-          class="view-btn"
-          :class="{ active: view === 'archive' }"
-          title="历史浏览：项目 / 会话 / 时间线"
-          @click="setView('archive')"
-        >
-          归档
-        </button>
-        <button
-          class="view-btn"
-          :class="{ active: view === 'workbench' }"
-          title="多列并行指挥：同时盯着多个跑着的会话"
-          @click="setView('workbench')"
-        >
-          工作台
-          <span
-            v-if="wbStatus.waiting"
-            class="switch-badge"
-            :title="`${wbStatus.waiting} 个权限请求等待审批`"
+
+        <div class="topbar-spacer" />
+
+        <div class="notify-wrap">
+          <button
+            class="notify-btn"
+            title="通知：回合完成 / 失败 / 待审批"
+            @click="toggleNotify"
           >
-            {{ wbStatus.waiting }}
-          </span>
-          <span
-            v-else-if="wbStatus.running"
-            class="switch-dot"
-            :title="`${wbStatus.running} 个会话执行中`"
-          />
-        </button>
-        <button
-          class="view-btn"
-          :class="{ active: view === 'race' }"
-          title="赛马：同一问题广播多个引擎，答案 / 用时 / token / 成本并排对比"
-          @click="setView('race')"
-        >
-          赛马
-        </button>
-        <button
-          class="view-btn"
-          :class="{ active: view === 'search' }"
-          title="全文搜索：检索全部会话内容（本地索引，支持中文子串）"
-          @click="setView('search')"
-        >
-          搜索
-        </button>
-        <button
-          class="view-btn"
-          :class="{ active: view === 'usage' }"
-          title="用量：跨引擎 token 消耗与成本估算（只读统计引擎本地档案）"
-          @click="setView('usage')"
-        >
-          用量
-        </button>
-        <button
-          class="view-btn"
-          :class="{ active: view === 'workshop' }"
-          title="工坊：引擎资产（技能 / 命令 / 子代理 / 记忆 / 插件）只读浏览"
-          @click="setView('workshop')"
-        >
-          工坊
-        </button>
-        <button
-          class="view-btn"
-          :class="{ active: view === 'automation' }"
-          title="自动化：定时任务——到点用引擎跑提示词，结果进通知中心"
-          @click="setView('automation')"
-        >
-          自动化
-        </button>
-      </div>
-
-      <button
-        v-for="item in engineChips"
-        :key="item.engineId"
-        class="engine-chip"
-        :class="`tone-${item.status.tone}`"
-        :title="`${item.cliPath ?? '未找到 CLI'}\n点击查看引擎详情`"
-        @click="showSettings = true"
-      >
-        <span class="dot" />
-        <span>{{ item.displayName }} · {{ item.status.label }}</span>
-      </button>
-
-      <div class="topbar-spacer" />
-
-      <div class="notify-wrap">
-        <button
-          class="notify-btn"
-          title="通知：回合完成 / 失败 / 待审批"
-          @click="toggleNotify"
-        >
-          🔔
-          <span v-if="unreadCount" class="notify-badge">
-            {{ unreadCount > 99 ? '99+' : unreadCount }}
-          </span>
-        </button>
-        <template v-if="notifyOpen">
-          <div class="notify-backdrop" @click="notifyOpen = false" />
-          <div class="notify-panel">
-            <div class="notify-head">
-              <span>通知</span>
+            🔔
+            <span v-if="unreadCount" class="notify-badge">
+              {{ unreadCount > 99 ? '99+' : unreadCount }}
+            </span>
+          </button>
+          <template v-if="notifyOpen">
+            <div class="notify-backdrop" @click="notifyOpen = false" />
+            <div class="notify-panel">
+              <div class="notify-head">
+                <span>通知</span>
+                <button
+                  class="notify-clear"
+                  :disabled="!notifications.length"
+                  @click="clearNotifications"
+                >
+                  清空
+                </button>
+              </div>
+              <div v-if="!notifications.length" class="notify-empty">
+                暂无通知——回合完成 / 失败 / 待审批会出现在这里
+              </div>
               <button
-                class="notify-clear"
-                :disabled="!notifications.length"
-                @click="clearNotifications"
+                v-for="item in notifications"
+                :key="item.id"
+                class="notify-item"
+                @click="openNotification(item)"
               >
-                清空
+                <span class="notify-icon" :class="`kind-${item.kind}`">
+                  {{ KIND_ICONS[item.kind] }}
+                </span>
+                <span class="notify-main">
+                  <span class="notify-title">{{ item.title }}</span>
+                  <span class="notify-body">{{ item.body }}</span>
+                </span>
+                <span class="notify-time">{{ relativeTime(item.time) }}</span>
               </button>
             </div>
-            <div v-if="!notifications.length" class="notify-empty">
-              暂无通知——回合完成 / 失败 / 待审批会出现在这里
-            </div>
-            <button
-              v-for="item in notifications"
-              :key="item.id"
-              class="notify-item"
-              @click="openNotification(item)"
-            >
-              <span class="notify-icon" :class="`kind-${item.kind}`">
-                {{ KIND_ICONS[item.kind] }}
-              </span>
-              <span class="notify-main">
-                <span class="notify-title">{{ item.title }}</span>
-                <span class="notify-body">{{ item.body }}</span>
-              </span>
-              <span class="notify-time">{{ relativeTime(item.time) }}</span>
-            </button>
-          </div>
-        </template>
-      </div>
+          </template>
+        </div>
 
-      <button class="settings-btn" title="设置" @click="showSettings = true">⚙</button>
-      <button class="refresh-btn" :disabled="projectsLoading" @click="reload">刷新</button>
-    </header>
+        <button class="refresh-btn" :disabled="projectsLoading" @click="reload">刷新</button>
+      </header>
 
-    <transition name="fade">
-      <div v-if="error" class="error-banner">{{ error }}</div>
-    </transition>
+      <transition name="fade">
+        <div v-if="error" class="error-banner">{{ error }}</div>
+      </transition>
 
-    <div class="panes">
-      <HomePane
-        v-show="view === 'home'"
-        :projects="projects"
-        @error="reportError"
-        @open-project="openProjectFromHome"
-        @open-usage="setView('usage')"
-      />
-      <div v-show="view === 'archive'" class="archive-view">
-        <ProjectsPane
+      <div class="panes">
+        <HomePane
+          v-show="view === 'home'"
           :projects="projects"
-          :selected-id="selectedProjectId"
-          :loading="projectsLoading"
-          @select="selectProject"
+          @error="reportError"
+          @open-project="openProjectFromHome"
+          @open-usage="setView('usage')"
         />
-        <SessionsPane
-          :sessions="sessions"
-          :selected-id="selectedSessionId"
-          :loading="sessionsLoading"
-          :project="selectedProject"
-          :creating="creating"
-          @select="selectSession"
-          @create="createSession"
-        />
-        <SessionView
-          :session="selectedSession"
-          :has-project="!!selectedProject"
-          :jump-message-id="jumpTarget"
+        <div v-show="view === 'archive'" class="archive-view">
+          <ProjectsPane
+            :projects="projects"
+            :selected-id="selectedProjectId"
+            :loading="projectsLoading"
+            @select="selectProject"
+          />
+          <SessionsPane
+            :sessions="sessions"
+            :selected-id="selectedSessionId"
+            :loading="sessionsLoading"
+            :project="selectedProject"
+            :creating="creating"
+            @select="selectSession"
+            @create="createSession"
+          />
+          <SessionView
+            :session="selectedSession"
+            :has-project="!!selectedProject"
+            :jump-message-id="jumpTarget"
+            @error="reportError"
+            @settled="onSessionSettled"
+            @open-workbench="openInWorkbench"
+            @jump-consumed="pendingJump = null"
+            @status="archiveStatus = $event"
+          />
+        </div>
+        <WorkbenchPane
+          v-show="view === 'workbench'"
+          ref="workbenchRef"
+          :projects="projects"
           @error="reportError"
           @settled="onSessionSettled"
-          @open-workbench="openInWorkbench"
-          @jump-consumed="pendingJump = null"
-          @status="archiveStatus = $event"
+          @status="wbStatus = $event"
+        />
+        <SearchPane
+          v-show="view === 'search'"
+          :projects="projects"
+          @error="reportError"
+          @open-hit="openSearchHit"
+        />
+        <RacePane
+          v-show="view === 'race'"
+          :projects="projects"
+          @error="reportError"
+          @open-session="openSessionByLocation"
+        />
+        <UsagePane v-show="view === 'usage'" @error="reportError" />
+        <WorkshopPane v-show="view === 'workshop'" @error="reportError" />
+        <AutomationPane
+          v-show="view === 'automation'"
+          @error="reportError"
+          @open-session="openSessionByLocation"
         />
       </div>
-      <WorkbenchPane
-        v-show="view === 'workbench'"
-        ref="workbenchRef"
-        :projects="projects"
-        @error="reportError"
-        @settled="onSessionSettled"
-        @status="wbStatus = $event"
-      />
-      <SearchPane
-        v-show="view === 'search'"
-        :projects="projects"
-        @error="reportError"
-        @open-hit="openSearchHit"
-      />
-      <RacePane
-        v-show="view === 'race'"
-        :projects="projects"
-        @error="reportError"
-        @open-session="openSessionByLocation"
-      />
-      <UsagePane v-show="view === 'usage'" @error="reportError" />
-      <WorkshopPane v-show="view === 'workshop'" @error="reportError" />
-      <AutomationPane
-        v-show="view === 'automation'"
-        @error="reportError"
-        @open-session="openSessionByLocation"
-      />
     </div>
 
     <SettingsDialog v-if="showSettings" @close="showSettings = false" />
@@ -579,8 +490,18 @@ onBeforeUnmount(stopRoutineEvents)
 <style scoped>
 .app {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   height: 100%;
+  min-height: 0;
+}
+
+/* 图标栏贯穿整个窗口高度；顶栏与内容在右侧同列。 */
+.app-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 
 .topbar {
@@ -612,61 +533,6 @@ onBeforeUnmount(stopRoutineEvents)
   letter-spacing: 0.2px;
 }
 
-.view-switch {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel-2);
-}
-
-.view-btn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 12px;
-  border-radius: 5px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  transition: all 0.15s ease;
-}
-
-.view-btn:hover {
-  color: var(--text);
-}
-
-.view-btn.active {
-  background: var(--panel);
-  color: var(--text);
-  box-shadow: 0 1px 2px rgb(18 16 34 / 0.08);
-}
-
-.switch-badge {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--amber);
-  color: #fff;
-  font-size: 10px;
-  line-height: 15px;
-  font-weight: 700;
-}
-
-.switch-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--green);
-  animation: switch-pulse 1.6s ease infinite;
-}
-
-@keyframes switch-pulse {
-  50% {
-    opacity: 0.35;
-  }
-}
 
 .engine-chip {
   display: flex;
@@ -728,21 +594,6 @@ onBeforeUnmount(stopRoutineEvents)
   cursor: default;
 }
 
-.settings-btn {
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-  transition: all 0.15s ease;
-}
-
-.settings-btn:hover {
-  color: var(--text);
-  border-color: var(--border-strong);
-}
 
 /* ---- 通知中心（M11） ---- */
 
@@ -921,6 +772,7 @@ onBeforeUnmount(stopRoutineEvents)
 .panes {
   display: flex;
   flex: 1;
+  min-width: 0;
   min-height: 0;
 }
 
