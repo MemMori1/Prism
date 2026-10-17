@@ -12,6 +12,7 @@ use crate::engines::core::{
 };
 use crate::engines::opencode;
 use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runtime, RuntimeStatus};
+use crate::engines::quota;
 use crate::engines::usage::{self, UsageSummary};
 use crate::engines::{mcp, workshop};
 use crate::routines::{runner, scheduler::RoutinesState, store};
@@ -564,6 +565,29 @@ pub async fn usage_summary(days: u32) -> Result<UsageSummary, String> {
         summary.days, summary.sessions, summary.cost_usd
     );
     Ok(summary)
+}
+
+/// 配额实时值：Codex 订阅窗口（一次性 app-server 读取，5 分钟缓存；force=true 强制刷新）。
+#[tauri::command]
+pub async fn quota_summary(
+    force: bool,
+    state: tauri::State<'_, quota::QuotaState>,
+) -> Result<quota::QuotaSummary, String> {
+    if !force {
+        if let Some(cached) = state.fresh() {
+            return Ok(cached);
+        }
+    }
+    let fetched = tauri::async_runtime::spawn_blocking(quota::collect)
+        .await
+        .map_err(|cause| cause.to_string())?;
+    state.store(fetched.clone());
+    #[cfg(debug_assertions)]
+    println!(
+        "[prism] quota_summary -> force={} codex={} claude={}",
+        force, fetched.codex.state, fetched.claude.state
+    );
+    Ok(fetched)
 }
 
 /// 工坊：三引擎资产总览（技能 / 命令 / 子代理 / 记忆 / 插件，只读）。

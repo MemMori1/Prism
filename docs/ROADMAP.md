@@ -23,7 +23,7 @@
 | 托盘 | macOS 菜单栏：图标旁待审批计数 + 菜单状态行 / tooltip（前端合并工作台 + 归档视图实时推送，按 sessionId 去重）；菜单含打开 / 退出；**关窗 ≠ 退出**（隐藏窗口，进程与调度继续跑）；Dock 点击唤起 |
 | 三引擎 | OpenCode（全功能）；Codex（浏览 + 运行：发消息 / 流式 / 插话 / 打断 / 审批卡片 / 新建会话）；Claude Code（历史浏览，运行轴待 CLI） |
 | 打磨 | 自研图标、设置面板（双引擎健康）、输入框自适应 |
-| 用量 | 第 6 视图：跨引擎 token 明细（输入 / 输出 / 思考 / 缓存读写）+ 每日柱状曲线 + 按引擎 / 模型分列 + 估算成本（内置价格表，未收录模型标注）；OpenCode / Codex / Claude 本地档案只读统计，不存副本 |
+| 用量 | 第 6 视图：跨引擎 token 明细（输入 / 输出 / 思考 / 缓存读写）+ 每日柱状曲线 + 按引擎 / 模型分列 + 估算成本（内置价格表，未收录模型标注）；OpenCode / Codex / Claude 本地档案只读统计，不存副本；配额实时值（M13b）：Codex 订阅窗口一次性 app-server 读取（API Key 如实标注无订阅配额）；Claude 配额待 CLI |
 | 打包 | `.app` + `.dmg`（v0.2.0，含 M1–M12 全部改动，未签名；Gatekeeper 打开流程见 README）；自动更新已接线（Tauri updater，发布源 = gh-pages 镜像 + GitHub Releases 兜底；v0.2.0 / v0.2.1 / v0.2.2 已发布，升级验收进行中） |
 
 ## 1. 差距对照（现状 → 去向）
@@ -51,7 +51,7 @@
 | 小组件 | ❌ | 远期池 |
 | 自动更新 | ✅ | M12c 已接线（2026-10-17）：Tauri updater；更新清单镜像 gh-pages（Fastly CDN，首选）+ GitHub Releases 兜底，`scripts/release.sh` 发版并生成 `latest.json`；v0.2.0 / v0.2.1（M13）/ v0.2.2（验收目标）已发布（2026-10-17），升级验收进行中 |
 | 主题系统 / i18n | 🟡 自研单主题 + 中文 | i18n 架构预留后置（文案集中化重构，随第一次语言需求启动）；主题远期 |
-| 用量 / 成本统计 / 配额 | ✅ 用量 + 成本统计 | M13a 已实现（2026-10-17）：第 6 视图「用量」跨引擎 token / 每日曲线 / 成本估算（估算口径见 M13）；配额实时值（Claude usage 接口 / Codex app-server rateLimits）后置 M13b |
+| 用量 / 成本统计 / 配额 | ✅ 用量 + 成本统计 + Codex 配额 | M13a 已实现（2026-10-17）：第 6 视图「用量」跨引擎 token / 每日曲线 / 成本估算（估算口径见 M13）；M13b 已实现（2026-10-17）：Codex 配额实时值（app-server 一次性读取主 / 次窗口 + credits + 套餐，5 分钟缓存 + 手动刷新；API Key 如实标注无订阅配额）；Claude 配额待 CLI（与 M9 运行轴同批） |
 | MCP 双向桥（宿主能力给 agent 用） | ❌ | 远期池（宿主即工具：把审批 / 搜索 / 任务能力暴露给会话内 agent） |
 | 菜单 / 快捷键 / 开机自启 | 🟡 Cmd+W 关闭即隐藏（关窗 ≠ 退出）、Cmd+Q 退出 | 视图快捷键随行；开机自启远期（托盘常驻 + 关窗不退已覆盖多数场景） |
 
@@ -197,7 +197,7 @@
   按 `docs/RELEASE.md` §4）。
 
 ### M13 用量面板：跨引擎 token 统计与成本估算
-> 状态（2026-10-17）：**✅ M13a 已实现（用量 + 成本统计）；配额实时值（M13b）后置**。
+> 状态（2026-10-17）：**✅ M13a（用量 + 成本统计）与 M13b（Codex 配额实时值）已实现；Claude 配额待 CLI（与 M9 运行轴同批）**。
 
 - 数据源（全部只读，口径已归一可加总）：
   - OpenCode：`session_v2` 的 `tokens_*` 列（输入 / 输出 / 思考 / 缓存读写天然分列）；
@@ -211,13 +211,23 @@
   思考按输出价计）；未收录模型显示「未收录」且不计入合计。
 - 归档口径：按「会话归档时间」过滤与归档（OpenCode = 会话创建时刻；Codex = 最后一次
   `token_count` 事件时刻；Claude = 档案内最后时间戳）；会话级数据不跨天拆分。
-- 本期不做（→ M13b / 远期池）：配额实时值（Claude usage 接口 / Codex app-server
-  rateLimits）、按项目分组、导出报表、预算告警。
+- ✅ M13b 配额实时值（Codex 段，2026-10-17）：
+  - 取数：一次性拉起 `codex app-server`（stdio JSON-RPC，查询后立即回收，不留常驻）→
+    `account/read` 判定认证类型 → ChatGPT 登录才 `account/rateLimits/read` 读单桶
+    `rateLimits`（`primary` / `secondary` 窗口：usedPercent + 窗口时长 + resetsAt
+    （协议为 Unix 秒，归一毫秒）+ `credits` + `planType`）；API Key 如实标注
+    「无订阅配额（按量计费）」；CLI 缺失 / 超时 / 解析失败均有独立状态与说明。
+  - 缓存：进程内 5 分钟 TTL（`quota_summary`），前端「刷新配额」强制刷新。
+  - 前端：「用量」视图顶部「配额（实时）」区块——窗口进度条 + 已用 % +
+    重置倒计时（60s 心跳）+ 套餐 chip + 更新时刻；Claude 一栏显示「待安装 CLI」。
+  - 口径核对：本机 codex 0.133.0 真机探针 + 官方生成 schema（`GetAccountRateLimitsResponse`
+    / `RateLimitSnapshot` / `RateLimitWindow`）；本机为 API Key 认证，实测
+    `no_subscription`（不造数）；ChatGPT 登录场景待用户机器回归。
+- 本期不做（→ 远期池）：按项目分组、导出报表、预算告警；Claude 配额（待 CLI，与 M9 同批）。
 
 ## 4. 远期池（不排期，按兴趣取用）
 
-监控轨（卡内审批）· 工作台标签页 · 全景图导出 · 赛马 · 配额实时值（Claude usage 接口 /
-Codex app-server rateLimits；M13b 后置）· 小组件 · 主题系统与主题库 ·
+监控轨（卡内审批）· 工作台标签页 · 全景图导出 · 赛马 · 小组件 · 主题系统与主题库 ·
 AI 元数据（标题 / 标签 / 摘要）· 智能搜索（AI 归纳）· **文件台账（含 git 快照条）** ·
 异步任务面板 · Runner 跑单（孤儿清扫双校验）· 附件 / 图片输入 · 斜杠命令面板 ·
 会话 find bar / 锚点导航 / 置顶提示 · 输入队列（流式期间提交）· 权限四档与问答/计划交互卡 ·

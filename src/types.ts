@@ -261,3 +261,35 @@ export interface UsageSummary {
   daily: UsageDaily[]
   notes: string[]
 }
+
+/** 配额：单个订阅窗口。 */
+export interface QuotaWindow {
+  usedPercent: number
+  windowMinutes: number | null
+  /** Unix 毫秒（后端已归一）。 */
+  resetsAtMs: number | null
+}
+
+export interface QuotaCredits {
+  hasCredits: boolean
+  unlimited: boolean
+  balance: string | null
+}
+
+/** 配额：单引擎状态（ok | no_subscription | cli_missing | error | pending_cli）。 */
+export interface EngineQuota {
+  state: string
+  accountType: string | null
+  planType: string | null
+  primary: QuotaWindow | null
+  secondary: QuotaWindow | null
+  credits: QuotaCredits | null
+  message: string | null
+}
+
+export interface QuotaSummary {
+  /** 本次取数时间（Unix 毫秒）。 */
+  fetchedAtMs: number
+  codex: EngineQuota
+  claude: EngineQuota
+}

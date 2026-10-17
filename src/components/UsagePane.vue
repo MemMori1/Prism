@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from '../api'
+import {
+  barWidth,
+  creditsText,
+  fetchedAtText,
+  planLabel,
+  windowLabel,
+  windowMetaText,
+} from '../quotaFormat'
 import { barHeights, formatCost, formatTokens, totalTokens } from '../usageFormat'
-import type { TokenTotals, UsageSummary } from '../types'
+import type { QuotaSummary, TokenTotals, UsageSummary } from '../types'
 
 const emit = defineEmits<{
   (e: 'error', message: string): void
@@ -36,8 +44,38 @@ function pickRange(value: number) {
   void load()
 }
 
+// ---------------------------------------------------------------- 配额（实时）
+
+const quota = ref<QuotaSummary | null>(null)
+const quotaLoading = ref(false)
+const quotaError = ref<string | null>(null)
+/** 相对时间（重置倒计时）的心跳，60s 一次。 */
+const now = ref(Date.now())
+let ticker: ReturnType<typeof setInterval> | undefined
+
+async function loadQuota(force = false) {
+  if (quotaLoading.value) return
+  quotaLoading.value = true
+  try {
+    quota.value = await api.quotaSummary(force)
+    quotaError.value = null
+  } catch (cause) {
+    quotaError.value = String(cause)
+  } finally {
+    quotaLoading.value = false
+  }
+}
+
 onMounted(() => {
   void load()
+  void loadQuota(false)
+  ticker = setInterval(() => {
+    now.value = Date.now()
+  }, 60_000)
+})
+
+onUnmounted(() => {
+  if (ticker) clearInterval(ticker)
 })
 
 const dailyTotals = computed(() => (summary.value?.daily ?? []).map(item => totalTokens(item.tokens)))
@@ -91,6 +129,69 @@ function barTitle(index: number): string {
     </header>
 
     <div v-if="summary" class="usage-body">
+      <div class="panel quota-panel">
+        <div class="panel-title quota-head">
+          <span>配额（实时）</span>
+          <span v-if="quota" class="quota-age">更新于 {{ fetchedAtText(quota.fetchedAtMs) }}</span>
+          <button class="refresh quota-refresh" :disabled="quotaLoading" @click="loadQuota(true)">
+            {{ quotaLoading ? '查询中…' : '刷新配额' }}
+          </button>
+        </div>
+        <div v-if="quotaError" class="quota-note">配额查询失败：{{ quotaError }}</div>
+        <div v-else-if="quota" class="quota-grid">
+          <div class="quota-card">
+            <div class="quota-card-head">
+              <span class="quota-name">Codex</span>
+              <span v-if="planLabel(quota.codex.planType)" class="quota-chip">
+                {{ planLabel(quota.codex.planType) }}
+              </span>
+            </div>
+            <template v-if="quota.codex.state === 'ok'">
+              <div v-if="quota.codex.primary" class="quota-window">
+                <div class="quota-window-line">
+                  <span>{{ windowLabel(quota.codex.primary.windowMinutes) }}</span>
+                  <span class="quota-window-meta">
+                    {{ windowMetaText(quota.codex.primary, now) }}
+                  </span>
+                </div>
+                <div class="quota-bar">
+                  <div
+                    class="quota-bar-fill"
+                    :style="{ width: `${barWidth(quota.codex.primary.usedPercent)}%` }"
+                  />
+                </div>
+              </div>
+              <div v-if="quota.codex.secondary" class="quota-window">
+                <div class="quota-window-line">
+                  <span>{{ windowLabel(quota.codex.secondary.windowMinutes) }}</span>
+                  <span class="quota-window-meta">
+                    {{ windowMetaText(quota.codex.secondary, now) }}
+                  </span>
+                </div>
+                <div class="quota-bar">
+                  <div
+                    class="quota-bar-fill"
+                    :style="{ width: `${barWidth(quota.codex.secondary.usedPercent)}%` }"
+                  />
+                </div>
+              </div>
+              <div v-if="!quota.codex.primary && !quota.codex.secondary" class="quota-note">
+                {{ quota.codex.message ?? '暂无窗口数据' }}
+              </div>
+              <div v-if="quota.codex.credits" class="quota-note">
+                Credits：{{ creditsText(quota.codex.credits) }}
+              </div>
+            </template>
+            <div v-else class="quota-note">{{ quota.codex.message ?? '配额暂不可用' }}</div>
+          </div>
+          <div class="quota-card">
+            <div class="quota-card-head"><span class="quota-name">Claude Code</span></div>
+            <div class="quota-note">{{ quota.claude.message ?? '待接入' }}</div>
+          </div>
+        </div>
+        <div v-else class="quota-note">{{ quotaLoading ? '查询中…' : '配额信息暂不可用' }}</div>
+      </div>
+
       <div class="cards">
         <div class="card">
           <div class="card-label">总 tokens</div>
@@ -394,5 +495,98 @@ function barTitle(index: number): string {
   color: var(--faint);
   font-size: 11px;
   line-height: 1.8;
+}
+
+.quota-panel {
+  flex: none;
+}
+
+.quota-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.quota-age {
+  color: var(--faint);
+  font-size: 11px;
+  margin-left: auto;
+}
+
+.quota-refresh {
+  padding: 2px 10px;
+  font-size: 11px;
+}
+
+.quota-grid {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.quota-card {
+  flex: 1;
+  min-width: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  padding: 10px 12px;
+}
+
+.quota-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.quota-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.quota-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--panel);
+}
+
+.quota-window + .quota-window {
+  margin-top: 8px;
+}
+
+.quota-window-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.quota-window-meta {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-bar {
+  height: 6px;
+  margin-top: 4px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.quota-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.quota-note {
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.7;
 }
 </style>

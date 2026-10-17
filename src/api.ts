@@ -8,6 +8,7 @@ import type {
   McpServer,
   PermissionRequest,
   ProjectItem,
+  QuotaSummary,
   RoutineDefinition,
   RoutineLogEntry,
   RuntimeStatus,
@@ -91,6 +92,7 @@ export const api = {
   routineLogs: (id: string, limit?: number) =>
     invoke<RoutineLogEntry[]>('routine_logs', { id, limit: limit ?? null }),
   usageSummary: (days: number) => invoke<UsageSummary>('usage_summary', { days }),
+  quotaSummary: (force: boolean) => invoke<QuotaSummary>('quota_summary', { force }),
   trayStatus: (running: number, waiting: number) =>
     invoke<void>('tray_status', { running, waiting }),
 }

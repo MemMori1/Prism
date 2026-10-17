@@ -31,6 +31,7 @@ pub fn run() {
             ipc::search_update_index,
             ipc::search_query,
             ipc::usage_summary,
+            ipc::quota_summary,
             ipc::workshop_assets,
             ipc::workshop_read,
             ipc::open_path,
@@ -47,6 +48,7 @@ pub fn run() {
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));
             app.manage(CodexRuntime::new(app.handle().clone()));
+            app.manage(engines::quota::QuotaState::new());
             app.manage(routines::scheduler::RoutinesState::new());
             routines::scheduler::start(app.handle().clone());
             tray::setup(app.handle())?;
