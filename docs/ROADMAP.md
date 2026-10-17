@@ -25,7 +25,7 @@
 | 三引擎 | OpenCode（全功能）；Codex（浏览 + 运行：发消息 / 流式 / 插话 / 打断 / 审批卡片 / 新建会话）；Claude Code（历史浏览，运行轴待 CLI）；新建会话组合器引擎三选一（Claude 灰显并注明原因） |
 | 打磨 | 自研图标、设置面板（双引擎健康）、输入框自适应 |
 | 用量 | 第 6 视图：跨引擎 token 明细（输入 / 输出 / 思考 / 缓存读写）+ 每日柱状曲线 + 按引擎 / 模型分列 + 估算成本（内置价格表，未收录模型标注）；OpenCode / Codex / Claude 本地档案只读统计，不存副本；配额实时值（M13b）：Codex 订阅窗口一次性 app-server 读取（API Key 如实标注无订阅配额）；Claude 配额待 CLI |
-| 打包 | `.app` + `.dmg`（v0.2.0，含 M1–M12 全部改动，未签名；Gatekeeper 打开流程见 README）；自动更新已接线（Tauri updater，发布源 = gh-pages 镜像 + GitHub Releases 兜底；v0.2.0 / v0.2.1 / v0.2.2 已发布，升级验收进行中） |
+| 打包 | `.app` + `.dmg`（未签名；Gatekeeper 打开流程见 README）；自动更新已接线（Tauri updater，发布源 = gh-pages 镜像 + GitHub Releases 兜底）；v0.2.0 → **v0.2.3 已发布**（2026-10-17，含 M14–M19 + 组合器升级；产物签名已用公钥独立验证）；升级验收进行中：本机 0.2.0 需手动装一次新版 |
 
 ## 1. 差距对照（现状 → 去向）
 
