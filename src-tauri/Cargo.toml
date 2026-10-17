@@ -18,7 +18,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+# 关掉默认特性会连 TLS 一起关掉，https 端点会直接报 "error sending request"。
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls-native-roots",
+    "system-proxy",
+    "http2",
+] }
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"

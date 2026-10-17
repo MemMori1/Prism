@@ -592,13 +592,33 @@ pub fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 环回地址（`localhost` / `127.0.0.1` / `::1`），这些不该走代理。
+fn is_local_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback() || ip.is_unspecified())
+        .unwrap_or(false)
+}
+
 /// 探活：只对 http 发 GET（任何 HTTP 响应都算可达），超时即失败。
 pub fn probe_http(url: &str, timeout: Duration) -> ProbeResult {
     let start = Instant::now();
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .build()
-    {
+    let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
+    // MCP 服务大多跑在本机，被系统代理接管只会拿到代理自己的 502，
+    // 看起来像「探活成功」。
+    if is_local_url(url) {
+        builder = builder.no_proxy();
+    }
+    let client = match builder.build() {
         Ok(client) => client,
         Err(cause) => {
             return ProbeResult {

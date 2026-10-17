@@ -715,6 +715,7 @@ pub async fn session_send(
     );
     if native::is_native_session(&session_id) {
         // 原生引擎自己跑循环：流式增量走 engine-event，落定后写自己的 JSONL。
+        let text = files_to_note(&text, &options.files);
         return tauri::async_runtime::spawn_blocking(move || {
             native::agent::send(
                 &app,
@@ -955,8 +956,12 @@ pub async fn session_interrupt(
     #[cfg(debug_assertions)]
     println!("[prism] session_interrupt -> {session_id}");
     if native::is_native_session(&session_id) {
-        // 原生引擎的回合跑在阻塞线程里，目前没有取消通道（下一版加）。
-        return Err("原生引擎暂不支持中断当前回合".to_string());
+        // 原生引擎的回合跑在阻塞线程里，靠一个 stop 标记在流式分片之间收手。
+        return if native::agent::cancel(&session_id) {
+            Ok(())
+        } else {
+            Err("这个会话没有正在跑的回合".to_string())
+        };
     }
     if is_codex_session(&session_id) {
         let codex_runtime = codex_runtime.inner().clone();

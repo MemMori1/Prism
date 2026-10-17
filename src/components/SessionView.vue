@@ -26,6 +26,7 @@ import {
   type PermissionDecision,
 } from '../permissions'
 import { engineLabel } from '../workshop'
+import { CREATABLE_ENGINE_IDS } from '../sessionStart'
 import type {
   EngineCatalog,
   EngineCommand,
@@ -650,8 +651,8 @@ const waiting = computed(() => pendingPermissions.value.length)
 const showLive = computed(
   () => live.value.running || live.value.parts.length > 0 || !!live.value.error,
 )
-/** 已接入运行轴的引擎（其余引擎只能浏览，后续引擎接入时在这里放行）。 */
-const RUNTIME_ENGINES = new Set(['opencode', 'codex'])
+/** 已接入运行轴的引擎（其余引擎只能浏览）。与新建会话的可用名单同源，避免两处漂移。 */
+const RUNTIME_ENGINES = new Set<string>(CREATABLE_ENGINE_IDS)
 const readOnly = computed(() => !!props.session && !RUNTIME_ENGINES.has(props.session.engine))
 
 // 运行 / 待审批状态上报：工作台列头与全局审批角标用。

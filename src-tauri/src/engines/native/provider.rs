@@ -169,16 +169,87 @@ fn content_text(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        // 本地/自建服务常见于内网，别被系统代理劫走。
-        .no_proxy()
-        .timeout(Duration::from_secs(600))
-        .build()
-        .map_err(|error| format!("创建 HTTP 客户端失败：{error}"))
+/// 本机地址不该被代理劫走：本地 Ollama / LM Studio 一旦走代理就是「连不上」。
+const DIRECT_HOSTS: &str = "localhost,127.0.0.1,::1,0.0.0.0";
+
+/// 环境里配了代理就显式用（访问境外模型服务基本都要），没配则交给
+/// reqwest 的系统代理探测（macOS「网络 → 代理」）。socks 走不了——没开那个特性。
+fn env_proxy() -> Option<String> {
+    const KEYS: [&str; 6] = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "http_proxy",
+        "HTTP_PROXY",
+    ];
+    KEYS.iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        // socks 需要额外的 feature，跳过它而不是让所有请求都失败。
+        .find(|value| !value.to_ascii_lowercase().starts_with("socks"))
+        // 有些工具只给 host:port，补上默认协议。
+        .map(|value| {
+            if value.contains("://") {
+                value
+            } else {
+                format!("http://{value}")
+            }
+        })
 }
 
-/// 流式跑一轮。`on_text` / `on_reasoning` 会在收到增量时被调用。
+fn client() -> Result<reqwest::blocking::Client, String> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(600));
+    if let Some(url) = env_proxy() {
+        let mut direct = DIRECT_HOSTS.to_string();
+        if let Ok(extra) = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")) {
+            let extra = extra.trim();
+            if !extra.is_empty() {
+                direct.push(',');
+                direct.push_str(extra);
+            }
+        }
+        let proxy = reqwest::Proxy::all(&url)
+            .map_err(|error| format!("代理地址不可用（{url}）：{error}"))?
+            .no_proxy(reqwest::NoProxy::from_string(&direct));
+        // 显式配了代理就关掉自动探测，免得叠两层。
+        builder = builder.no_proxy().proxy(proxy);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("创建 HTTP 客户端失败：{}", describe(&error)))
+}
+
+/// reqwest 的 `Display` 只有第一层（`error sending request for url (...)`），
+/// 真正的原因（TLS 握手、DNS、代理拒绝）藏在 source 链里，拼出来才排查得动。
+fn describe(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut cursor = error.source();
+    while let Some(cause) = cursor {
+        let text = cause.to_string();
+        if !text.is_empty() && !parts.contains(&text) {
+            parts.push(text);
+        }
+        cursor = cause.source();
+    }
+    parts.join(" → ")
+}
+
+/// 被用户叫停时的返回值；上层靠它区分「出错」和「中断」。
+pub const CANCELLED: &str = "已停止本次回复";
+
+fn check_stop(should_stop: &dyn Fn() -> bool) -> Result<(), String> {
+    if should_stop() {
+        Err(CANCELLED.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// 流式跑一轮。`on_text` / `on_reasoning` 会在收到增量时被调用；
+/// `should_stop` 在发请求前与每收到一行 SSE 时都会问一次，返回 true 就收工。
 pub fn chat(
     provider: &ProviderConfig,
     model: &str,
@@ -186,10 +257,12 @@ pub fn chat(
     tools: &[Value],
     on_text: &mut dyn FnMut(&str),
     on_reasoning: &mut dyn FnMut(&str),
+    should_stop: &dyn Fn() -> bool,
 ) -> Result<Outcome, String> {
     if !provider.usable() {
         return Err("这个模型服务还没填地址".to_string());
     }
+    check_stop(should_stop)?;
     let mut body = json!({
         "model": model,
         "stream": true,
@@ -209,7 +282,8 @@ pub fn chat(
     }
     let response = request
         .send()
-        .map_err(|error| format!("请求失败：{error}"))?;
+        .map_err(|error| format!("请求失败：{}", describe(&error)))?;
+    check_stop(should_stop)?;
 
     let status = response.status();
     if !status.is_success() {
@@ -244,6 +318,8 @@ pub fn chat(
 
     let reader = BufReader::new(response);
     for line in reader.lines() {
+        // 每个分片都问一次：模型吐字很密，这样中断延迟基本就是一行的时间。
+        check_stop(should_stop)?;
         let line = line.map_err(|error| format!("读取流失败：{error}"))?;
         let Some(payload) = line.strip_prefix("data:") else {
             continue;
@@ -291,7 +367,7 @@ pub fn probe(provider: &ProviderConfig, model: &str) -> Result<String, String> {
     }
     let response = request
         .send()
-        .map_err(|error| format!("连不上：{error}"))?;
+        .map_err(|error| format!("连不上：{}", describe(&error)))?;
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().unwrap_or_default();
@@ -314,7 +390,7 @@ pub fn fetch_models(provider: &ProviderConfig) -> Result<Vec<ModelEntry>, String
     }
     let response = request
         .send()
-        .map_err(|error| format!("连不上 {url}：{error}"))?;
+        .map_err(|error| format!("连不上 {url}：{}", describe(&error)))?;
     let status = response.status();
     let text = response.text().unwrap_or_default();
     if !status.is_success() {
@@ -494,6 +570,7 @@ mod tests {
             &[],
             &mut on_text,
             &mut on_reasoning,
+            &|| false,
         )
         .expect("流式聊天应成功");
         assert_eq!(outcome.text, "你好");
@@ -518,6 +595,31 @@ mod tests {
         let bare = json!(["m1", "m2"]);
         assert_eq!(parse_models(&bare).len(), 2);
         assert!(parse_models(&json!({ "error": "nope" })).is_empty());
+    }
+
+    /// 已经被叫停的回合不该再发请求出去。
+    #[test]
+    fn chat_returns_cancelled_without_sending() {
+        let config = ProviderConfig {
+            id: "stop".to_string(),
+            label: "stop".to_string(),
+            protocol: "openai".to_string(),
+            // 端口留空：一旦真的去连就会失败，正好证明根本没发请求。
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            api_key: String::new(),
+            models: vec![ModelEntry::new("m")],
+        };
+        let error = chat(
+            &config,
+            "m",
+            &[json!({ "role": "user", "content": "hi" })],
+            &[],
+            &mut |_delta: &str| {},
+            &mut |_delta: &str| {},
+            &|| true,
+        )
+        .expect_err("应当直接返回中断");
+        assert_eq!(error, CANCELLED);
     }
 
     /// `GET /models` 的完整链路：拼路径 → 带 Bearer → 解析。
@@ -555,5 +657,65 @@ mod tests {
         })
         .expect("应能拉到模型");
         assert_eq!(models[0].id, "hit-model");
+    }
+
+    /// 真实网络的连通性检查（默认忽略，`cargo test --lib live_ -- --ignored`）。
+    ///
+    /// 不带密钥时 DeepSeek 会回 401——只要能读到状态码，就说明 TLS、DNS、
+    /// 代理这一层全是通的，剩下的才是密钥问题。
+    #[test]
+    #[ignore]
+    fn live_https_reaches_deepseek() {
+        let error = fetch_models(&ProviderConfig {
+            id: "live".to_string(),
+            label: String::new(),
+            protocol: "openai".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            api_key: String::new(),
+            models: Vec::new(),
+        })
+        .expect_err("没有密钥应当报错");
+        assert!(
+            !error.contains("连不上"),
+            "网络层就没通，检查 TLS / 代理：{error}"
+        );
+        assert!(error.contains("401"), "预期 401，实际：{error}");
+    }
+
+    /// 只留第一层错误会变成「error sending request」这种废话，必须把 source 链拼出来。
+    #[test]
+    fn describe_walks_the_whole_source_chain() {
+        #[derive(Debug)]
+        struct Layer {
+            text: &'static str,
+            cause: Option<Box<Layer>>,
+        }
+        impl std::fmt::Display for Layer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.text)
+            }
+        }
+        impl std::error::Error for Layer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.cause
+                    .as_deref()
+                    .map(|inner| inner as &(dyn std::error::Error + 'static))
+            }
+        }
+
+        let error = Layer {
+            text: "error sending request for url (https://api.deepseek.com/v1/models)",
+            cause: Some(Box::new(Layer {
+                text: "client error (Connect)",
+                cause: Some(Box::new(Layer {
+                    text: "tls handshake eof",
+                    cause: None,
+                })),
+            })),
+        };
+        let text = describe(&error);
+        assert!(text.starts_with("error sending request"), "{text}");
+        assert!(text.contains("→ client error (Connect)"), "{text}");
+        assert!(text.ends_with("→ tls handshake eof"), "{text}");
     }
 }
