@@ -22,11 +22,14 @@ const props = defineProps<{
   hasProject: boolean
   /** 工作台列内嵌模式：隐藏会话头（由列头承担标题 / 状态）。 */
   embedded?: boolean
+  /** 搜索结果定位：滚动到该消息并短暂高亮。 */
+  jumpMessageId?: string | null
 }>()
 
 const emit = defineEmits<{
   (e: 'error', message: string): void
   (e: 'settled'): void
+  (e: 'jumpConsumed'): void
   (e: 'openWorkbench', sessionId: string): void
   (e: 'status', status: { running: boolean; waiting: number }): void
 }>()
@@ -52,6 +55,8 @@ const pendingPermissions = ref<PermissionRequest[]>([])
 const replyingPermission = ref<string | null>(null)
 /** 视口是否吸附在底部（跟随流式输出）。 */
 const stick = ref(true)
+/** 搜索定位的目标消息（短暂高亮）。 */
+const highlightId = ref<string | null>(null)
 
 const running = computed(() => live.value.running)
 const waiting = computed(() => pendingPermissions.value.length)
@@ -280,6 +285,37 @@ async function loadOlder() {
   }
 }
 
+/** 搜索定位：确保目标消息已加载（必要时连续翻页），滚动 + 短暂高亮。 */
+async function performJump(messageId: string) {
+  const sessionId = props.session?.id
+  if (!sessionId) {
+    emit('jumpConsumed')
+    return
+  }
+  let guard = 0
+  while (
+    !records.value.some(record => record.id === messageId) &&
+    hasMore.value &&
+    guard < 60
+  ) {
+    await loadOlder()
+    guard += 1
+    if (props.session?.id !== sessionId) break
+  }
+  const found = records.value.some(record => record.id === messageId)
+  emit('jumpConsumed')
+  if (!found || props.session?.id !== sessionId) return
+
+  stick.value = false
+  highlightId.value = messageId
+  await nextTick()
+  const el = scroller.value?.querySelector(`[data-message-id="${messageId}"]`)
+  el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  window.setTimeout(() => {
+    if (highlightId.value === messageId) highlightId.value = null
+  }, 3600)
+}
+
 function onScroll() {
   const el = scroller.value
   if (!el) return
@@ -378,7 +414,7 @@ watch(
     replyingPermission.value = null
     stick.value = true
     if (sessionId) {
-      void loadInitial(sessionId)
+      void prepareSession(sessionId)
     } else {
       records.value = []
       cursor.value = null
@@ -386,6 +422,24 @@ watch(
     }
   },
   { immediate: true },
+)
+
+/** 会话切换：装载初始页；若带搜索定位目标，装载完成后直接跳转。 */
+async function prepareSession(sessionId: string) {
+  await loadInitial(sessionId)
+  const target = props.jumpMessageId
+  if (target && props.session?.id === sessionId) {
+    await performJump(target)
+  }
+}
+
+// 同一会话内点击搜索结果：数据已在内存，直接定位。
+watch(
+  () => props.jumpMessageId,
+  messageId => {
+    if (!messageId || loading.value) return
+    if (records.value.length || !hasMore.value) void performJump(messageId)
+  },
 )
 </script>
 
@@ -447,6 +501,7 @@ watch(
               :key="record.id"
               :record="record"
               :session-id="session.id"
+              :highlighted="record.id === highlightId"
             />
             <LiveTurnView v-if="showLive" :turn="live" />
           </div>

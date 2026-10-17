@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use crate::engines::core::{
-    EngineHealth, ProjectItem, SessionSummary, TimelinePage, ToolDetail,
+    EngineHealth, ProjectItem, SearchHit, SearchStats, SessionSummary, TimelinePage, ToolDetail,
 };
 use crate::engines::opencode;
 use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runtime, RuntimeStatus};
@@ -222,4 +222,66 @@ pub async fn session_permission_reply(
     })
     .await
     .map_err(|cause| cause.to_string())?
+}
+
+// ---------------------------------------------------------------- 搜索
+
+/// 搜索索引状态（只读索引库，不触碰引擎数据）。
+#[tauri::command]
+pub async fn search_stats() -> Result<SearchStats, String> {
+    let search_db = opencode::search::prism_search_db_path()
+        .ok_or_else(|| "无法定位 ~/.prism 数据目录".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || opencode::search::stats(&search_db))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 增量构建 / 更新全文索引（Prism 自有数据，引擎库只读）。
+#[tauri::command]
+pub async fn search_update_index() -> Result<SearchStats, String> {
+    let engine_db = opencode_db_path()?;
+    let search_db = opencode::search::prism_search_db_path()
+        .ok_or_else(|| "无法定位 ~/.prism 数据目录".to_string())?;
+    let stats = tauri::async_runtime::spawn_blocking(move || {
+        opencode::search::update_index(&engine_db, &search_db)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?;
+    let stats = stats?;
+    #[cfg(debug_assertions)]
+    println!(
+        "[prism] search_update_index -> {} 会话 / {} 消息",
+        stats.indexed_sessions, stats.indexed_messages
+    );
+    Ok(stats)
+}
+
+/// 全文搜索：关键词 / 项目 / 时间下限 / 仅标题。
+#[tauri::command]
+pub async fn search_query(
+    term: String,
+    project_id: Option<String>,
+    since: Option<i64>,
+    only_title: Option<bool>,
+    limit: Option<i64>,
+) -> Result<Vec<SearchHit>, String> {
+    let engine_db = opencode_db_path()?;
+    let search_db = opencode::search::prism_search_db_path()
+        .ok_or_else(|| "无法定位 ~/.prism 数据目录".to_string())?;
+    let hits = tauri::async_runtime::spawn_blocking(move || {
+        opencode::search::search(
+            &engine_db,
+            &search_db,
+            &term,
+            project_id.as_deref(),
+            since,
+            only_title.unwrap_or(false),
+            limit,
+        )
+    })
+    .await
+    .map_err(|cause| cause.to_string())??;
+    #[cfg(debug_assertions)]
+    println!("[prism] search_query -> {} 条", hits.len());
+    Ok(hits)
 }

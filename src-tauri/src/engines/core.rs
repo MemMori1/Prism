@@ -101,3 +101,30 @@ pub struct ToolDetail {
     /// 输出因过大被截断。
     pub truncated: bool,
 }
+
+/// 搜索命中（Prism 自有索引的查询结果）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    /// 消息 id；「仅标题」命中时为 None。
+    pub message_id: Option<String>,
+    pub session_id: String,
+    pub session_title: Option<String>,
+    pub project_id: String,
+    /// user / assistant；标题命中时为 None。
+    pub role: Option<String>,
+    pub seq: Option<i64>,
+    pub time_created: i64,
+    /// 命中片段；高亮段用 \u{1} / \u{2} 控制字符包裹（前端拆段渲染，天然防注入）。
+    pub snippet: String,
+}
+
+/// 搜索索引状态。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchStats {
+    pub indexed_sessions: i64,
+    pub indexed_messages: i64,
+    /// 最近一次索引构建时间（毫秒时间戳；从未构建为 0）。
+    pub updated_at: i64,
+}

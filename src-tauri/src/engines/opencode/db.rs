@@ -19,6 +19,8 @@ const SESSION_LIMIT: i64 = 500;
 const TIMELINE_PAGE: i64 = 150;
 /// 工具详情输出上限（字符），超出截断。
 const TOOL_OUTPUT_LIMIT: usize = 200_000;
+/// 单条消息入全文索引的文本上限（字符），超出截断。
+const INDEX_TEXT_LIMIT: usize = 20_000;
 
 pub fn session_limit() -> i64 {
     SESSION_LIMIT
@@ -129,6 +131,158 @@ fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         time_created: row.get(9)?,
         time_updated: row.get(10)?,
     })
+}
+
+/// 增量索引用：自 `since` 之后有更新的顶层会话（id / 项目 / 更新时间）。
+pub fn list_sessions_updated_since(
+    db_path: &Path,
+    since: i64,
+) -> DbResult<Vec<(String, String, i64)>> {
+    let connection = open_readonly(db_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, project_id, time_updated
+             FROM session_v2
+             WHERE parent_id IS NULL
+               AND time_archived IS NULL
+               AND time_updated > ?1
+             ORDER BY time_updated ASC",
+        )
+        .map_err(|cause| format!("查询增量会话失败：{cause}"))?;
+
+    let rows = statement
+        .query_map(params![since], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|cause| format!("查询增量会话失败：{cause}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|cause| format!("读取增量会话失败：{cause}"))
+}
+
+/// 全部顶层会话（搜索的标题查询 / 命中展示用）。
+pub fn list_all_sessions(db_path: &Path) -> DbResult<Vec<SessionSummary>> {
+    let connection = open_readonly(db_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, project_id, title, directory, model, cost,
+                    tokens_input, tokens_output, tokens_reasoning,
+                    time_created, time_updated
+             FROM session_v2
+             WHERE parent_id IS NULL
+               AND time_archived IS NULL
+             ORDER BY time_updated DESC
+             LIMIT 2000",
+        )
+        .map_err(|cause| format!("查询会话失败：{cause}"))?;
+
+    let rows = statement
+        .query_map([], map_session_row)
+        .map_err(|cause| format!("查询会话失败：{cause}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|cause| format!("读取会话失败：{cause}"))
+}
+
+/// 一条进全文索引的消息文档。
+#[derive(Debug, Clone)]
+pub struct IndexDoc {
+    pub message_id: String,
+    pub role: String,
+    pub seq: i64,
+    pub time_created: i64,
+    pub text: String,
+}
+
+/// 单个会话里可索引的消息文本（user 全文 + assistant 文本/推理拼接）。
+pub fn list_index_docs(db_path: &Path, session_id: &str) -> DbResult<Vec<IndexDoc>> {
+    let connection = open_readonly(db_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, seq, type, time_created, data
+             FROM session_message
+             WHERE session_id = ?1
+               AND type IN ('user', 'assistant')
+             ORDER BY seq ASC",
+        )
+        .map_err(|cause| format!("查询消息失败：{cause}"))?;
+
+    let rows = statement
+        .query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|cause| format!("查询消息失败：{cause}"))?;
+
+    let mut docs = Vec::new();
+    for row in rows {
+        let (message_id, seq, kind, time_created, data) =
+            row.map_err(|cause| format!("读取消息失败：{cause}"))?;
+        let Ok(value) = serde_json::from_str::<Value>(&data) else {
+            continue;
+        };
+        let text = match kind.as_str() {
+            "user" => user_text(&value),
+            "assistant" => assistant_text(&value),
+            _ => None,
+        };
+        let Some(text) = text else { continue };
+        docs.push(IndexDoc {
+            message_id,
+            role: kind,
+            seq,
+            time_created,
+            text: truncate_chars(&text, INDEX_TEXT_LIMIT),
+        });
+    }
+    Ok(docs)
+}
+
+/// 用户消息的可读文本。
+fn user_text(data: &Value) -> Option<String> {
+    let text = data
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| data.pointer("/metadata/displayText").and_then(Value::as_str))
+        .unwrap_or("");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+/// 助手消息的正文 + 推理文本（工具输出不入索引）。
+fn assistant_text(data: &Value) -> Option<String> {
+    let mut chunks: Vec<&str> = Vec::new();
+    if let Some(content) = data.get("content").and_then(Value::as_array) {
+        for part in content {
+            match part.get("type").and_then(Value::as_str) {
+                Some("text") | Some("reasoning") => {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        if !text.trim().is_empty() {
+                            chunks.push(text);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks.join("\n\n"))
+    }
 }
 
 /// 会话时间线分页：从最新往回取一页，按时间正序返回。
@@ -325,23 +479,14 @@ fn parse_model(raw: &str) -> Option<String> {
 }
 
 fn map_user_record(id: String, time_created: i64, data: &Value) -> Option<TimelineRecord> {
-    let text = data
-        .get("text")
-        .and_then(Value::as_str)
-        .or_else(|| data.pointer("/metadata/displayText").and_then(Value::as_str))
-        .unwrap_or("");
-    if text.trim().is_empty() {
-        return None;
-    }
+    let text = user_text(data)?;
     Some(TimelineRecord {
         id,
         role: "user".to_string(),
         time_created,
         model: None,
         completed: true,
-        parts: vec![TimelinePart::Text {
-            text: text.to_string(),
-        }],
+        parts: vec![TimelinePart::Text { text }],
     })
 }
 

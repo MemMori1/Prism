@@ -1,8 +1,16 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import type { ProjectItem, SessionSummary } from '../types'
 import { basename, formatTokens, relativeTime } from '../format'
+import {
+  filterSessionsByRange,
+  rangeToSince,
+  sortSessions,
+  type SessionSort,
+  type TimeRange,
+} from '../sessionList'
 
-defineProps<{
+const props = defineProps<{
   sessions: SessionSummary[]
   selectedId: string | null
   loading: boolean
@@ -14,6 +22,16 @@ const emit = defineEmits<{
   (e: 'select', sessionId: string): void
   (e: 'create'): void
 }>()
+
+const sortKey = ref<SessionSort>('recent')
+const rangeKey = ref<TimeRange>('all')
+
+const visibleSessions = computed(() =>
+  sortSessions(
+    filterSessionsByRange(props.sessions, rangeToSince(rangeKey.value, Date.now())),
+    sortKey.value,
+  ),
+)
 
 function shortModel(model: string | null): string {
   if (!model) return ''
@@ -42,13 +60,28 @@ function shortModel(model: string | null): string {
       </span>
     </div>
 
+    <div v-if="sessions.length" class="list-toolbar">
+      <select v-model="sortKey" class="mini-select" title="排序方式">
+        <option value="recent">最近活动</option>
+        <option value="created">创建时间</option>
+        <option value="tokens">Token</option>
+      </select>
+      <select v-model="rangeKey" class="mini-select" title="时间范围">
+        <option value="all">全部时间</option>
+        <option value="today">今天</option>
+        <option value="week">本周</option>
+        <option value="month">本月</option>
+      </select>
+    </div>
+
     <div class="pane-body">
       <div v-if="!project" class="pane-empty">从左侧选择一个项目</div>
       <div v-else-if="loading && !sessions.length" class="pane-empty">加载中…</div>
       <div v-else-if="!sessions.length" class="pane-empty">这个项目还没有会话</div>
+      <div v-else-if="!visibleSessions.length" class="pane-empty">该时间范围内没有会话</div>
 
       <button
-        v-for="session in sessions"
+        v-for="session in visibleSessions"
         :key="session.id"
         class="session-item"
         :class="{ active: session.id === selectedId }"
@@ -111,6 +144,30 @@ function shortModel(model: string | null): string {
   align-items: center;
   gap: 6px;
   flex: none;
+}
+
+.list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px 6px;
+  flex: none;
+}
+
+.mini-select {
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mini-select:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
 }
 
 .new-btn {

@@ -21,6 +21,9 @@ pub fn run() {
             ipc::session_interrupt,
             ipc::session_permissions,
             ipc::session_permission_reply,
+            ipc::search_stats,
+            ipc::search_update_index,
+            ipc::search_query,
         ])
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));

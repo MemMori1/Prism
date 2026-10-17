@@ -5,6 +5,8 @@ import type {
   PermissionRequest,
   ProjectItem,
   RuntimeStatus,
+  SearchHit,
+  SearchStats,
   SessionSummary,
   TimelinePage,
   ToolDetail,
@@ -33,4 +35,22 @@ export const api = {
     invoke<PermissionRequest[]>('session_permissions', { sessionId }),
   sessionPermissionReply: (sessionId: string, requestId: string, decision: string) =>
     invoke<void>('session_permission_reply', { sessionId, requestId, decision }),
+  searchStats: () => invoke<SearchStats>('search_stats'),
+  searchUpdateIndex: () => invoke<SearchStats>('search_update_index'),
+  searchQuery: (
+    term: string,
+    options?: {
+      projectId?: string | null
+      since?: number | null
+      onlyTitle?: boolean
+      limit?: number
+    },
+  ) =>
+    invoke<SearchHit[]>('search_query', {
+      term,
+      projectId: options?.projectId ?? null,
+      since: options?.since ?? null,
+      onlyTitle: options?.onlyTitle ?? false,
+      limit: options?.limit ?? null,
+    }),
 }

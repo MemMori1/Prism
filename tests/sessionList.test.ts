@@ -1,0 +1,81 @@
+import { describe, expect, it } from 'vitest'
+import { filterSessionsByRange, rangeToSince, sortSessions } from '../src/sessionList'
+import type { SessionSummary } from '../src/types'
+
+function makeSession(partial: Partial<SessionSummary> & { id: string }): SessionSummary {
+  return {
+    projectId: 'p',
+    title: partial.id,
+    directory: '/tmp',
+    model: null,
+    cost: 0,
+    tokensInput: 0,
+    tokensOutput: 0,
+    tokensReasoning: 0,
+    timeCreated: 0,
+    timeUpdated: 0,
+    ...partial,
+  }
+}
+
+describe('sortSessions', () => {
+  const sessions = [
+    makeSession({ id: 'a', timeUpdated: 100, timeCreated: 300, tokensOutput: 10 }),
+    makeSession({ id: 'b', timeUpdated: 300, timeCreated: 100, tokensInput: 100 }),
+    makeSession({ id: 'c', timeUpdated: 200, timeCreated: 200, tokensReasoning: 50 }),
+  ]
+
+  it('最近活动排序', () => {
+    expect(sortSessions(sessions, 'recent').map(s => s.id)).toEqual(['b', 'c', 'a'])
+  })
+
+  it('创建时间排序', () => {
+    expect(sortSessions(sessions, 'created').map(s => s.id)).toEqual(['a', 'c', 'b'])
+  })
+
+  it('Token 总量排序', () => {
+    expect(sortSessions(sessions, 'tokens').map(s => s.id)).toEqual(['b', 'c', 'a'])
+  })
+
+  it('不改动原数组', () => {
+    const before = sessions.map(s => s.id)
+    sortSessions(sessions, 'created')
+    expect(sessions.map(s => s.id)).toEqual(before)
+  })
+})
+
+describe('rangeToSince', () => {
+  // 2026-10-17 是周六（本地时区）
+  const now = new Date(2026, 9, 17, 15, 30, 0).getTime()
+
+  it('all → null', () => {
+    expect(rangeToSince('all', now)).toBeNull()
+  })
+
+  it('today → 当天 0 点', () => {
+    expect(rangeToSince('today', now)).toBe(new Date(2026, 9, 17, 0, 0, 0).getTime())
+  })
+
+  it('week → 本周一 0 点', () => {
+    expect(rangeToSince('week', now)).toBe(new Date(2026, 9, 12, 0, 0, 0).getTime())
+  })
+
+  it('month → 当月 1 日 0 点', () => {
+    expect(rangeToSince('month', now)).toBe(new Date(2026, 9, 1, 0, 0, 0).getTime())
+  })
+})
+
+describe('filterSessionsByRange', () => {
+  const sessions = [
+    makeSession({ id: 'old', timeUpdated: 100 }),
+    makeSession({ id: 'new', timeUpdated: 500 }),
+  ]
+
+  it('null 表示全部', () => {
+    expect(filterSessionsByRange(sessions, null)).toHaveLength(2)
+  })
+
+  it('按更新时间的下限过滤', () => {
+    expect(filterSessionsByRange(sessions, 200).map(s => s.id)).toEqual(['new'])
+  })
+})

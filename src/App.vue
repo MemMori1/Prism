@@ -1,24 +1,45 @@
 <script setup lang="ts">
 import { onMounted, ref, computed } from 'vue'
 import { api } from './api'
-import type { EngineHealth, ProjectItem, SessionSummary } from './types'
+import type { EngineHealth, ProjectItem, SearchHit, SessionSummary } from './types'
 import ProjectsPane from './components/ProjectsPane.vue'
 import SessionsPane from './components/SessionsPane.vue'
 import SessionView from './components/SessionView.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import WorkbenchPane from './components/WorkbenchPane.vue'
+import SearchPane from './components/SearchPane.vue'
 
 const health = ref<EngineHealth | null>(null)
 const error = ref<string | null>(null)
 const showSettings = ref(false)
 
-type AppView = 'archive' | 'workbench'
+type AppView = 'archive' | 'workbench' | 'search'
 const VIEW_KEY = 'prism-view'
+const storedView = localStorage.getItem(VIEW_KEY)
 const view = ref<AppView>(
-  localStorage.getItem(VIEW_KEY) === 'workbench' ? 'workbench' : 'archive',
+  storedView === 'workbench' || storedView === 'search' ? storedView : 'archive',
 )
 const workbenchRef = ref<InstanceType<typeof WorkbenchPane> | null>(null)
 const wbStatus = ref<{ running: number; waiting: number }>({ running: 0, waiting: 0 })
+
+/** 搜索结果定位：切到归档、选中会话并滚动到命中消息。 */
+const pendingJump = ref<{ sessionId: string; messageId: string } | null>(null)
+const jumpTarget = computed(() =>
+  pendingJump.value && pendingJump.value.sessionId === selectedSessionId.value
+    ? pendingJump.value.messageId
+    : null,
+)
+
+async function openSearchHit(hit: SearchHit): Promise<void> {
+  setView('archive')
+  if (selectedProjectId.value !== hit.projectId) {
+    await selectProject(hit.projectId)
+  }
+  selectSession(hit.sessionId)
+  pendingJump.value = hit.messageId
+    ? { sessionId: hit.sessionId, messageId: hit.messageId }
+    : null
+}
 
 function setView(next: AppView) {
   view.value = next
@@ -203,6 +224,14 @@ onMounted(reload)
             :title="`${wbStatus.running} 个会话执行中`"
           />
         </button>
+        <button
+          class="view-btn"
+          :class="{ active: view === 'search' }"
+          title="全文搜索：检索全部会话内容（本地索引，支持中文子串）"
+          @click="setView('search')"
+        >
+          搜索
+        </button>
       </div>
 
       <button
@@ -246,9 +275,11 @@ onMounted(reload)
         <SessionView
           :session="selectedSession"
           :has-project="!!selectedProject"
+          :jump-message-id="jumpTarget"
           @error="reportError"
           @settled="onSessionSettled"
           @open-workbench="openInWorkbench"
+          @jump-consumed="pendingJump = null"
         />
       </div>
       <WorkbenchPane
@@ -258,6 +289,12 @@ onMounted(reload)
         @error="reportError"
         @settled="onSessionSettled"
         @status="wbStatus = $event"
+      />
+      <SearchPane
+        v-show="view === 'search'"
+        :projects="projects"
+        @error="reportError"
+        @open-hit="openSearchHit"
       />
     </div>
 

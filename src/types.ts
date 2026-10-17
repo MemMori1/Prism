@@ -94,3 +94,23 @@ export interface EngineEvent {
   type: string
   data: Record<string, unknown> | null
 }
+
+/** 搜索命中（Prism 自有索引）。 */
+export interface SearchHit {
+  messageId: string | null
+  sessionId: string
+  sessionTitle: string | null
+  projectId: string
+  role: string | null
+  seq: number | null
+  timeCreated: number
+  /** 命中片段；高亮段用 \u0001 / \u0002 包裹。 */
+  snippet: string
+}
+
+/** 搜索索引状态。 */
+export interface SearchStats {
+  indexedSessions: number
+  indexedMessages: number
+  updatedAt: number
+}

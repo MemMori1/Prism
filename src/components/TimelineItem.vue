@@ -6,11 +6,17 @@ import ToolCard from './ToolCard.vue'
 defineProps<{
   record: TimelineRecord
   sessionId: string
+  /** 搜索定位命中的消息：短暂高亮。 */
+  highlighted?: boolean
 }>()
 </script>
 
 <template>
-  <div class="record" :class="`role-${record.role}`">
+  <div
+    class="record"
+    :class="[`role-${record.role}`, { highlighted }]"
+    :data-message-id="record.id"
+  >
     <!-- 用户消息：气泡 -->
     <template v-if="record.role === 'user'">
       <div class="user-bubble">
@@ -62,6 +68,14 @@ defineProps<{
 .record {
   display: flex;
   flex-direction: column;
+}
+
+/* 搜索结果定位：目标消息短暂高亮。 */
+.record.highlighted {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 5px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
 .role-user {

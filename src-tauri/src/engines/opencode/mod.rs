@@ -3,3 +3,4 @@
 pub mod db;
 pub mod locator;
 pub mod runtime;
+pub mod search;
