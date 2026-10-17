@@ -64,6 +64,17 @@ pub async fn list_sessions(
     .map_err(|cause| cause.to_string())?
 }
 
+/// 按 id 读取单个会话概要（工作台恢复 / 刷新列时用）。
+#[tauri::command]
+pub async fn session_summary(session_id: String) -> Result<Option<SessionSummary>, String> {
+    let db_path = opencode_db_path()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        opencode::db::get_session(&db_path, &session_id)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
 #[tauri::command]
 pub async fn read_timeline(
     session_id: String,

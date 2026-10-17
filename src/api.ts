@@ -17,6 +17,8 @@ export const api = {
   listProjects: () => invoke<ProjectItem[]>('list_projects'),
   listSessions: (projectId: string) =>
     invoke<SessionSummary[]>('list_sessions', { projectId }),
+  sessionSummary: (sessionId: string) =>
+    invoke<SessionSummary | null>('session_summary', { sessionId }),
   readTimeline: (sessionId: string, beforeSeq?: number) =>
     invoke<TimelinePage>('read_timeline', { sessionId, beforeSeq: beforeSeq ?? null }),
   readToolDetail: (sessionId: string, messageId: string, callId: string) =>

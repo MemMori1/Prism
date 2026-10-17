@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row};
 use serde_json::Value;
 
 use crate::engines::core::{
@@ -90,26 +90,45 @@ pub fn list_sessions(db_path: &Path, project_id: &str, limit: i64) -> DbResult<V
         .map_err(|cause| format!("查询会话失败：{cause}"))?;
 
     let rows = statement
-        .query_map(params![project_id, limit], |row| {
-            let raw_model: Option<String> = row.get(4)?;
-            Ok(SessionSummary {
-                id: row.get(0)?,
-                project_id: row.get(1)?,
-                title: row.get(2)?,
-                directory: row.get(3)?,
-                model: raw_model.as_deref().and_then(parse_model),
-                cost: row.get(5)?,
-                tokens_input: row.get(6)?,
-                tokens_output: row.get(7)?,
-                tokens_reasoning: row.get(8)?,
-                time_created: row.get(9)?,
-                time_updated: row.get(10)?,
-            })
-        })
+        .query_map(params![project_id, limit], map_session_row)
         .map_err(|cause| format!("查询会话失败：{cause}"))?;
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|cause| format!("读取会话失败：{cause}"))
+}
+
+/// 按 id 读取单个会话（工作台恢复列时用；不限制父级 / 归档状态）。
+pub fn get_session(db_path: &Path, session_id: &str) -> DbResult<Option<SessionSummary>> {
+    let connection = open_readonly(db_path)?;
+    connection
+        .query_row(
+            "SELECT id, project_id, title, directory, model, cost,
+                    tokens_input, tokens_output, tokens_reasoning,
+                    time_created, time_updated
+             FROM session_v2
+             WHERE id = ?1",
+            params![session_id],
+            map_session_row,
+        )
+        .optional()
+        .map_err(|cause| format!("查询会话失败：{cause}"))
+}
+
+fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
+    let raw_model: Option<String> = row.get(4)?;
+    Ok(SessionSummary {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        directory: row.get(3)?,
+        model: raw_model.as_deref().and_then(parse_model),
+        cost: row.get(5)?,
+        tokens_input: row.get(6)?,
+        tokens_output: row.get(7)?,
+        tokens_reasoning: row.get(8)?,
+        time_created: row.get(9)?,
+        time_updated: row.get(10)?,
+    })
 }
 
 /// 会话时间线分页：从最新往回取一页，按时间正序返回。
@@ -600,6 +619,15 @@ mod tests {
             "会话: {} 标题={:?} 模型={:?}",
             session.id, session.title, session.model
         );
+
+        // 单会话读取：与列表结果一致；不存在的 id 返回 None。
+        let one = get_session(&db_path, &session.id).expect("get_session");
+        let one = one.expect("真实会话应能按 id 读到");
+        assert_eq!(one.id, session.id);
+        assert_eq!(one.title, session.title);
+        assert!(get_session(&db_path, "ses_prism_not_exist")
+            .expect("get_session missing")
+            .is_none());
 
         let page = read_timeline(&db_path, &session.id, None, 150).expect("read_timeline");
         println!(

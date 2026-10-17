@@ -6,10 +6,35 @@ import ProjectsPane from './components/ProjectsPane.vue'
 import SessionsPane from './components/SessionsPane.vue'
 import SessionView from './components/SessionView.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import WorkbenchPane from './components/WorkbenchPane.vue'
 
 const health = ref<EngineHealth | null>(null)
 const error = ref<string | null>(null)
 const showSettings = ref(false)
+
+type AppView = 'archive' | 'workbench'
+const VIEW_KEY = 'prism-view'
+const view = ref<AppView>(
+  localStorage.getItem(VIEW_KEY) === 'workbench' ? 'workbench' : 'archive',
+)
+const workbenchRef = ref<InstanceType<typeof WorkbenchPane> | null>(null)
+const wbStatus = ref<{ running: number; waiting: number }>({ running: 0, waiting: 0 })
+
+function setView(next: AppView) {
+  view.value = next
+  try {
+    localStorage.setItem(VIEW_KEY, next)
+  } catch {
+    // 存储失败不影响使用。
+  }
+}
+
+/** 从归档「⇥ 工作台」按钮打开：开出对应列并切到工作台。 */
+function openInWorkbench(sessionId: string) {
+  const summary = sessions.value.find(item => item.id === sessionId) ?? null
+  workbenchRef.value?.openColumn(sessionId, summary ?? undefined)
+  setView('workbench')
+}
 
 const projects = ref<ProjectItem[]>([])
 const projectsLoading = ref(false)
@@ -149,6 +174,37 @@ onMounted(reload)
         <span class="brand-name">Prism</span>
       </div>
 
+      <div class="view-switch">
+        <button
+          class="view-btn"
+          :class="{ active: view === 'archive' }"
+          title="历史浏览：项目 / 会话 / 时间线"
+          @click="setView('archive')"
+        >
+          归档
+        </button>
+        <button
+          class="view-btn"
+          :class="{ active: view === 'workbench' }"
+          title="多列并行指挥：同时盯着多个跑着的会话"
+          @click="setView('workbench')"
+        >
+          工作台
+          <span
+            v-if="wbStatus.waiting"
+            class="switch-badge"
+            :title="`${wbStatus.waiting} 个权限请求等待审批`"
+          >
+            {{ wbStatus.waiting }}
+          </span>
+          <span
+            v-else-if="wbStatus.running"
+            class="switch-dot"
+            :title="`${wbStatus.running} 个会话执行中`"
+          />
+        </button>
+      </div>
+
       <button
         v-if="health"
         class="engine-chip"
@@ -171,26 +227,37 @@ onMounted(reload)
     </transition>
 
     <div class="panes">
-      <ProjectsPane
+      <div v-show="view === 'archive'" class="archive-view">
+        <ProjectsPane
+          :projects="projects"
+          :selected-id="selectedProjectId"
+          :loading="projectsLoading"
+          @select="selectProject"
+        />
+        <SessionsPane
+          :sessions="sessions"
+          :selected-id="selectedSessionId"
+          :loading="sessionsLoading"
+          :project="selectedProject"
+          :creating="creating"
+          @select="selectSession"
+          @create="createSession"
+        />
+        <SessionView
+          :session="selectedSession"
+          :has-project="!!selectedProject"
+          @error="reportError"
+          @settled="onSessionSettled"
+          @open-workbench="openInWorkbench"
+        />
+      </div>
+      <WorkbenchPane
+        v-show="view === 'workbench'"
+        ref="workbenchRef"
         :projects="projects"
-        :selected-id="selectedProjectId"
-        :loading="projectsLoading"
-        @select="selectProject"
-      />
-      <SessionsPane
-        :sessions="sessions"
-        :selected-id="selectedSessionId"
-        :loading="sessionsLoading"
-        :project="selectedProject"
-        :creating="creating"
-        @select="selectSession"
-        @create="createSession"
-      />
-      <SessionView
-        :session="selectedSession"
-        :has-project="!!selectedProject"
         @error="reportError"
         @settled="onSessionSettled"
+        @status="wbStatus = $event"
       />
     </div>
 
@@ -232,6 +299,62 @@ onMounted(reload)
   font-weight: 650;
   font-size: 14px;
   letter-spacing: 0.2px;
+}
+
+.view-switch {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+.view-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 12px;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.15s ease;
+}
+
+.view-btn:hover {
+  color: var(--text);
+}
+
+.view-btn.active {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgb(18 16 34 / 0.08);
+}
+
+.switch-badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--amber);
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 700;
+}
+
+.switch-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: switch-pulse 1.6s ease infinite;
+}
+
+@keyframes switch-pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .engine-chip {
@@ -329,6 +452,13 @@ onMounted(reload)
 .panes {
   display: flex;
   flex: 1;
+  min-height: 0;
+}
+
+.archive-view {
+  display: flex;
+  flex: 1;
+  min-width: 0;
   min-height: 0;
 }
 

@@ -20,11 +20,15 @@ import LiveTurnView from './LiveTurn.vue'
 const props = defineProps<{
   session: SessionSummary | null
   hasProject: boolean
+  /** 工作台列内嵌模式：隐藏会话头（由列头承担标题 / 状态）。 */
+  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'error', message: string): void
   (e: 'settled'): void
+  (e: 'openWorkbench', sessionId: string): void
+  (e: 'status', status: { running: boolean; waiting: number }): void
 }>()
 
 const scroller = ref<HTMLElement | null>(null)
@@ -50,8 +54,16 @@ const replyingPermission = ref<string | null>(null)
 const stick = ref(true)
 
 const running = computed(() => live.value.running)
+const waiting = computed(() => pendingPermissions.value.length)
 const showLive = computed(
   () => live.value.running || live.value.parts.length > 0 || !!live.value.error,
+)
+
+// 运行 / 待审批状态上报：工作台列头与全局审批角标用。
+watch(
+  [running, waiting],
+  () => emit('status', { running: running.value, waiting: waiting.value }),
+  { immediate: true },
 )
 
 const TERMINAL_EVENTS = new Set([
@@ -378,7 +390,7 @@ watch(
 </script>
 
 <template>
-  <main class="session-view">
+  <main class="session-view" :class="{ embedded }">
     <template v-if="!session">
       <div class="placeholder">
         <div class="placeholder-mark">◆</div>
@@ -388,8 +400,17 @@ watch(
     </template>
 
     <template v-else>
-      <header class="session-header">
-        <h1 class="session-title">{{ session.title || '未命名会话' }}</h1>
+      <header v-if="!embedded" class="session-header">
+        <div class="session-heading">
+          <h1 class="session-title">{{ session.title || '未命名会话' }}</h1>
+          <button
+            class="open-wb-btn"
+            title="在工作台打开：多列并行盯着多个会话"
+            @click="emit('openWorkbench', session.id)"
+          >
+            ⇥ 工作台
+          </button>
+        </div>
         <div class="session-meta">
           <span class="meta-dir" :title="session.directory">{{ session.directory }}</span>
           <span v-if="session.model" class="meta-chip">{{ session.model }}</span>
@@ -559,13 +580,37 @@ watch(
   background: var(--panel);
 }
 
+.session-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .session-title {
   margin: 0;
+  flex: 1;
+  min-width: 0;
   font-size: 15px;
   font-weight: 650;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.open-wb-btn {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11.5px;
+  transition: all 0.15s ease;
+}
+
+.open-wb-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .session-meta {
@@ -852,5 +897,14 @@ watch(
 .stop-btn:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+/* 工作台列内嵌：更紧凑的内边距 */
+.session-view.embedded .timeline {
+  padding: 10px 12px 28px;
+}
+
+.session-view.embedded .composer {
+  padding: 8px 12px 10px;
 }
 </style>

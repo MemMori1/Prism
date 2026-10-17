@@ -12,6 +12,7 @@ pub fn run() {
             ipc::cli_version,
             ipc::list_projects,
             ipc::list_sessions,
+            ipc::session_summary,
             ipc::read_timeline,
             ipc::read_tool_detail,
             ipc::runtime_status,
