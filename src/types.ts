@@ -142,3 +142,32 @@ export interface AssetFile {
   content: string
   truncated: boolean
 }
+
+/** MCP 服务（三引擎配置真相位置解析，只读）。 */
+export interface McpServer {
+  engine: string
+  name: string
+  transport: 'stdio' | 'http'
+  /** stdio：可执行文件 */
+  command: string | null
+  args: string[]
+  /** http：远端地址 */
+  url: string | null
+  disabled: boolean
+  /** 环境变量键名（不暴露值） */
+  envKeys: string[]
+  /** 定义所在配置文件 */
+  source: string
+  scope: 'user' | 'project'
+  project: string | null
+  /** stdio：命令是否可解析（绝对路径存在 / PATH 可找到） */
+  commandExists: boolean | null
+}
+
+/** MCP 探活结果（仅 http GET；任何 HTTP 响应都算可达）。 */
+export interface McpProbeResult {
+  ok: boolean
+  status: number | null
+  latencyMs: number
+  error: string | null
+}

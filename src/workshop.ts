@@ -1,4 +1,4 @@
-import type { AssetItem, AssetKind } from './types'
+import type { AssetItem, AssetKind, McpServer } from './types'
 
 /** 工坊展示辅助：标签、分组与归属文案（纯函数，可单测）。 */
 
@@ -68,7 +68,7 @@ export function groupAssets(items: AssetItem[]): AssetGroup[] {
 }
 
 /** 归属文案：用户 / 内置 / 项目 · 目录名。 */
-export function scopeLabel(item: AssetItem): string {
+export function scopeLabel(item: { scope: string; project: string | null }): string {
   if (item.scope === 'user') {
     return '用户'
   }
@@ -77,4 +77,37 @@ export function scopeLabel(item: AssetItem): string {
   }
   const name = item.project?.split('/').filter(Boolean).pop()
   return name ? `项目 · ${name}` : '项目'
+}
+
+export interface McpGroup {
+  engine: string
+  label: string
+  items: McpServer[]
+}
+
+/** MCP 服务按引擎分组（引擎序固定）。 */
+export function groupMcp(servers: McpServer[]): McpGroup[] {
+  const groups = new Map<string, McpGroup>()
+  for (const server of servers) {
+    const existing = groups.get(server.engine)
+    if (existing) {
+      existing.items.push(server)
+    } else {
+      groups.set(server.engine, {
+        engine: server.engine,
+        label: engineLabel(server.engine),
+        items: [server],
+      })
+    }
+  }
+  return [...groups.values()].sort(
+    (a, b) => orderOf(ENGINE_ORDER, a.engine) - orderOf(ENGINE_ORDER, b.engine),
+  )
+}
+
+/** stdio 服务的命令行展示（可执行文件 + 参数）。 */
+export function commandLine(server: McpServer): string {
+  return [server.command, ...server.args]
+    .filter((part): part is string => Boolean(part))
+    .join(' ')
 }

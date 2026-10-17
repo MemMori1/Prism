@@ -28,6 +28,8 @@ pub fn run() {
             ipc::workshop_assets,
             ipc::workshop_read,
             ipc::open_path,
+            ipc::workshop_mcp,
+            ipc::mcp_probe,
         ])
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));

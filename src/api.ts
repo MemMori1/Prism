@@ -4,6 +4,8 @@ import type {
   AssetItem,
   CreatedSession,
   EngineHealth,
+  McpProbeResult,
+  McpServer,
   PermissionRequest,
   ProjectItem,
   RuntimeStatus,
@@ -58,4 +60,6 @@ export const api = {
   workshopAssets: () => invoke<AssetItem[]>('workshop_assets'),
   workshopRead: (path: string) => invoke<AssetFile>('workshop_read', { path }),
   openPath: (path: string) => invoke<void>('open_path', { path }),
+  workshopMcp: () => invoke<McpServer[]>('workshop_mcp'),
+  mcpProbe: (url: string) => invoke<McpProbeResult>('mcp_probe', { url }),
 }

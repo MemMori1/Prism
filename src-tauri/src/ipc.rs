@@ -12,7 +12,7 @@ use crate::engines::core::{
 };
 use crate::engines::opencode;
 use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runtime, RuntimeStatus};
-use crate::engines::workshop;
+use crate::engines::{mcp, workshop};
 
 fn opencode_db_path() -> Result<PathBuf, String> {
     opencode::locator::database_path().ok_or_else(|| {
@@ -597,4 +597,36 @@ pub async fn open_path(path: String) -> Result<(), String> {
         .spawn()
         .map_err(|cause| format!("打开失败：{cause}"))?;
     Ok(())
+}
+
+/// 工坊：MCP 服务清单（三引擎配置真相位置，只读解析；环境变量只给键名）。
+#[tauri::command]
+pub async fn workshop_mcp() -> Result<Vec<mcp::McpServer>, String> {
+    let servers = tauri::async_runtime::spawn_blocking(|| {
+        let roots = mcp::McpRoots {
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            opencode_config: opencode::locator::config_dir(),
+            codex_home: codex::locator::codex_home(),
+        };
+        mcp::collect(&roots, &known_project_cwds())
+    })
+    .await
+    .map_err(|cause| cause.to_string())?;
+    #[cfg(debug_assertions)]
+    println!("[prism] workshop_mcp -> {} 个服务", servers.len());
+    Ok(servers)
+}
+
+/// MCP 探活：只对 http 发 GET（任何 HTTP 响应=可达），绝不 spawn stdio。
+#[tauri::command]
+pub async fn mcp_probe(url: String) -> Result<mcp::ProbeResult, String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("探活仅支持 http(s) 地址".to_string());
+    }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        mcp::probe_http(&url, std::time::Duration::from_secs(4))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?;
+    Ok(result)
 }
