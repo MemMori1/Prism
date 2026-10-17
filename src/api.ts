@@ -33,8 +33,12 @@ export const api = {
     invoke<SessionSummary[]>('list_sessions', { projectId }),
   sessionSummary: (sessionId: string) =>
     invoke<SessionSummary | null>('session_summary', { sessionId }),
-  readTimeline: (sessionId: string, beforeSeq?: number) =>
-    invoke<TimelinePage>('read_timeline', { sessionId, beforeSeq: beforeSeq ?? null }),
+  readTimeline: (sessionId: string, beforeSeq?: number, limit?: number) =>
+    invoke<TimelinePage>('read_timeline', {
+      sessionId,
+      beforeSeq: beforeSeq ?? null,
+      limit: limit ?? null,
+    }),
   readToolDetail: (sessionId: string, messageId: string, callId: string) =>
     invoke<ToolDetail>('read_tool_detail', { sessionId, messageId, callId }),
   sessionLedger: (sessionId: string) =>

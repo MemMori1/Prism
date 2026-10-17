@@ -29,12 +29,13 @@ import SearchPane from './components/SearchPane.vue'
 import WorkshopPane from './components/WorkshopPane.vue'
 import AutomationPane from './components/AutomationPane.vue'
 import UsagePane from './components/UsagePane.vue'
+import RacePane from './components/RacePane.vue'
 
 const health = ref<EngineHealth[]>([])
 const error = ref<string | null>(null)
 const showSettings = ref(false)
 
-type AppView = 'archive' | 'workbench' | 'search' | 'usage' | 'workshop' | 'automation'
+type AppView = 'archive' | 'workbench' | 'search' | 'usage' | 'workshop' | 'automation' | 'race'
 const VIEW_KEY = 'prism-view'
 const storedView = localStorage.getItem(VIEW_KEY)
 const view = ref<AppView>(
@@ -42,7 +43,8 @@ const view = ref<AppView>(
     storedView === 'search' ||
     storedView === 'usage' ||
     storedView === 'workshop' ||
-    storedView === 'automation'
+    storedView === 'automation' ||
+    storedView === 'race'
     ? storedView
     : 'archive',
 )
@@ -372,6 +374,14 @@ onBeforeUnmount(stopRoutineEvents)
         </button>
         <button
           class="view-btn"
+          :class="{ active: view === 'race' }"
+          title="赛马：同一问题广播多个引擎，答案 / 用时 / token / 成本并排对比"
+          @click="setView('race')"
+        >
+          赛马
+        </button>
+        <button
+          class="view-btn"
           :class="{ active: view === 'search' }"
           title="全文搜索：检索全部会话内容（本地索引，支持中文子串）"
           @click="setView('search')"
@@ -513,6 +523,12 @@ onBeforeUnmount(stopRoutineEvents)
         :projects="projects"
         @error="reportError"
         @open-hit="openSearchHit"
+      />
+      <RacePane
+        v-show="view === 'race'"
+        :projects="projects"
+        @error="reportError"
+        @open-session="openSessionByLocation"
       />
       <UsagePane v-show="view === 'usage'" @error="reportError" />
       <WorkshopPane v-show="view === 'workshop'" @error="reportError" />
