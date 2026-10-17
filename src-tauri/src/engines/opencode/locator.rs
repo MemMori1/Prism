@@ -87,3 +87,33 @@ fn which(binary: &str) -> Option<PathBuf> {
         .map(|dir| dir.join(binary))
         .find(|path| path.is_file())
 }
+
+/// 读取 CLI 版本（`--version` 输出首个非空行）；失败返回 None。
+pub fn cli_version(cli: &Path) -> Option<String> {
+    let output = std::process::Command::new(cli).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_version_reads_output() {
+        // /bin/echo --version 原样打印参数
+        assert_eq!(
+            cli_version(Path::new("/bin/echo")).as_deref(),
+            Some("--version")
+        );
+        // 无输出视为不可用；不存在的文件不报错
+        assert!(cli_version(Path::new("/usr/bin/true")).is_none());
+        assert!(cli_version(Path::new("/nonexistent/prism-test")).is_none());
+    }
+}

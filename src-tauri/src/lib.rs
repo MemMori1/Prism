@@ -9,6 +9,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             ipc::engine_health,
+            ipc::cli_version,
             ipc::list_projects,
             ipc::list_sessions,
             ipc::read_timeline,

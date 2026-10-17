@@ -5,9 +5,11 @@ import type { EngineHealth, ProjectItem, SessionSummary } from './types'
 import ProjectsPane from './components/ProjectsPane.vue'
 import SessionsPane from './components/SessionsPane.vue'
 import SessionView from './components/SessionView.vue'
+import SettingsDialog from './components/SettingsDialog.vue'
 
 const health = ref<EngineHealth | null>(null)
 const error = ref<string | null>(null)
+const showSettings = ref(false)
 
 const projects = ref<ProjectItem[]>([])
 const projectsLoading = ref(false)
@@ -147,13 +149,20 @@ onMounted(reload)
         <span class="brand-name">Prism</span>
       </div>
 
-      <div v-if="health" class="engine-chip" :class="`tone-${engineStatus.tone}`" :title="health.databasePath ?? ''">
+      <button
+        v-if="health"
+        class="engine-chip"
+        :class="`tone-${engineStatus.tone}`"
+        :title="`${health.cliPath ?? ''}\n点击查看引擎详情`"
+        @click="showSettings = true"
+      >
         <span class="dot" />
         <span>OpenCode · {{ engineStatus.label }}</span>
-      </div>
+      </button>
 
       <div class="topbar-spacer" />
 
+      <button class="settings-btn" title="设置" @click="showSettings = true">⚙</button>
       <button class="refresh-btn" :disabled="projectsLoading" @click="reload">刷新</button>
     </header>
 
@@ -184,6 +193,8 @@ onMounted(reload)
         @settled="onSessionSettled"
       />
     </div>
+
+    <SettingsDialog v-if="showSettings" @close="showSettings = false" />
   </div>
 </template>
 
@@ -233,6 +244,12 @@ onMounted(reload)
   background: var(--panel-2);
   color: var(--muted);
   font-size: 12px;
+  transition: all 0.15s ease;
+}
+
+.engine-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
 }
 
 .engine-chip .dot {
@@ -275,6 +292,22 @@ onMounted(reload)
 .refresh-btn:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.settings-btn {
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  transition: all 0.15s ease;
+}
+
+.settings-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
 }
 
 .error-banner {

@@ -614,14 +614,14 @@ fn event_loop(
                 read_event_stream(&inner, response, &shutdown);
                 thread::sleep(STREAM_RETRY_DELAY);
             }
-            Ok(response) => {
+            Ok(_response) => {
                 #[cfg(debug_assertions)]
-                println!("[prism] 事件流被拒绝：{}", response.status());
+                println!("[prism] 事件流被拒绝：{}", _response.status());
                 thread::sleep(STREAM_RETRY_DELAY);
             }
-            Err(cause) => {
+            Err(_cause) => {
                 #[cfg(debug_assertions)]
-                println!("[prism] 事件流连接失败：{cause}");
+                println!("[prism] 事件流连接失败：{_cause}");
                 thread::sleep(STREAM_RETRY_DELAY);
             }
         }

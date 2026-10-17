@@ -5,3 +5,7 @@ dist-ssr
 .DS_Store
 src-tauri/target
 src-tauri/gen
+
+# 桌面为主：移动端图标由 `tauri icon` 重新生成，不入库
+src-tauri/icons/android
+src-tauri/icons/ios

@@ -39,6 +39,7 @@ const loadingOlder = ref(false)
 const live = ref<LiveTurn>(createLiveTurn())
 const liveStartedAt = ref<number | null>(null)
 const draft = ref('')
+const composerInput = ref<HTMLTextAreaElement | null>(null)
 const sending = ref(false)
 const stopping = ref(false)
 /** 挂起的权限请求（引擎阻塞等待审批）。 */
@@ -338,6 +339,18 @@ function onEnter(event: KeyboardEvent) {
   }
 }
 
+/** 输入框随内容长高（约 8 行封顶）。 */
+function autoGrow() {
+  const el = composerInput.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${Math.min(el.scrollHeight, 172)}px`
+}
+
+watch(draft, () => {
+  void nextTick(autoGrow)
+})
+
 watch(
   () => props.session?.id,
   sessionId => {
@@ -466,6 +479,7 @@ watch(
         </div>
         <div class="composer-box">
           <textarea
+            ref="composerInput"
             v-model="draft"
             class="composer-input"
             rows="3"
@@ -476,6 +490,7 @@ watch(
                 : '发一条指令…（Enter 发送，Shift+Enter 换行）'
             "
             :disabled="sending"
+            @input="autoGrow"
             @keydown.enter="onEnter"
           />
           <div class="composer-actions">
@@ -767,6 +782,8 @@ watch(
 .composer-input {
   width: 100%;
   resize: none;
+  max-height: 172px;
+  overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel-2);

@@ -116,6 +116,18 @@ pub async fn read_tool_detail(
     Ok(detail)
 }
 
+/// OpenCode CLI 版本（`--version` 首行；未安装或读取失败返回 null）。
+#[tauri::command]
+pub async fn cli_version() -> Result<Option<String>, String> {
+    let cli = opencode::locator::cli_path();
+    let version = tauri::async_runtime::spawn_blocking(move || {
+        cli.and_then(|path| opencode::locator::cli_version(&path))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?;
+    Ok(version)
+}
+
 // ---------------------------------------------------------------- 运行轴
 
 /// 运行轴状态（不触发 serve 启动）。

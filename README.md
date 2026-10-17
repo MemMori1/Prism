@@ -1,6 +1,7 @@
 # Prism
 
-> 多引擎 AI 编码 Agent 指挥台 —— 把不同引擎的会话收进同一面墙：浏览、搜索、并行指挥。
+> 多引擎 AI 编码 Agent 指挥台 —— 把不同引擎的会话收进同一面墙：浏览历史、
+> 发指令、执行中插话、权限审批，都在一处。
 
 Prism 是一个桌面应用（Tauri 2 + Vue 3 + Rust），不自己实现 Agent，
 而是驱动各家官方的 CLI / 本地服务，把引擎差异封在适配器里：
@@ -16,8 +17,12 @@ Prism 是一个桌面应用（Tauri 2 + Vue 3 + Rust），不自己实现 Agent�
 ```bash
 pnpm install
 pnpm tauri dev     # 开发模式（需要 Rust 工具链）
-pnpm tauri build   # 打包
+pnpm test          # 前端单测（vitest）
+pnpm tauri build   # 打包（macOS：.app + .dmg）
 ```
+
+桌面图标为自研生成：`python3 scripts/make-icon.py app-icon.png`，再
+`pnpm tauri icon app-icon.png` 生成全套平台尺寸。
 
 ## 设计原则
 
