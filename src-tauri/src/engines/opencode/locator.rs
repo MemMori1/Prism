@@ -17,6 +17,14 @@ pub fn data_dir() -> Option<PathBuf> {
     home_dir().map(|home| home.join(".local").join("share").join("opencode"))
 }
 
+/// 配置目录：$XDG_CONFIG_HOME/opencode 或 ~/.config/opencode（资产目录所在）。
+pub fn config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(dir).join("opencode"));
+    }
+    home_dir().map(|home| home.join(".config").join("opencode"))
+}
+
 /// opencode.db 位置（存在时才返回）。
 pub fn database_path() -> Option<PathBuf> {
     let path = data_dir()?.join("opencode.db");

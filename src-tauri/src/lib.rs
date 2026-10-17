@@ -25,6 +25,9 @@ pub fn run() {
             ipc::search_stats,
             ipc::search_update_index,
             ipc::search_query,
+            ipc::workshop_assets,
+            ipc::workshop_read,
+            ipc::open_path,
         ])
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));

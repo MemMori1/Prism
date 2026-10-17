@@ -8,16 +8,19 @@ import SessionView from './components/SessionView.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import WorkbenchPane from './components/WorkbenchPane.vue'
 import SearchPane from './components/SearchPane.vue'
+import WorkshopPane from './components/WorkshopPane.vue'
 
 const health = ref<EngineHealth[]>([])
 const error = ref<string | null>(null)
 const showSettings = ref(false)
 
-type AppView = 'archive' | 'workbench' | 'search'
+type AppView = 'archive' | 'workbench' | 'search' | 'workshop'
 const VIEW_KEY = 'prism-view'
 const storedView = localStorage.getItem(VIEW_KEY)
 const view = ref<AppView>(
-  storedView === 'workbench' || storedView === 'search' ? storedView : 'archive',
+  storedView === 'workbench' || storedView === 'search' || storedView === 'workshop'
+    ? storedView
+    : 'archive',
 )
 const workbenchRef = ref<InstanceType<typeof WorkbenchPane> | null>(null)
 const wbStatus = ref<{ running: number; waiting: number }>({ running: 0, waiting: 0 })
@@ -237,6 +240,14 @@ onMounted(reload)
         >
           搜索
         </button>
+        <button
+          class="view-btn"
+          :class="{ active: view === 'workshop' }"
+          title="工坊：引擎资产（技能 / 命令 / 子代理 / 记忆 / 插件）只读浏览"
+          @click="setView('workshop')"
+        >
+          工坊
+        </button>
       </div>
 
       <button
@@ -302,6 +313,7 @@ onMounted(reload)
         @error="reportError"
         @open-hit="openSearchHit"
       />
+      <WorkshopPane v-show="view === 'workshop'" @error="reportError" />
     </div>
 
     <SettingsDialog v-if="showSettings" @close="showSettings = false" />

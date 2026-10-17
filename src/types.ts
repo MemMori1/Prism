@@ -118,3 +118,27 @@ export interface SearchStats {
   indexedMessages: number
   updatedAt: number
 }
+
+/** 工坊资产种类。 */
+export type AssetKind = 'skill' | 'command' | 'agent' | 'memory' | 'plugin'
+
+/** 工坊资产（技能 / 命令 / 子代理 / 记忆 / 插件，只读浏览）。 */
+export interface AssetItem {
+  engine: string
+  kind: AssetKind
+  name: string
+  description: string | null
+  /** 入口文件路径（技能给 SKILL.md；插件给 plugin.json）。 */
+  path: string
+  /** 归属：用户级 / 引擎内置 / 项目级。 */
+  scope: 'user' | 'builtin' | 'project'
+  project: string | null
+  updatedAt: number
+}
+
+/** 资产入口文件内容（工坊右侧预览）。 */
+export interface AssetFile {
+  path: string
+  content: string
+  truncated: boolean
+}

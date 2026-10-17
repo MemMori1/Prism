@@ -1,5 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  AssetFile,
+  AssetItem,
   CreatedSession,
   EngineHealth,
   PermissionRequest,
@@ -53,4 +55,7 @@ export const api = {
       onlyTitle: options?.onlyTitle ?? false,
       limit: options?.limit ?? null,
     }),
+  workshopAssets: () => invoke<AssetItem[]>('workshop_assets'),
+  workshopRead: (path: string) => invoke<AssetFile>('workshop_read', { path }),
+  openPath: (path: string) => invoke<void>('open_path', { path }),
 }

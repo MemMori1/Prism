@@ -12,6 +12,7 @@ use crate::engines::core::{
 };
 use crate::engines::opencode;
 use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runtime, RuntimeStatus};
+use crate::engines::workshop;
 
 fn opencode_db_path() -> Result<PathBuf, String> {
     opencode::locator::database_path().ok_or_else(|| {
@@ -24,6 +25,30 @@ fn codex_state_db_path() -> Result<PathBuf, String> {
     codex::locator::state_db().ok_or_else(|| {
         "未找到 Codex 状态库（~/.codex/state_*.sqlite），请先安装 Codex 并跑过会话。".to_string()
     })
+}
+
+/// 已知项目工作目录：三引擎项目列表合并去重（工坊扫描项目级资产用）。
+pub fn known_project_cwds() -> Vec<String> {
+    let mut cwds: Vec<String> = Vec::new();
+    if let Some(db) = opencode::locator::database_path() {
+        if let Ok(list) = opencode::db::list_projects(&db) {
+            cwds.extend(list.into_iter().map(|item| item.worktree));
+        }
+    }
+    if let Some(db) = codex::locator::state_db() {
+        if let Ok(list) = codex::state::list_projects(&db) {
+            cwds.extend(list.into_iter().map(|item| item.worktree));
+        }
+    }
+    if let Some(root) = claude::locator::projects_dir() {
+        if let Ok(list) = claude::transcript::list_projects(&root) {
+            cwds.extend(list.into_iter().map(|item| item.worktree));
+        }
+    }
+    cwds.sort();
+    cwds.dedup();
+    cwds.retain(|cwd| Path::new(cwd).is_dir());
+    cwds
 }
 
 /// 会话类型判定：Codex 会话（`codex:` 前缀）走 codex 运行轴。
@@ -520,4 +545,56 @@ pub async fn search_query(
     #[cfg(debug_assertions)]
     println!("[prism] search_query -> {} 条", hits.len());
     Ok(hits)
+}
+
+/// 工坊：三引擎资产总览（技能 / 命令 / 子代理 / 记忆 / 插件，只读）。
+#[tauri::command]
+pub async fn workshop_assets() -> Result<Vec<workshop::AssetItem>, String> {
+    let items = tauri::async_runtime::spawn_blocking(|| {
+        let roots = workshop::AssetRoots {
+            opencode_config: opencode::locator::config_dir(),
+            codex_home: codex::locator::codex_home(),
+            claude_dir: claude::locator::config_root(),
+        };
+        workshop::collect(&roots, &known_project_cwds())
+    })
+    .await
+    .map_err(|cause| cause.to_string())?;
+    #[cfg(debug_assertions)]
+    println!("[prism] workshop_assets -> {} 条", items.len());
+    Ok(items)
+}
+
+/// 工坊：读取资产入口文件（预览，超限截断并标记）。
+#[tauri::command]
+pub async fn workshop_read(path: String) -> Result<workshop::AssetFile, String> {
+    let target = path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (content, truncated) = workshop::read_text(Path::new(&target), 200_000)?;
+        Ok(workshop::AssetFile {
+            path: target,
+            content,
+            truncated,
+        })
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 用系统默认程序打开路径（只读操作，不写引擎目录）。
+#[tauri::command]
+pub async fn open_path(path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(format!("路径不存在：{path}"));
+    }
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    std::process::Command::new(opener)
+        .arg(&target)
+        .spawn()
+        .map_err(|cause| format!("打开失败：{cause}"))?;
+    Ok(())
 }
