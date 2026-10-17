@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::engines::codex;
+use crate::engines::codex::runtime::Runtime as CodexRuntime;
 use crate::engines::core::{
     EngineHealth, ProjectItem, SearchHit, SearchStats, SessionSummary, TimelinePage, ToolDetail,
 };
@@ -24,12 +25,9 @@ fn codex_state_db_path() -> Result<PathBuf, String> {
     })
 }
 
-/// Codex 运行轴尚未接入：这些命令对 Codex 会话一律拒绝（浏览不受影响）。
-fn reject_codex_runtime(session_id: &str) -> Result<(), String> {
-    if codex::state::is_codex_session(session_id) {
-        return Err("Codex 会话暂为只读浏览（运行轴开发中），请到 Codex.app 继续对话。".to_string());
-    }
-    Ok(())
+/// 会话类型判定：Codex 会话（`codex:` 前缀）走 codex 运行轴。
+fn is_codex_session(session_id: &str) -> bool {
+    codex::state::is_codex_session(session_id)
 }
 
 /// 全部引擎的健康状态：历史（数据文件）与运行时（CLI）分别探测。
@@ -253,34 +251,50 @@ pub async fn runtime_status(runtime: tauri::State<'_, Runtime>) -> Result<Runtim
     Ok(runtime.status())
 }
 
-/// 在指定目录新建会话（首次调用会启动 serve，可能稍慢）。
+/// 在指定目录新建会话（首次调用会拉起对应引擎的运行轴，可能稍慢）。
 #[tauri::command]
 pub async fn session_create(
     runtime: tauri::State<'_, Runtime>,
+    codex_runtime: tauri::State<'_, CodexRuntime>,
     directory: String,
+    engine: Option<String>,
 ) -> Result<CreatedSession, String> {
     #[cfg(debug_assertions)]
-    println!("[prism] session_create -> {directory}");
+    println!("[prism] session_create -> {directory}（engine={:?}）", engine);
+    if engine.as_deref() == Some("codex") {
+        let codex_runtime = codex_runtime.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || codex_runtime.create_session(&directory))
+            .await
+            .map_err(|cause| cause.to_string())?;
+    }
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || runtime.create_session(&directory))
         .await
         .map_err(|cause| cause.to_string())?
 }
 
-/// 发送一条用户消息，返回用户消息 id。
+/// 发送一条用户消息，返回用户消息 id（Codex 无此 id，返回空串）。
 #[tauri::command]
 pub async fn session_send(
     runtime: tauri::State<'_, Runtime>,
+    codex_runtime: tauri::State<'_, CodexRuntime>,
     session_id: String,
     text: String,
 ) -> Result<String, String> {
-    reject_codex_runtime(&session_id)?;
     #[cfg(debug_assertions)]
     println!(
         "[prism] session_send -> {}（{} 字符）",
         session_id,
         text.chars().count()
     );
+    if is_codex_session(&session_id) {
+        let codex_runtime = codex_runtime.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            codex_runtime.send_prompt(&session_id, &text)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || runtime.send_prompt(&session_id, &text))
         .await
@@ -291,24 +305,38 @@ pub async fn session_send(
 #[tauri::command]
 pub async fn session_interrupt(
     runtime: tauri::State<'_, Runtime>,
+    codex_runtime: tauri::State<'_, CodexRuntime>,
     session_id: String,
 ) -> Result<(), String> {
-    reject_codex_runtime(&session_id)?;
     #[cfg(debug_assertions)]
     println!("[prism] session_interrupt -> {session_id}");
+    if is_codex_session(&session_id) {
+        let codex_runtime = codex_runtime.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || codex_runtime.interrupt(&session_id))
+            .await
+            .map_err(|cause| cause.to_string())?;
+    }
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || runtime.interrupt(&session_id))
         .await
         .map_err(|cause| cause.to_string())?
 }
 
-/// 会话当前挂起的权限请求（选择会话时补拉；serve 未运行则返回空）。
+/// 会话当前挂起的权限请求（选择会话时补拉；运行轴没开则返回空）。
 #[tauri::command]
 pub async fn session_permissions(
     runtime: tauri::State<'_, Runtime>,
+    codex_runtime: tauri::State<'_, CodexRuntime>,
     session_id: String,
 ) -> Result<Vec<PermissionRequest>, String> {
-    reject_codex_runtime(&session_id)?;
+    if is_codex_session(&session_id) {
+        let codex_runtime = codex_runtime.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            codex_runtime.list_permissions(&session_id)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || runtime.list_permissions(&session_id))
         .await
@@ -319,13 +347,21 @@ pub async fn session_permissions(
 #[tauri::command]
 pub async fn session_permission_reply(
     runtime: tauri::State<'_, Runtime>,
+    codex_runtime: tauri::State<'_, CodexRuntime>,
     session_id: String,
     request_id: String,
     decision: String,
 ) -> Result<(), String> {
-    reject_codex_runtime(&session_id)?;
     #[cfg(debug_assertions)]
     println!("[prism] session_permission_reply -> {session_id} {request_id} {decision}");
+    if is_codex_session(&session_id) {
+        let codex_runtime = codex_runtime.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            codex_runtime.permission_reply(&session_id, &request_id, &decision)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         runtime.permission_reply(&session_id, &request_id, &decision)

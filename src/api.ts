@@ -26,8 +26,8 @@ export const api = {
   readToolDetail: (sessionId: string, messageId: string, callId: string) =>
     invoke<ToolDetail>('read_tool_detail', { sessionId, messageId, callId }),
   runtimeStatus: () => invoke<RuntimeStatus>('runtime_status'),
-  sessionCreate: (directory: string) =>
-    invoke<CreatedSession>('session_create', { directory }),
+  sessionCreate: (directory: string, engine?: string) =>
+    invoke<CreatedSession>('session_create', { directory, engine: engine ?? null }),
   sessionSend: (sessionId: string, text: string) =>
     invoke<string>('session_send', { sessionId, text }),
   sessionInterrupt: (sessionId: string) => invoke<void>('session_interrupt', { sessionId }),

@@ -63,8 +63,9 @@ const waiting = computed(() => pendingPermissions.value.length)
 const showLive = computed(
   () => live.value.running || live.value.parts.length > 0 || !!live.value.error,
 )
-/** 非 OpenCode 引擎（如 Codex）暂为只读浏览：运行轴未接入。 */
-const readOnly = computed(() => !!props.session && props.session.engine !== 'opencode')
+/** 已接入运行轴的引擎（其余引擎只能浏览，后续引擎接入时在这里放行）。 */
+const RUNTIME_ENGINES = new Set(['opencode', 'codex'])
+const readOnly = computed(() => !!props.session && !RUNTIME_ENGINES.has(props.session.engine))
 
 // 运行 / 待审批状态上报：工作台列头与全局审批角标用。
 watch(
@@ -515,7 +516,7 @@ watch(
         <div v-if="readOnly" class="readonly-bar">
           <span aria-hidden="true">🔒</span>
           <span>
-            Codex 会话暂为只读浏览（运行轴在开发中）——发消息请到 Codex.app；
+            该引擎暂为只读浏览（运行轴尚在开发）——发消息请到对应应用；
             回到 Prism 点「刷新」即可看到新内容。
           </span>
         </div>

@@ -26,11 +26,10 @@ const emit = defineEmits<{
 const sortKey = ref<SessionSort>('recent')
 const rangeKey = ref<TimeRange>('all')
 
-/** 仅 OpenCode 支持从 Prism 新建会话（Codex 运行轴开发中）。 */
-const canCreate = computed(() => props.project?.engine === 'opencode')
+/** 两个引擎都已接入运行轴：有项目即可新建会话。 */
+const canCreate = computed(() => !!props.project)
 const newButtonTitle = computed(() => {
   if (!props.project) return '先选择项目'
-  if (!canCreate.value) return 'Codex 会话暂只能浏览（运行轴在开发中）'
   return '在当前项目目录新建会话'
 })
 

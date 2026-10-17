@@ -117,7 +117,7 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
           <div class="engine-block">
             <div class="engine-name">
               Codex
-              <span class="engine-tag">历史浏览</span>
+              <span class="engine-tag">浏览 + 运行</span>
             </div>
             <div class="info-row">
               <span class="info-key">状态</span>
@@ -140,13 +140,15 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
             </div>
             <div class="info-row">
               <span class="info-key">说明</span>
-              <span class="info-value">只读浏览已接入；运行时（发消息）在开发中</span>
+              <span class="info-value">
+                浏览与运行均已接入（发消息走本机 codex app-server，继承你的配置）
+              </span>
             </div>
           </div>
         </section>
 
         <section class="settings-section">
-          <div class="section-label">运行轴</div>
+          <div class="section-label">运行轴（OpenCode）</div>
           <div class="info-row">
             <span class="info-key">状态</span>
             <span class="info-value">

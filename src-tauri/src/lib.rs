@@ -1,6 +1,7 @@
 mod engines;
 mod ipc;
 
+use engines::codex::runtime::Runtime as CodexRuntime;
 use engines::opencode::runtime::Runtime;
 use tauri::Manager;
 
@@ -27,6 +28,7 @@ pub fn run() {
         ])
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));
+            app.manage(CodexRuntime::new(app.handle().clone()));
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -35,6 +37,9 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 if let Some(runtime) = app_handle.try_state::<Runtime>() {
                     runtime.shutdown();
+                }
+                if let Some(codex) = app_handle.try_state::<CodexRuntime>() {
+                    codex.shutdown();
                 }
             }
         });

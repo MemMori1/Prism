@@ -139,13 +139,9 @@ const delay = (ms: number) => new Promise(resolve => window.setTimeout(resolve, 
 async function createSession() {
   const project = selectedProject.value
   if (!project || creating.value) return
-  if (project.engine !== 'opencode') {
-    reportError(new Error('Codex 会话的运行轴还在开发中，暂不能从 Prism 新建会话'))
-    return
-  }
   creating.value = true
   try {
-    const created = await api.sessionCreate(project.worktree)
+    const created = await api.sessionCreate(project.worktree, project.engine)
     // DB 写入可能稍有延迟：重试几次让新会话出现在列表里。
     for (let attempt = 0; attempt < 6; attempt += 1) {
       const loaded = await api.listSessions(project.id)
