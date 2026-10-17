@@ -82,6 +82,35 @@ export interface ArtifactData {
   base64?: string
 }
 
+/** 单个会话的增补信息（星标 / 标签 / 自定义标题）。 */
+export interface SessionAnnotation {
+  title?: string
+  starred: boolean
+  tags: string[]
+  updatedAt?: number
+}
+
+/** 标签定义。 */
+export interface TagDef {
+  id: string
+  name: string
+  color: string
+}
+
+/** 档案增补全量存储（后端返回后前端整体替换）。 */
+export interface AnnotationStore {
+  version: number
+  tags: TagDef[]
+  sessions: Record<string, SessionAnnotation>
+}
+
+/** 目录的 git 信息（分支 / 主仓库根 / worktree 标记）。 */
+export interface GitInfo {
+  repoRoot: string | null
+  branch: string | null
+  isWorktree: boolean
+}
+
 export interface TimelinePage {
   records: TimelineRecord[]
   nextCursor: number | null

@@ -1,10 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  AnnotationStore,
   ArtifactData,
   AssetFile,
   AssetItem,
   CreatedSession,
   EngineHealth,
+  GitInfo,
   McpProbeResult,
   McpServer,
   PermissionRequest,
@@ -66,6 +68,30 @@ export const api = {
   workshopRead: (path: string) => invoke<AssetFile>('workshop_read', { path }),
   openPath: (path: string) => invoke<void>('open_path', { path }),
   readArtifact: (path: string) => invoke<ArtifactData>('read_artifact', { path }),
+  annotationsGet: () => invoke<AnnotationStore>('annotations_get'),
+  annotationUpdate: (
+    sessionId: string,
+    patch: { title?: string; starred?: boolean; tags?: string[] },
+  ) =>
+    invoke<AnnotationStore>('annotation_update', {
+      sessionId,
+      title: patch.title ?? null,
+      starred: patch.starred ?? null,
+      tags: patch.tags ?? null,
+    }),
+  tagCreate: (name: string, color: string) =>
+    invoke<AnnotationStore>('tag_create', { name, color }),
+  tagUpdate: (id: string, patch: { name?: string; color?: string }) =>
+    invoke<AnnotationStore>('tag_update', {
+      id,
+      name: patch.name ?? null,
+      color: patch.color ?? null,
+    }),
+  tagDelete: (id: string) => invoke<AnnotationStore>('tag_delete', { id }),
+  tagMerge: (sourceId: string, targetId: string) =>
+    invoke<AnnotationStore>('tag_merge', { sourceId, targetId }),
+  gitInfoBatch: (paths: string[]) =>
+    invoke<Record<string, GitInfo>>('git_info_batch', { paths }),
   workshopMcp: () => invoke<McpServer[]>('workshop_mcp'),
   mcpProbe: (url: string) => invoke<McpProbeResult>('mcp_probe', { url }),
   routinesList: () => invoke<RoutineDefinition[]>('routines_list'),

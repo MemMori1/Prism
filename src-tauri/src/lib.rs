@@ -1,5 +1,7 @@
+mod annotations;
 mod artifact;
 mod engines;
+mod gitinfo;
 mod ipc;
 mod routines;
 mod tray;
@@ -37,6 +39,13 @@ pub fn run() {
             ipc::workshop_read,
             ipc::open_path,
             ipc::read_artifact,
+            ipc::annotations_get,
+            ipc::annotation_update,
+            ipc::tag_create,
+            ipc::tag_update,
+            ipc::tag_delete,
+            ipc::tag_merge,
+            ipc::git_info_batch,
             ipc::workshop_mcp,
             ipc::mcp_probe,
             ipc::routines_list,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
+import { annotationFor, ensureAnnotations, isStarred, setStar, setTitle, tagsOf, titleOf } from '../annotations'
 import { onEngineEvent } from '../engineEvents'
 import { createLiveTurn, reduceLiveTurn, type LiveTurn } from '../liveTurn'
 import { pushNotification } from '../notify'
@@ -19,6 +20,7 @@ import { formatCost, formatTokens, fullTime } from '../format'
 import TimelineItem from './TimelineItem.vue'
 import LiveTurnView from './LiveTurn.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
+import TagPicker from './TagPicker.vue'
 
 const props = defineProps<{
   session: SessionSummary | null
@@ -64,6 +66,49 @@ const highlightId = ref<string | null>(null)
 const artifactPath = ref<string | null>(null)
 /** 未吸附底部时累计的新消息数（回底浮标角标）。 */
 const unseen = ref(0)
+
+/** 标题编辑与标签选择器状态。 */
+const titleEditing = ref(false)
+const titleDraft = ref('')
+const titleInput = ref<HTMLInputElement | null>(null)
+const tagPickerOpen = ref(false)
+
+const starred = computed(() => (props.session ? isStarred(props.session.id) : false))
+const sessionTags = computed(() => (props.session ? tagsOf(props.session.id) : []))
+
+function startTitleEdit() {
+  if (!props.session) return
+  titleDraft.value = titleOf(props.session.id, props.session.title)
+  titleEditing.value = true
+  void nextTick(() => titleInput.value?.select())
+}
+
+async function saveTitle() {
+  if (!props.session || !titleEditing.value) return
+  titleEditing.value = false
+  const sessionId = props.session.id
+  const next = titleDraft.value.trim()
+  const current = annotationFor(sessionId)?.title ?? ''
+  if (next === current) return
+  try {
+    await setTitle(sessionId, next)
+  } catch (cause) {
+    console.error('[prism] 标题保存失败', cause)
+  }
+}
+
+async function toggleHeaderStar() {
+  if (!props.session) return
+  try {
+    await setStar(props.session.id, !isStarred(props.session.id))
+  } catch (cause) {
+    console.error('[prism] 星标失败', cause)
+  }
+}
+
+onMounted(() => {
+  void ensureAnnotations()
+})
 
 const running = computed(() => live.value.running)
 const waiting = computed(() => pendingPermissions.value.length)
@@ -559,6 +604,8 @@ watch(
     pendingPermissions.value = []
     replyingPermission.value = null
     stick.value = true
+    tagPickerOpen.value = false
+    titleEditing.value = false
     if (sessionId) {
       void prepareSession(sessionId)
     } else {
@@ -590,7 +637,7 @@ watch(
 </script>
 
 <template>
-  <main class="session-view" :class="{ embedded }">
+  <main class="session-view" :class="{ embedded }" @click="tagPickerOpen = false">
     <template v-if="!session">
       <div class="placeholder">
         <div class="placeholder-mark">◆</div>
@@ -602,7 +649,40 @@ watch(
     <template v-else>
       <header v-if="!embedded" class="session-header">
         <div class="session-heading">
-          <h1 class="session-title">{{ session.title || '未命名会话' }}</h1>
+          <input
+            v-if="titleEditing"
+            ref="titleInput"
+            v-model="titleDraft"
+            class="title-input"
+            spellcheck="false"
+            @keydown.enter="saveTitle"
+            @keydown.esc="titleEditing = false"
+            @blur="saveTitle"
+          />
+          <h1
+            v-else
+            class="session-title"
+            title="双击编辑标题"
+            @dblclick="startTitleEdit"
+          >
+            {{ titleOf(session.id, session.title) }}
+          </h1>
+          <button
+            class="icon-btn"
+            :class="{ on: starred }"
+            :title="starred ? '取消星标' : '加星标'"
+            @click="toggleHeaderStar"
+          >
+            {{ starred ? '★' : '☆' }}
+          </button>
+          <button
+            v-if="!titleEditing"
+            class="icon-btn"
+            title="编辑标题"
+            @click="startTitleEdit"
+          >
+            ✎
+          </button>
           <button
             class="open-wb-btn"
             title="在工作台打开：多列并行盯着多个会话"
@@ -610,6 +690,20 @@ watch(
           >
             ⇥ 工作台
           </button>
+        </div>
+        <div class="session-tags">
+          <span v-for="tag in sessionTags" :key="tag.id" class="tag-chip">
+            <span class="tag-dot" :style="{ background: tag.color }" />
+            {{ tag.name }}
+          </span>
+          <button class="tag-add" @click.stop="tagPickerOpen = !tagPickerOpen">
+            ＋ 标签
+          </button>
+          <TagPicker
+            v-if="tagPickerOpen"
+            :session-id="session.id"
+            @close="tagPickerOpen = false"
+          />
         </div>
         <div class="session-meta">
           <span class="meta-dir" :title="session.directory">{{ session.directory }}</span>
@@ -816,6 +910,92 @@ watch(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.title-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.title-input:focus {
+  outline: none;
+}
+
+.icon-btn {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.icon-btn.on {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+  background: var(--amber-soft);
+}
+
+.session-tags {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.tag-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.tag-add {
+  padding: 2px 9px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tag-add:hover {
+  color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
 .open-wb-btn {

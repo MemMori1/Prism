@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::annotations::{self, AnnotationStore};
 use crate::engines::claude;
 use crate::engines::codex;
 use crate::engines::codex::runtime::Runtime as CodexRuntime;
@@ -650,6 +651,88 @@ pub async fn open_path(path: String) -> Result<(), String> {
         .spawn()
         .map_err(|cause| format!("打开失败：{cause}"))?;
     Ok(())
+}
+
+/// 读取全部档案增补（星标 / 标签 / 自定义标题）。
+#[tauri::command]
+pub async fn annotations_get() -> Result<AnnotationStore, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = annotations::store_path()?;
+        Ok(annotations::load(&path))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 更新单个会话的增补信息；返回全量存储（前端整体替换）。
+#[tauri::command]
+pub async fn annotation_update(
+    session_id: String,
+    title: Option<String>,
+    starred: Option<bool>,
+    tags: Option<Vec<String>>,
+) -> Result<AnnotationStore, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        annotations::mutate(|store| {
+            annotations::update_session(store, &session_id, title, starred, tags)
+        })
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 新建标签。
+#[tauri::command]
+pub async fn tag_create(name: String, color: String) -> Result<AnnotationStore, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        annotations::mutate(|store| annotations::create_tag(store, &name, &color).map(|_| ()))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 重命名 / 换色标签。
+#[tauri::command]
+pub async fn tag_update(
+    id: String,
+    name: Option<String>,
+    color: Option<String>,
+) -> Result<AnnotationStore, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        annotations::mutate(|store| annotations::update_tag(store, &id, name, color))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 删除标签（同时摘掉所有会话上的引用）。
+#[tauri::command]
+pub async fn tag_delete(id: String) -> Result<AnnotationStore, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        annotations::mutate(|store| annotations::delete_tag(store, &id))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 合并标签（来源 → 目标）。
+#[tauri::command]
+pub async fn tag_merge(source_id: String, target_id: String) -> Result<AnnotationStore, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        annotations::mutate(|store| annotations::merge_tag(store, &source_id, &target_id))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 批量查询目录的 git 信息（分支 / 主仓库根 / worktree 标记）。
+#[tauri::command]
+pub async fn git_info_batch(
+    paths: Vec<String>,
+) -> Result<std::collections::HashMap<String, crate::gitinfo::GitInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::gitinfo::git_info_batch(&paths))
+        .await
+        .map_err(|cause| cause.to_string())
 }
 
 /// 工坊：MCP 服务清单（三引擎配置真相位置，只读解析；环境变量只给键名）。

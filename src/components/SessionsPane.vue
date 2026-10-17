@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import type { ProjectItem, SessionSummary } from '../types'
 import { basename, formatTokens, relativeTime } from '../format'
+import { ensureAnnotations, isStarred, setStar, tagsOf, titleOf } from '../annotations'
+import { ensureGitInfo, gitInfoOf } from '../gitInfo'
 import {
   filterSessionsByRange,
   rangeToSince,
@@ -25,6 +27,31 @@ const emit = defineEmits<{
 
 const sortKey = ref<SessionSort>('recent')
 const rangeKey = ref<TimeRange>('all')
+/** 只看星标会话。 */
+const starOnly = ref(false)
+
+onMounted(() => {
+  void ensureAnnotations()
+})
+
+/** 当前项目的分支（用于标题行标注）。 */
+const projectBranch = computed(() => gitInfoOf(props.project?.worktree)?.branch ?? null)
+
+watch(
+  () => props.project?.worktree,
+  path => {
+    if (path) void ensureGitInfo([path])
+  },
+  { immediate: true },
+)
+
+async function toggleStar(sessionId: string) {
+  try {
+    await setStar(sessionId, !isStarred(sessionId))
+  } catch (cause) {
+    console.error('[prism] 星标失败', cause)
+  }
+}
 
 /** 已接入运行轴的引擎才可从 Prism 新建会话（Claude Code 待 M9）。 */
 const CREATABLE_ENGINES = new Set(['opencode', 'codex'])
@@ -39,7 +66,9 @@ const newButtonTitle = computed(() => {
 
 const visibleSessions = computed(() =>
   sortSessions(
-    filterSessionsByRange(props.sessions, rangeToSince(rangeKey.value, Date.now())),
+    filterSessionsByRange(props.sessions, rangeToSince(rangeKey.value, Date.now())).filter(
+      session => !starOnly.value || isStarred(session.id),
+    ),
     sortKey.value,
   ),
 )
@@ -57,6 +86,13 @@ function shortModel(model: string | null): string {
     <div class="pane-header">
       <span class="pane-title">
         {{ project ? `${project.name || basename(project.worktree)} 的会话` : '会话' }}
+        <span
+          v-if="projectBranch"
+          class="branch-inline"
+          :title="`当前分支：${projectBranch}`"
+        >
+          ⑂{{ projectBranch }}
+        </span>
       </span>
       <span class="pane-actions">
         <span v-if="sessions.length" class="pane-count">{{ sessions.length }}</span>
@@ -83,24 +119,52 @@ function shortModel(model: string | null): string {
         <option value="week">本周</option>
         <option value="month">本月</option>
       </select>
+      <button
+        class="mini-toggle"
+        :class="{ on: starOnly }"
+        title="只看星标会话"
+        @click="starOnly = !starOnly"
+      >
+        ★
+      </button>
     </div>
 
     <div class="pane-body">
       <div v-if="!project" class="pane-empty">从左侧选择一个项目</div>
       <div v-else-if="loading && !sessions.length" class="pane-empty">加载中…</div>
       <div v-else-if="!sessions.length" class="pane-empty">这个项目还没有会话</div>
-      <div v-else-if="!visibleSessions.length" class="pane-empty">该时间范围内没有会话</div>
+      <div v-else-if="!visibleSessions.length" class="pane-empty">
+        {{ starOnly ? '还没有星标会话' : '该时间范围内没有会话' }}
+      </div>
 
       <button
         v-for="session in visibleSessions"
         :key="session.id"
         class="session-item"
         :class="{ active: session.id === selectedId }"
-        :title="session.title ?? session.id"
+        :title="titleOf(session.id, session.title)"
         @click="emit('select', session.id)"
       >
-        <span class="session-title">{{ session.title || '未命名会话' }}</span>
+        <span class="session-top">
+          <span
+            class="star-btn"
+            :class="{ on: isStarred(session.id) }"
+            role="button"
+            :title="isStarred(session.id) ? '取消星标' : '加星标'"
+            @click.stop="toggleStar(session.id)"
+          >
+            {{ isStarred(session.id) ? '★' : '☆' }}
+          </span>
+          <span class="session-title">{{ titleOf(session.id, session.title) }}</span>
+        </span>
         <span class="session-sub">
+          <span
+            v-for="tag in tagsOf(session.id)"
+            :key="tag.id"
+            class="tag-dot"
+            :style="{ background: tag.color }"
+            :title="tag.name"
+          />
           <span>{{ relativeTime(session.timeUpdated) }}</span>
           <span v-if="session.model" class="session-model">{{ shortModel(session.model) }}</span>
           <span class="session-tokens">
@@ -239,6 +303,8 @@ function shortModel(model: string | null): string {
 }
 
 .session-title {
+  flex: 1;
+  min-width: 0;
   font-size: 12.5px;
   font-weight: 540;
   overflow: hidden;
@@ -270,5 +336,85 @@ function shortModel(model: string | null): string {
   margin-left: auto;
   font-family: var(--font-mono);
   flex: none;
+}
+
+.mini-toggle {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mini-toggle:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.mini-toggle.on {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+  background: var(--amber-soft);
+}
+
+.session-top {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.star-btn {
+  flex: none;
+  width: 15px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--faint);
+  opacity: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.session-item:hover .star-btn,
+.star-btn.on {
+  opacity: 1;
+}
+
+.star-btn.on {
+  color: var(--amber);
+}
+
+.tag-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.branch-inline {
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 9.5px;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 15px;
+  display: inline-block;
+  vertical-align: 1px;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
