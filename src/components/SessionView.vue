@@ -21,6 +21,7 @@ import TimelineItem from './TimelineItem.vue'
 import LiveTurnView from './LiveTurn.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import TagPicker from './TagPicker.vue'
+import LedgerPane from './LedgerPane.vue'
 
 const props = defineProps<{
   session: SessionSummary | null
@@ -72,6 +73,12 @@ const titleEditing = ref(false)
 const titleDraft = ref('')
 const titleInput = ref<HTMLInputElement | null>(null)
 const tagPickerOpen = ref(false)
+/** 文件账本抽屉。 */
+const ledgerOpen = ref(false)
+
+function onLedgerJump(recordId: string) {
+  void performJump(recordId)
+}
 
 const starred = computed(() => (props.session ? isStarred(props.session.id) : false))
 const sessionTags = computed(() => (props.session ? tagsOf(props.session.id) : []))
@@ -606,6 +613,7 @@ watch(
     stick.value = true
     tagPickerOpen.value = false
     titleEditing.value = false
+    ledgerOpen.value = false
     if (sessionId) {
       void prepareSession(sessionId)
     } else {
@@ -684,6 +692,14 @@ watch(
             ✎
           </button>
           <button
+            class="icon-btn"
+            :class="{ on: ledgerOpen }"
+            title="文件账本：这个会话动过哪些文件"
+            @click.stop="ledgerOpen = !ledgerOpen"
+          >
+            🗂
+          </button>
+          <button
             class="open-wb-btn"
             title="在工作台打开：多列并行盯着多个会话"
             @click="emit('openWorkbench', session.id)"
@@ -717,7 +733,13 @@ watch(
         </div>
       </header>
 
-      <div ref="scroller" class="timeline" @scroll.passive="onScroll" @click="onTimelineClick">
+      <div class="timeline-area">
+        <div
+          ref="scroller"
+          class="timeline"
+          @scroll.passive="onScroll"
+          @click="onTimelineClick"
+        >
         <div v-if="loading" class="timeline-hint">加载中…</div>
         <div v-else-if="!records.length && !showLive" class="timeline-hint">
           这个会话还没有消息，直接在下面发一条试试
@@ -746,6 +768,15 @@ watch(
             <LiveTurnView v-if="showLive" :turn="live" />
           </div>
         </template>
+        </div>
+
+        <LedgerPane
+          v-if="ledgerOpen && session"
+          :session-id="session.id"
+          :directory="session.directory"
+          @jump="onLedgerJump"
+          @close="ledgerOpen = false"
+        />
       </div>
 
       <button
@@ -1045,6 +1076,14 @@ watch(
 .meta-time {
   margin-left: auto;
   flex: none;
+}
+
+.timeline-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .timeline {

@@ -289,6 +289,59 @@ pub async fn read_timeline(
     Ok(page)
 }
 
+/// 会话文件账本：动过哪些文件、逐次操作与增删行数（只读引擎档案）。
+#[tauri::command]
+pub async fn session_ledger(
+    session_id: String,
+) -> Result<crate::ledger::SessionLedger, String> {
+    if claude::transcript::is_claude_session(&session_id) {
+        let root = claude::locator::projects_dir()
+            .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
+        let uuid = claude::transcript::session_uuid_of(&session_id)
+            .unwrap_or_default()
+            .to_string();
+        let events = tauri::async_runtime::spawn_blocking(move || {
+            let Some((_, path)) = claude::transcript::find_session_file(&root, &uuid) else {
+                return Err("Claude 会话档案不存在".to_string());
+            };
+            claude::transcript::read_ledger(&path)
+        })
+        .await
+        .map_err(|cause| cause.to_string())??;
+        return Ok(crate::ledger::aggregate(events));
+    }
+
+    if codex::state::is_codex_session(&session_id) {
+        let db_path = codex_state_db_path()?;
+        let thread_id = codex::state::thread_id_of(&session_id)
+            .unwrap_or_default()
+            .to_string();
+        let events = tauri::async_runtime::spawn_blocking(move || {
+            let rollout_path = codex::state::rollout_path_of(&db_path, &thread_id)?
+                .ok_or_else(|| "Codex 会话没有 rollout 文件".to_string())?;
+            codex::rollout::read_ledger(Path::new(&rollout_path))
+        })
+        .await
+        .map_err(|cause| cause.to_string())??;
+        return Ok(crate::ledger::aggregate(events));
+    }
+
+    let db_path = opencode_db_path()?;
+    let events = tauri::async_runtime::spawn_blocking(move || {
+        opencode::db::read_ledger(&db_path, &session_id)
+    })
+    .await
+    .map_err(|cause| cause.to_string())??;
+    let ledger = crate::ledger::aggregate(events);
+    #[cfg(debug_assertions)]
+    println!(
+        "[prism] session_ledger -> {} 个文件 / {} 次操作",
+        ledger.files.len(),
+        ledger.total_events
+    );
+    Ok(ledger)
+}
+
 /// 展开工具卡片时按需加载完整输入 / 输出 / diff。
 #[tauri::command]
 pub async fn read_tool_detail(

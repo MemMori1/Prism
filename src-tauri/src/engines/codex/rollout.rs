@@ -21,6 +21,7 @@ use crate::engines::core::{
     TimelinePage, TimelinePart, TimelineRecord, ToolDetail, TurnTokens,
 };
 use crate::engines::time::parse_iso_ms;
+use crate::ledger::RawEvent;
 
 type ParseResult<T> = Result<T, String>;
 
@@ -709,6 +710,341 @@ mod tests {
         let (cwd, model) = head_session_info(&path).expect("头部信息");
         assert_eq!(cwd, "/tmp/demo");
         assert_eq!(model, "gpt-5-codex");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// ---------------- 文件账本 ----------------
+
+/// V4A patch 的一节头部：`*** Update File: path`（容忍结尾的 ` ***` 装饰）。
+fn patch_section_header(line: &str) -> Option<(&'static str, String)> {
+    let rest = line.strip_prefix("*** ")?;
+    let rest = rest.trim_end_matches("***").trim();
+    let (label, path) = rest.split_once(':')?;
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let kind = match label.trim() {
+        "Update File" => "update",
+        "Add File" | "Create File" => "add",
+        "Delete File" => "delete",
+        "Move to" => "move",
+        _ => return None,
+    };
+    Some((kind, path.to_string()))
+}
+
+/// patch 文本 → 逐文件事件（一节一文件；`+`/`-` 行计增删）。
+pub fn apply_patch_events(patch: &str, record_id: &str, time: i64) -> Vec<RawEvent> {
+    let mut events: Vec<RawEvent> = Vec::new();
+    let mut open = true;
+    for line in patch.lines() {
+        let line = line.trim_end();
+        if line.starts_with("***") {
+            if line == "*** End Patch" {
+                open = false;
+            } else if let Some((kind, path)) = patch_section_header(line) {
+                let normalized = match kind {
+                    "add" => "write",
+                    "delete" => "delete",
+                    // move 视为对目标路径的一次编辑。
+                    _ => "edit",
+                };
+                events.push(RawEvent {
+                    path,
+                    record_id: record_id.to_string(),
+                    call_id: None,
+                    time,
+                    kind: normalized.to_string(),
+                    tool: "apply_patch".to_string(),
+                    added: 0,
+                    removed: 0,
+                });
+                open = true;
+            }
+            // 其余 *** 元数据行（Description / Preview 等）：不改变当前段状态。
+            continue;
+        }
+        let Some(last) = events.last_mut() else {
+            continue;
+        };
+        if !open {
+            continue;
+        }
+        if line.starts_with('+') && !line.starts_with("+++") {
+            last.added += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            last.removed += 1;
+        }
+    }
+    events
+}
+
+/// 从任意参数文本里切出 patch 段（Begin/End 优先；否则从首个段落头到结尾）。
+fn extract_patch_text(raw: &str) -> Option<String> {
+    let segment = if let Some(start) = raw.find("*** Begin Patch") {
+        match raw[start..].find("*** End Patch") {
+            Some(rel) => &raw[start..start + rel + "*** End Patch".len()],
+            None => &raw[start..],
+        }
+    } else {
+        let start = [
+            "*** Update File:",
+            "*** Add File:",
+            "*** Create File:",
+            "*** Delete File:",
+            "*** Move to:",
+        ]
+        .iter()
+        .filter_map(|marker| raw.find(marker))
+        .min()?;
+        &raw[start..]
+    };
+    // 嵌套一层 repr 时换行是转义态（\n 两个字符）：没有真实换行时还原。
+    if segment.contains('\n') {
+        Some(segment.to_string())
+    } else {
+        Some(segment.replace("\\n", "\n"))
+    }
+}
+
+/// 递归找 patch 文本：字符串直接用，数组/对象按常见键下钻（depth 限 4 层）。
+fn patch_from_value(value: &Value, depth: usize) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    match value {
+        Value::String(text) => extract_patch_text(text),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| patch_from_value(item, depth + 1)),
+        Value::Object(map) => ["content", "cmd", "command", "patch", "arguments"]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(|inner| patch_from_value(inner, depth + 1))),
+        _ => None,
+    }
+}
+
+/// `apply_patch` 的调用参数（形态随 Codex 版本而变）→ patch 文本。
+fn patch_from_arguments(arguments: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(arguments).ok()?;
+    patch_from_value(&value, 0)
+}
+
+/// 经 shell 执行 `apply_patch`（heredoc）的命令 → patch 文本。
+fn patch_from_command(arguments: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(arguments).ok()?;
+    let cmd = value.get("cmd").and_then(Value::as_str)?;
+    if !cmd.contains("apply_patch") {
+        return None;
+    }
+    extract_patch_text(cmd)
+}
+
+/// 整个会话的账本事件（只扫 function_call；记录边界与 parse_reader 一致）。
+pub fn read_ledger(path: &Path) -> ParseResult<Vec<RawEvent>> {
+    let file = File::open(path).map_err(|cause| format!("打开 rollout 文件失败：{cause}"))?;
+    let reader = BufReader::new(file);
+    let mut events: Vec<RawEvent> = Vec::new();
+    // 当前助手记录的首行 seq（与解析时间线的 ensure_current 语义一致）。
+    let mut current_seq: Option<i64> = None;
+
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|cause| format!("读取 rollout 失败：{cause}"))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let seq = index as i64 + 1;
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let time_ms = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_iso_ms)
+            .unwrap_or(0);
+        let kind = value.get("type").and_then(Value::as_str).unwrap_or_default();
+        let payload = value.get("payload").unwrap_or(&Value::Null);
+        let payload_type = payload.get("type").and_then(Value::as_str);
+
+        match (kind, payload_type) {
+            ("event_msg", Some("user_message")) => {
+                let text = payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim();
+                if !text.is_empty() {
+                    current_seq = None;
+                }
+            }
+            ("response_item", Some("reasoning")) => {
+                if !reasoning_text(payload).is_empty() {
+                    current_seq.get_or_insert(seq);
+                }
+            }
+            ("response_item", Some("message")) => {
+                if payload.get("role").and_then(Value::as_str) == Some("assistant")
+                    && !message_text(payload).is_empty()
+                {
+                    current_seq.get_or_insert(seq);
+                }
+            }
+            ("response_item", Some("function_call")) => {
+                let name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool");
+                let record_id = current_seq.get_or_insert(seq).to_string();
+                let call_id = payload
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                let arguments = payload
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let patch = match name {
+                    "apply_patch" => {
+                        patch_from_arguments(arguments).or_else(|| patch_from_command(arguments))
+                    }
+                    "exec_command" => patch_from_command(arguments),
+                    _ => None,
+                };
+                if let Some(patch) = patch {
+                    for mut event in apply_patch_events(&patch, &record_id, time_ms) {
+                        event.call_id = call_id.clone();
+                        event.tool = name.to_string();
+                        events.push(event);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(events)
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write as _;
+
+    #[test]
+    fn patch_events_count_lines_per_section() {
+        let patch = "*** Update File: src/a.ts ***\n@@ ... @@ ctx\n-old\n+new\n+extra\n*** Add File: src/b.ts\n+one\n+two\n*** Delete File: src/c.ts\n";
+        let events = apply_patch_events(patch, "12", 99);
+        assert_eq!(events.len(), 3);
+        assert_eq!((events[0].path.as_str(), events[0].kind.as_str()), ("src/a.ts", "edit"));
+        assert_eq!((events[0].added, events[0].removed), (2, 1), "只计 +/- 行");
+        assert_eq!((events[1].path.as_str(), events[1].kind.as_str()), ("src/b.ts", "write"));
+        assert_eq!(events[1].added, 2);
+        assert_eq!((events[2].path.as_str(), events[2].kind.as_str()), ("src/c.ts", "delete"));
+        assert_eq!(events[0].record_id, "12");
+    }
+
+    #[test]
+    fn apply_patch_with_cmd_arguments_is_parsed() {
+        // 部分版本 name=apply_patch，但参数是 {"cmd": "apply_patch\n*** Begin Patch..."}
+        let arguments = "{\"cmd\":\"apply_patch\\n*** Begin Patch\\n*** Update File: a.txt\\n-old\\n+new\\n*** End Patch\\n\"}";
+        let patch = patch_from_arguments(arguments).expect("cmd 形态");
+        let events = apply_patch_events(&patch, "5", 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].added, events[0].removed), (1, 1));
+    }
+
+    #[test]
+    fn command_key_with_repr_escaped_newlines() {
+        // 实测形态：arguments.command 是一层 repr，换行以转义态出现，且无 apply_patch 字样。
+        let arguments = "{\"command\":\"[{'command': 'apply_patch', 'content': '*** Begin Patch\\n*** Create File: a.swift\\n+import SwiftUI\\n*** End Patch'}]\"}";
+        let patch = patch_from_arguments(arguments).expect("command 形态");
+        let events = apply_patch_events(&patch, "9", 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].path.as_str(), events[0].kind.as_str()), ("a.swift", "write"));
+        assert_eq!(events[0].added, 1);
+    }
+
+    #[test]
+    fn description_lines_do_not_close_section() {
+        let patch = "*** Begin Patch\n*** Update File: a.py\n*** Description: 加类型注解\n+from typing import Optional\n-x = 1\n+x = 2\n*** End Patch";
+        let events = apply_patch_events(patch, "3", 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].added, events[0].removed), (2, 1), "元数据行不打断计数");
+    }
+
+    #[test]
+    fn end_patch_stops_counting() {
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n+x\n*** End Patch\n+should-not-count\n";
+        let events = apply_patch_events(patch, "1", 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].added, 1);
+    }
+
+    #[test]
+    #[ignore]
+    fn reads_real_ledger_from_local_rollouts() {
+        let root = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
+            .join(".codex/sessions");
+        fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect(&path, out);
+                } else if path.extension().and_then(|value| value.to_str()) == Some("jsonl") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        collect(&root, &mut files);
+        assert!(!files.is_empty(), "本机应有 Codex rollout");
+
+        let mut changed = 0usize;
+        let mut total = 0usize;
+        for file in files {
+            let events = read_ledger(&file).expect("read_ledger");
+            changed += events.iter().filter(|event| event.kind != "read").count();
+            total += events.len();
+        }
+        println!("Codex rollout 账本：{total} 次文件操作（{changed} 次改动）");
+        assert!(total > 0, "至少一个 rollout 应有补丁操作");
+    }
+
+    #[test]
+    fn read_ledger_walks_rollout_and_group_record_ids() {
+        let dir = std::env::temp_dir().join(format!("prism-ledger-rollout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let path = dir.join("rollout.jsonl");
+        let mut file = std::fs::File::create(&path).expect("建文件");
+        let lines = [
+            json!({"timestamp":"2026-10-01T10:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"改一下配置"}}),
+            json!({"timestamp":"2026-10-01T10:00:01.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"看一下"}]}}),
+            json!({"timestamp":"2026-10-01T10:00:02.000Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","call_id":"c1","arguments":"{\"patch\":\"*** Update File: cfg.toml\\n-x = 1\\n+x = 2\"}"}}),
+            json!({"timestamp":"2026-10-01T10:00:03.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c2","arguments":"{\"cmd\":\"apply_patch <<'PATCH'\\n*** Begin Patch\\n*** Add File: new.txt\\n+hi\\n*** End Patch\\nPATCH\"}"}}),
+            json!({"timestamp":"2026-10-01T10:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c3","arguments":"{\"cmd\":\"ls -la\"}"}}),
+        ];
+        for line in lines {
+            writeln!(file, "{line}").expect("写行");
+        }
+        drop(file);
+
+        let events = read_ledger(&path).expect("读账本");
+        assert_eq!(events.len(), 2, "ls 不产生事件");
+        assert_eq!(events[0].path, "cfg.toml");
+        assert_eq!(events[0].record_id, "2", "助手记录首行 seq");
+        assert_eq!(events[0].call_id.as_deref(), Some("c1"));
+        assert_eq!(events[1].path, "new.txt");
+        assert_eq!(events[1].call_id.as_deref(), Some("c2"));
+        assert_eq!(events[1].kind, "write");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
