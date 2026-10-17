@@ -99,6 +99,8 @@ pub struct UsageSummary {
     pub cost_usd: f64,
     pub engines: Vec<EngineUsage>,
     pub daily: Vec<DailyUsage>,
+    /// 窗口内按本地小时的会话数（24 桶：工作节奏）。
+    pub hours: Vec<u32>,
     /// 数据源说明 / 缺数提示。
     pub notes: Vec<String>,
 }
@@ -110,6 +112,16 @@ struct SessionUsage {
     model: String,
     at_ms: i64,
     tokens: TokenTotals,
+}
+
+/// 本地小时（0–23；解析失败归 0）。
+fn local_hour(ms: i64) -> usize {
+    use chrono::Timelike;
+    chrono::Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|moment| moment.hour() as usize)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------- 收集（各引擎）
@@ -471,6 +483,7 @@ fn build_summary(sessions: &[SessionUsage], days: u32, notes: Vec<String>) -> Us
 
     let mut totals = TokenTotals::default();
     let mut daily_map: BTreeMap<String, TokenTotals> = BTreeMap::new();
+    let mut hours: Vec<u32> = vec![0; 24];
     type ModelAcc = BTreeMap<String, (TokenTotals, u32)>;
     type EngineAcc = (TokenTotals, u32, ModelAcc);
     let mut engine_acc: BTreeMap<&'static str, EngineAcc> = BTreeMap::new();
@@ -481,6 +494,9 @@ fn build_summary(sessions: &[SessionUsage], days: u32, notes: Vec<String>) -> Us
             .entry(day_key(session.at_ms))
             .or_default()
             .add(&session.tokens);
+        if let Some(slot) = hours.get_mut(local_hour(session.at_ms)) {
+            *slot += 1;
+        }
         let acc = engine_acc.entry(session.engine).or_default();
         acc.0.add(&session.tokens);
         acc.1 += 1;
@@ -533,6 +549,7 @@ fn build_summary(sessions: &[SessionUsage], days: u32, notes: Vec<String>) -> Us
         cost_usd: engines.iter().map(|engine| engine.cost_usd).sum(),
         engines,
         daily: daily_series(&daily_map, days),
+        hours,
         notes,
     }
 }
@@ -609,6 +626,56 @@ mod tests {
         // gpt-5-codex：3000/1e6*1.25 + 300/1e6*10 = 0.00675
         assert!((codex.cost_usd - 0.00675).abs() < 1e-9);
         assert!((summary.cost_usd - 0.00675).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hours_bucket_sessions_by_local_hour() {
+        use chrono::TimeZone;
+        let at = |hour: u32| {
+            let date = chrono::Local::now().date_naive();
+            let naive = date.and_hms_opt(hour, 30, 0).expect("合法时间");
+            chrono::Local
+                .from_local_datetime(&naive)
+                .earliest()
+                .expect("本地时间")
+                .timestamp_millis()
+        };
+        let sessions = vec![
+            session("opencode", "gpt-5", at(9), 10, 1),
+            session("opencode", "gpt-5", at(9), 10, 1),
+            session("codex", "gpt-5-codex", at(15), 10, 1),
+        ];
+        let summary = build_summary(&sessions, 7, Vec::new());
+        assert_eq!(summary.hours.len(), 24);
+        assert_eq!(summary.hours[9], 2);
+        assert_eq!(summary.hours[15], 1);
+        assert_eq!(summary.hours.iter().sum::<u32>(), 3);
+    }
+
+    #[test]
+    #[ignore]
+    fn real_summary_smoke() {
+        let summary = summary(28).expect("usage summary");
+        println!(
+            "窗口 {} 天 · 会话 {} · tokens {} · 成本 ≈ ${:.4}",
+            summary.days,
+            summary.sessions,
+            summary.totals.total(),
+            summary.cost_usd
+        );
+        println!(
+            "每日 {} 桶 · 每小时 {} 桶（小时合计 {} 个会话）",
+            summary.daily.len(),
+            summary.hours.len(),
+            summary.hours.iter().sum::<u32>()
+        );
+        for (hour, count) in summary.hours.iter().enumerate() {
+            if *count > 0 {
+                println!("  {hour:02} 点：{count} 个会话");
+            }
+        }
+        assert_eq!(summary.hours.len(), 24);
+        assert_eq!(summary.daily.len(), 28, "窗口内每日补齐");
     }
 
     #[test]

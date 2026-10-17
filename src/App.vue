@@ -30,23 +30,33 @@ import WorkshopPane from './components/WorkshopPane.vue'
 import AutomationPane from './components/AutomationPane.vue'
 import UsagePane from './components/UsagePane.vue'
 import RacePane from './components/RacePane.vue'
+import HomePane from './components/HomePane.vue'
 
 const health = ref<EngineHealth[]>([])
 const error = ref<string | null>(null)
 const showSettings = ref(false)
 
-type AppView = 'archive' | 'workbench' | 'search' | 'usage' | 'workshop' | 'automation' | 'race'
+type AppView =
+  | 'home'
+  | 'archive'
+  | 'workbench'
+  | 'search'
+  | 'usage'
+  | 'workshop'
+  | 'automation'
+  | 'race'
 const VIEW_KEY = 'prism-view'
 const storedView = localStorage.getItem(VIEW_KEY)
 const view = ref<AppView>(
-  storedView === 'workbench' ||
+  storedView === 'home' ||
+    storedView === 'workbench' ||
     storedView === 'search' ||
     storedView === 'usage' ||
     storedView === 'workshop' ||
     storedView === 'automation' ||
     storedView === 'race'
     ? storedView
-    : 'archive',
+    : 'home',
 )
 const workbenchRef = ref<InstanceType<typeof WorkbenchPane> | null>(null)
 const wbStatus = ref<WorkbenchStatus>({ running: 0, waiting: 0, runningIds: [], waitingIds: [] })
@@ -250,6 +260,14 @@ async function selectProject(projectId: string) {
   await loadSessions(projectId)
 }
 
+/** 首页「项目活跃」点击：切到归档并选中该项目。 */
+async function openProjectFromHome(projectId: string) {
+  setView('archive')
+  if (selectedProjectId.value !== projectId) {
+    await selectProject(projectId)
+  }
+}
+
 async function loadSessions(projectId: string) {
   sessionsLoading.value = true
   try {
@@ -344,6 +362,14 @@ onBeforeUnmount(stopRoutineEvents)
       </div>
 
       <div class="view-switch">
+        <button
+          class="view-btn"
+          :class="{ active: view === 'home' }"
+          title="首页仪表盘：token 脉搏 / 工作节奏 / 28 天热力图 / 模型分布 / 项目活跃"
+          @click="setView('home')"
+        >
+          首页
+        </button>
         <button
           class="view-btn"
           :class="{ active: view === 'archive' }"
@@ -483,6 +509,13 @@ onBeforeUnmount(stopRoutineEvents)
     </transition>
 
     <div class="panes">
+      <HomePane
+        v-show="view === 'home'"
+        :projects="projects"
+        @error="reportError"
+        @open-project="openProjectFromHome"
+        @open-usage="setView('usage')"
+      />
       <div v-show="view === 'archive'" class="archive-view">
         <ProjectsPane
           :projects="projects"

@@ -341,6 +341,8 @@ export interface UsageSummary {
   costUsd: number
   engines: UsageEngine[]
   daily: UsageDaily[]
+  /** 窗口内按本地小时的会话数（24 桶：工作节奏）。 */
+  hours: number[]
   notes: string[]
 }
 
