@@ -6,7 +6,7 @@
 >
 > 一句话路线：**工作台 → 搜索 → Codex → Claude Code → 工坊 → 自动化 → 平台化发布。**
 
-## 0. 现状快照（M1–M12 完成；自动更新待发布源，Claude 运行轴待 CLI）
+## 0. 现状快照（M1–M12 完成；自动更新已接线待首版验收，Claude 运行轴待 CLI）
 
 | 能力 | 说明 |
 |---|---|
@@ -23,7 +23,7 @@
 | 托盘 | macOS 菜单栏：图标旁待审批计数 + 菜单状态行 / tooltip（前端合并工作台 + 归档视图实时推送，按 sessionId 去重）；菜单含打开 / 退出；**关窗 ≠ 退出**（隐藏窗口，进程与调度继续跑）；Dock 点击唤起 |
 | 三引擎 | OpenCode（全功能）；Codex（浏览 + 运行：发消息 / 流式 / 插话 / 打断 / 审批卡片 / 新建会话）；Claude Code（历史浏览，运行轴待 CLI） |
 | 打磨 | 自研图标、设置面板（双引擎健康）、输入框自适应 |
-| 打包 | `.app` + `.dmg`（v0.2.0，含 M1–M12 全部改动，未签名；Gatekeeper 打开流程见 README）；自动更新待发布源 |
+| 打包 | `.app` + `.dmg`（v0.2.0，含 M1–M12 全部改动，未签名；Gatekeeper 打开流程见 README）；自动更新已接线（Tauri updater + GitHub Releases，待首版发布验收） |
 
 ## 1. 差距对照（现状 → 去向）
 
@@ -48,7 +48,7 @@
 | 设置多标签 | 🟡 双引擎状态面板 | 随行逐步扩展 |
 | 托盘 | ✅ | M12a 已实现（2026-10-17，见 M12）：Tauri 内置 tray 轻版——状态行 / tooltip / 待审批计数、点击唤起、关窗 ≠ 退出；不引入独立常驻二进制 + LaunchAgent |
 | 小组件 | ❌ | 远期池 |
-| 自动更新 | ❌ | M12 待发布源：需 GitHub 仓库 + updater 签名密钥，就位后接 Tauri updater 并做 v0.1→v0.2 升级验收 |
+| 自动更新 | ✅ | M12c 已接线（2026-10-17）：Tauri updater + GitHub Releases（公钥/端点已配，`scripts/release.sh` 发版并生成 `latest.json`）；待发首版 Release 后做升级验收 |
 | 主题系统 / i18n | 🟡 自研单主题 + 中文 | i18n 架构预留后置（文案集中化重构，随第一次语言需求启动）；主题远期 |
 | 用量 / 成本统计 / 配额 | 🟡 三类 token 已有 | 远期（配额数据源：Claude usage 接口 / Codex app-server rateLimits） |
 | MCP 双向桥（宿主能力给 agent 用） | ❌ | 远期池（宿主即工具：把审批 / 搜索 / 任务能力暴露给会话内 agent） |
@@ -169,7 +169,7 @@
 - 本期不做：睡眠唤醒（pmset 提权）、Hooks 总览、任务结果的 webhook / IM 渠道。
 
 ### M12 平台化 + v0.2 发布
-> 状态（2026-10-17）：**M12a 托盘 ✅ / v0.2.0 打包 ✅ / 自动更新 ⏸ 待发布源**。
+> 状态（2026-10-17）：**M12a 托盘 ✅ / M12b v0.2.0 打包 ✅ / M12c 自动更新 ✅（待首版发布验收）**。
 
 - 托盘（✅ M12a）：Tauri 内置 tray 轻版（自研，不引入独立常驻二进制 + LaunchAgent）——
   单色模板图标（自研光栅化脚本 `src-tauri/icons/tray-icon.cjs`，可复跑）
@@ -182,12 +182,15 @@
 - 打包（✅）：三处版本号升 0.2.0（`package.json` / `tauri.conf.json` / `Cargo.toml`）；
   `pnpm tauri build` 产出 `.app` + `.dmg`（未签名——无 Apple Developer ID，暂不签名公证；
   README 写清 Gatekeeper「右键 → 打开」流程）。
-- 自动更新（⏸）：Tauri updater + GitHub Releases（stable 通道）需要用户的发布源与
-  updater 签名密钥（`tauri signer generate`）；就位后：先发 v0.1 再发 v0.2，
-  完成「自动更新到 v0.2」验收。当前升级方式 = 下载新 dmg 覆盖安装。
+- 自动更新（✅ M12c）：Tauri updater + GitHub Releases（stable 通道）。签名密钥已生成
+  （私钥 `~/.prism/updater.key` 仅本机、不入库；公钥写入 `tauri.conf.json`）；
+  更新端点 = `releases/latest/download/latest.json`（公开仓库免鉴权）；
+  发版一条命令 `scripts/release.sh`（产出 `.app.tar.gz` + `.sig` + `latest.json`，
+  `--publish` 走 gh 上传）；设置面板「更新」区块：检查更新 / 下载并安装 / 重启生效。
+  待发首版 Release 后做升级闭环验收；自此升级方式 = 自动更新（dmg 覆盖仍可用）。
 - 菜单与快捷键：Cmd+W（关窗 = 隐藏）/ Cmd+Q 已按 macOS 惯例工作；
   视图快捷键与 i18n 架构预留后置（文案集中化随第一次语言需求启动）。
-- 验收：他人机器可安装（README 流程）✅；从 v0.1 自动更新到 v0.2 ⏸ 等发布源。
+- 验收：他人机器可安装（README 流程）✅；自动升级验收 ⏸ 待首版 Release（发布源就绪后按 `docs/RELEASE.md` §4 闭环）。
 
 ## 4. 远期池（不排期，按兴趣取用）
 

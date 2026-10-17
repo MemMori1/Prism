@@ -1,12 +1,13 @@
 # Prism 发布流程（v0.2 起）
 
-> 当前状态：打包 ✅（未签名）；自动更新 ⏸ 待发布源（见 §4）。
+> 当前状态：打包 ✅（未签名）；自动更新 ✅ 已接入（发布源 = GitHub Releases，见 §4）。
 > 签名与公证需要 Apple Developer ID（见 §3）。
 
 ## 1. 发版
 
 1. 三处版本号同步：`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`。
-2. `pnpm tauri build`（需 Rust 工具链；前端会先跑 `vue-tsc` + `vite build`）。
+2. 构建：`scripts/release.sh`（推荐：含 updater 签名 + `latest.json`）；
+   或普通打包 `pnpm tauri build`（不含可更新产物）。
 3. 产物在 `src-tauri/target/release/bundle/`：
    - `macos/Prism.app`
    - `dmg/Prism_<版本>_aarch64.dmg`
@@ -30,30 +31,19 @@
 
 ## 4. 自动更新（Tauri updater + GitHub Releases）
 
-现状：**未接入**——需要发布源（GitHub 仓库）与 updater 签名密钥。启用步骤：
+已接入。发布源 = GitHub Releases（公开仓库，端点免鉴权）：
 
-1. 生成 updater 密钥：`pnpm tauri signer generate -w ~/.prism/updater.key`
-   （私钥自行保管，勿入库；公钥写入配置）。
-2. 依赖与配置：
-   - Rust：`tauri-plugin-updater`；前端：`@tauri-apps/plugin-updater`；
-   - capability 加 `updater:default`；
-   - `tauri.conf.json`：
-     ```json
-     "plugins": {
-       "updater": {
-         "pubkey": "<第一步的公钥>",
-         "endpoints": [
-           "https://github.com/<owner>/<repo>/releases/latest/download/latest.json"
-         ]
-       }
-     }
-     ```
-3. 发布：`TAURI_SIGNING_PRIVATE_KEY=... pnpm tauri build` 产出带 `.sig` 的包；
-   把 `latest.json`（`version` / `notes` / `platforms.darwin-aarch64.url + signature`）
-   与产物一起上传到 GitHub Release（stable 通道）。
-4. 客户端：设置面板加「检查更新」按钮（`check()` → `downloadAndInstall()`）；
-   启动时可静默检查、有新版再提示。
-5. 验收：装 v0.1 → 发布 v0.2 → 点检查更新 → 重启已是 v0.2。
+    https://github.com/MemMori1/Prism/releases/latest/download/latest.json
+
+- 签名密钥：私钥在开发机 `~/.prism/updater.key`（**绝不入库**）；公钥已写入
+  `tauri.conf.json` 的 `plugins.updater.pubkey`（公开信息）。
+- 一条命令发版：`scripts/release.sh`（校验三处版本号一致 → 构建 + 签名 →
+  产物收拢到 `release-artifacts/` 并生成 `latest.json`）。
+- 上传 Release（tag 用 `v<版本>`，如 `v0.2.0`）：
+  - 有 gh CLI：`scripts/release.sh --publish`（首次先 `gh auth login`）；
+  - 或网页：Releases → Draft a new release → 拖入 `release-artifacts/` 的全部文件。
+- 客户端：设置面板 →「更新」区块 → 检查更新 / 下载并安装 / 重启生效。
+- 验收闭环：装旧版 → 发布新版（版本号 +1）→ 点「检查更新」→ 下载重启后版本已更新。
 
 ## 5. 版本历史
 

@@ -1,12 +1,15 @@
 <script setup lang="ts">
 /**
- * 设置对话框：引擎状态一眼看清（安装 / 版本 / 运行轴）。
+ * 设置对话框：引擎状态一眼看清（安装 / 版本 / 运行轴）+ 应用更新。
  * 挂载即拉取一次；关闭由父级控制（v-if）。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
+import { relaunch } from '@tauri-apps/plugin-process'
+import { check, type Update } from '@tauri-apps/plugin-updater'
 import { api } from '../api'
 import type { EngineHealth, RuntimeStatus } from '../types'
+import { friendlyUpdateError } from '../updateStatus'
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -19,9 +22,59 @@ const prismVersion = ref<string | null>(null)
 const loading = ref(true)
 const errorText = ref<string | null>(null)
 
+type UpdatePhase = 'idle' | 'checking' | 'latest' | 'available' | 'downloading' | 'ready' | 'error'
+const updatePhase = ref<UpdatePhase>('idle')
+const updateHandle = ref<Update | null>(null)
+const updateProgress = ref<number | null>(null)
+const updateError = ref<string | null>(null)
+
 const opencode = computed(() => engines.value.find(item => item.engineId === 'opencode') ?? null)
 const codex = computed(() => engines.value.find(item => item.engineId === 'codex') ?? null)
 const claude = computed(() => engines.value.find(item => item.engineId === 'claude') ?? null)
+
+const updateText = computed(() => {
+  switch (updatePhase.value) {
+    case 'idle':
+      return '检查是否有新版本'
+    case 'checking':
+      return '正在检查更新…'
+    case 'latest':
+      return '已是最新版本'
+    case 'available':
+      return `发现新版本 v${updateHandle.value?.version ?? ''}`
+    case 'downloading':
+      return updateProgress.value === null
+        ? '正在下载…'
+        : `正在下载 ${Math.round(updateProgress.value)}%`
+    case 'ready':
+      return `v${updateHandle.value?.version ?? ''} 已下载，重启后生效`
+    case 'error':
+      return updateError.value ?? '检查失败'
+  }
+})
+
+const updateBusy = computed(
+  () => updatePhase.value === 'checking' || updatePhase.value === 'downloading',
+)
+
+const updateActionLabel = computed(() => {
+  switch (updatePhase.value) {
+    case 'checking':
+      return '检查中…'
+    case 'downloading':
+      return '下载中…'
+    case 'available':
+      return '下载并安装'
+    case 'ready':
+      return '重启生效'
+    case 'latest':
+      return '再检查一次'
+    case 'error':
+      return '重试'
+    default:
+      return '检查更新'
+  }
+})
 
 async function load() {
   loading.value = true
@@ -48,6 +101,68 @@ async function loadPrismVersion() {
   } catch {
     // 拿不到就退化为不显示。
   }
+}
+
+async function checkForUpdate() {
+  updatePhase.value = 'checking'
+  updateError.value = null
+  try {
+    const update = await check()
+    if (update) {
+      updateHandle.value = update
+      updatePhase.value = 'available'
+    } else {
+      updateHandle.value = null
+      updatePhase.value = 'latest'
+    }
+  } catch (cause) {
+    updateError.value = friendlyUpdateError(cause instanceof Error ? cause.message : String(cause))
+    updatePhase.value = 'error'
+  }
+}
+
+async function installUpdate() {
+  const update = updateHandle.value
+  if (!update) return
+  updatePhase.value = 'downloading'
+  updateProgress.value = null
+  try {
+    let total = 0
+    let downloaded = 0
+    await update.downloadAndInstall(event => {
+      if (event.event === 'Started') {
+        total = event.data.contentLength ?? 0
+        updateProgress.value = total > 0 ? 0 : null
+      } else if (event.event === 'Progress') {
+        downloaded += event.data.chunkLength
+        if (total > 0) updateProgress.value = Math.min(100, (downloaded / total) * 100)
+      } else if (event.event === 'Finished') {
+        updateProgress.value = 100
+      }
+    })
+    updatePhase.value = 'ready'
+  } catch (cause) {
+    updateError.value = friendlyUpdateError(cause instanceof Error ? cause.message : String(cause))
+    updatePhase.value = 'error'
+  }
+}
+
+async function onUpdateAction() {
+  if (updateBusy.value) return
+  if (updatePhase.value === 'ready') {
+    try {
+      await relaunch()
+    } catch (cause) {
+      updateError.value = friendlyUpdateError(cause instanceof Error ? cause.message : String(cause))
+      updatePhase.value = 'error'
+    }
+    return
+  }
+  if (updatePhase.value === 'available') {
+    await installUpdate()
+    return
+  }
+  await checkForUpdate()
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -197,6 +312,18 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
             <span class="info-value mono">
               PID {{ runtime.pid }} · {{ runtime.baseUrl }}
             </span>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="section-label">更新</div>
+          <div class="update-row">
+            <span class="update-text" :class="{ 'is-error': updatePhase === 'error' }">
+              {{ updateText }}
+            </span>
+            <button class="recheck-btn" :disabled="updateBusy" @click="onUpdateAction">
+              {{ updateActionLabel }}
+            </button>
           </div>
         </section>
 
@@ -374,6 +501,28 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
 
 .status-dot.tone-error {
   background: var(--red);
+}
+
+.update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+}
+
+.update-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-text.is-error {
+  color: var(--red);
 }
 
 .settings-note {

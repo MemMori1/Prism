@@ -2,5 +2,5 @@
   "identifier": "default",
   "description": "Prism 主窗口默认能力",
   "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": ["core:default", "notification:default", "updater:default", "process:default"]
 }
