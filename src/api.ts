@@ -8,6 +8,8 @@ import type {
   McpServer,
   PermissionRequest,
   ProjectItem,
+  RoutineDefinition,
+  RoutineLogEntry,
   RuntimeStatus,
   SearchHit,
   SearchStats,
@@ -62,4 +64,29 @@ export const api = {
   openPath: (path: string) => invoke<void>('open_path', { path }),
   workshopMcp: () => invoke<McpServer[]>('workshop_mcp'),
   mcpProbe: (url: string) => invoke<McpProbeResult>('mcp_probe', { url }),
+  routinesList: () => invoke<RoutineDefinition[]>('routines_list'),
+  routineCreate: (name: string, schedule: string, prompt: string, engine: string) =>
+    invoke<RoutineDefinition>('routine_create', { name, schedule, prompt, engine }),
+  routineUpdate: (
+    id: string,
+    patch: {
+      name?: string
+      schedule?: string
+      prompt?: string
+      engine?: string
+      enabled?: boolean
+    },
+  ) =>
+    invoke<RoutineDefinition>('routine_update', {
+      id,
+      name: patch.name ?? null,
+      schedule: patch.schedule ?? null,
+      prompt: patch.prompt ?? null,
+      engine: patch.engine ?? null,
+      enabled: patch.enabled ?? null,
+    }),
+  routineDelete: (id: string) => invoke<void>('routine_delete', { id }),
+  routineRun: (id: string) => invoke<void>('routine_run', { id }),
+  routineLogs: (id: string, limit?: number) =>
+    invoke<RoutineLogEntry[]>('routine_logs', { id, limit: limit ?? null }),
 }

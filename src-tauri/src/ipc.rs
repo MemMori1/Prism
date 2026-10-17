@@ -13,6 +13,8 @@ use crate::engines::core::{
 use crate::engines::opencode;
 use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runtime, RuntimeStatus};
 use crate::engines::{mcp, workshop};
+use crate::routines::{runner, scheduler::RoutinesState, store};
+use crate::routines::store::{RoutineDefinition, RoutineLogEntry, RoutineView};
 
 fn opencode_db_path() -> Result<PathBuf, String> {
     opencode::locator::database_path().ok_or_else(|| {
@@ -629,4 +631,124 @@ pub async fn mcp_probe(url: String) -> Result<mcp::ProbeResult, String> {
     .await
     .map_err(|cause| cause.to_string())?;
     Ok(result)
+}
+
+// ---------------------------------------------------------------- 定时任务（M11b）
+
+fn routines_store_path() -> Result<PathBuf, String> {
+    store::store_path().ok_or_else(|| "无法定位 ~/.prism 数据目录".to_string())
+}
+
+/// 任务列表（含派生字段：下次触发、是否运行中）。
+#[tauri::command]
+pub async fn routines_list(state: tauri::State<'_, RoutinesState>) -> Result<Vec<RoutineView>, String> {
+    let definitions = store::load_all(&routines_store_path()?)?;
+    let now = runner::now_ms();
+    Ok(definitions
+        .iter()
+        .map(|item| store::to_view(item, now, state.is_running(&item.id)))
+        .collect())
+}
+
+/// 新建任务（调度表达式立即校验；触发时刻由调度器 30s 轮询接管）。
+#[tauri::command]
+pub async fn routine_create(
+    name: String,
+    schedule: String,
+    prompt: String,
+    engine: String,
+) -> Result<RoutineView, String> {
+    store::validate(&name, &schedule, &prompt, &engine)?;
+    let path = routines_store_path()?;
+    let mut definitions = store::load_all(&path)?;
+    let now = runner::now_ms();
+    let definition = RoutineDefinition {
+        id: store::new_id(now),
+        name: name.trim().to_string(),
+        schedule: schedule.trim().to_string(),
+        prompt: prompt.trim().to_string(),
+        engine,
+        enabled: true,
+        created_at: now,
+        last_trigger: None,
+        last_status: None,
+        last_session_id: None,
+    };
+    definitions.push(definition.clone());
+    store::save_all(&path, &definitions)?;
+    #[cfg(debug_assertions)]
+    println!("[prism] routine_create -> {}（{}）", definition.name, definition.id);
+    Ok(store::to_view(&definition, now, false))
+}
+
+/// 编辑任务；只传需要改的字段（合并后整体校验）。
+#[tauri::command]
+pub async fn routine_update(
+    id: String,
+    name: Option<String>,
+    schedule: Option<String>,
+    prompt: Option<String>,
+    engine: Option<String>,
+    enabled: Option<bool>,
+) -> Result<RoutineView, String> {
+    let path = routines_store_path()?;
+    let mut definitions = store::load_all(&path)?;
+    let definition = definitions
+        .iter_mut()
+        .find(|item| item.id == id)
+        .ok_or_else(|| "任务不存在（可能已被删除）".to_string())?;
+    if let Some(value) = name {
+        definition.name = value.trim().to_string();
+    }
+    if let Some(value) = schedule {
+        definition.schedule = value.trim().to_string();
+    }
+    if let Some(value) = prompt {
+        definition.prompt = value.trim().to_string();
+    }
+    if let Some(value) = engine {
+        definition.engine = value;
+    }
+    if let Some(value) = enabled {
+        definition.enabled = value;
+    }
+    store::validate(
+        &definition.name,
+        &definition.schedule,
+        &definition.prompt,
+        &definition.engine,
+    )?;
+    let snapshot = definition.clone();
+    store::save_all(&path, &definitions)?;
+    Ok(store::to_view(&snapshot, runner::now_ms(), false))
+}
+
+#[tauri::command]
+pub async fn routine_delete(id: String) -> Result<(), String> {
+    let path = routines_store_path()?;
+    let mut definitions = store::load_all(&path)?;
+    let before = definitions.len();
+    definitions.retain(|item| item.id != id);
+    if definitions.len() == before {
+        return Err("任务不存在（可能已被删除）".to_string());
+    }
+    store::save_all(&path, &definitions)
+}
+
+/// 立即运行（不看 enabled；与前台的"立即运行"按钮对应）。
+#[tauri::command]
+pub async fn routine_run(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let definitions = store::load_all(&routines_store_path()?)?;
+    let definition = definitions
+        .into_iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| "任务不存在（可能已被删除）".to_string())?;
+    runner::run_in_background(&app, definition)
+}
+
+/// 任务执行日志（新到旧）。
+#[tauri::command]
+pub async fn routine_logs(id: String, limit: Option<usize>) -> Result<Vec<RoutineLogEntry>, String> {
+    let dir = store::logs_dir().ok_or_else(|| "无法定位 ~/.prism 数据目录".to_string())?;
+    Ok(store::read_logs(&dir, &id, limit.unwrap_or(20)))
 }

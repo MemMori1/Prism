@@ -166,8 +166,7 @@ impl Runtime {
         Self::build(None, extra_args)
     }
 
-    /// 进程内订阅引擎事件（测试与调试通道）。
-    #[cfg(test)]
+    /// 进程内订阅引擎事件（例行任务执行器与测试用；前端走 Tauri 事件）。
     pub fn subscribe(&self) -> mpsc::Receiver<Value> {
         let (sender, receiver) = mpsc::channel();
         self.inner

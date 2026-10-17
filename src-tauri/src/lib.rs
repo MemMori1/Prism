@@ -1,5 +1,6 @@
 mod engines;
 mod ipc;
+mod routines;
 
 use engines::codex::runtime::Runtime as CodexRuntime;
 use engines::opencode::runtime::Runtime;
@@ -31,10 +32,18 @@ pub fn run() {
             ipc::open_path,
             ipc::workshop_mcp,
             ipc::mcp_probe,
+            ipc::routines_list,
+            ipc::routine_create,
+            ipc::routine_update,
+            ipc::routine_delete,
+            ipc::routine_run,
+            ipc::routine_logs,
         ])
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));
             app.manage(CodexRuntime::new(app.handle().clone()));
+            app.manage(routines::scheduler::RoutinesState::new());
+            routines::scheduler::start(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())

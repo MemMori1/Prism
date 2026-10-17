@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onBeforeUnmount, onMounted, ref, computed } from 'vue'
 import { api } from './api'
 import { relativeTime } from './format'
 import {
@@ -7,9 +7,18 @@ import {
   unreadCount,
   markAllRead,
   clearNotifications,
+  pushNotification,
   type NotifyItem,
 } from './notify'
-import type { EngineHealth, ProjectItem, SearchHit, SessionSummary } from './types'
+import { onRoutineEvent } from './routineEvents'
+import { engineLabel } from './workshop'
+import type {
+  EngineHealth,
+  ProjectItem,
+  RoutineEventPayload,
+  SearchHit,
+  SessionSummary,
+} from './types'
 import ProjectsPane from './components/ProjectsPane.vue'
 import SessionsPane from './components/SessionsPane.vue'
 import SessionView from './components/SessionView.vue'
@@ -17,16 +26,20 @@ import SettingsDialog from './components/SettingsDialog.vue'
 import WorkbenchPane from './components/WorkbenchPane.vue'
 import SearchPane from './components/SearchPane.vue'
 import WorkshopPane from './components/WorkshopPane.vue'
+import AutomationPane from './components/AutomationPane.vue'
 
 const health = ref<EngineHealth[]>([])
 const error = ref<string | null>(null)
 const showSettings = ref(false)
 
-type AppView = 'archive' | 'workbench' | 'search' | 'workshop'
+type AppView = 'archive' | 'workbench' | 'search' | 'workshop' | 'automation'
 const VIEW_KEY = 'prism-view'
 const storedView = localStorage.getItem(VIEW_KEY)
 const view = ref<AppView>(
-  storedView === 'workbench' || storedView === 'search' || storedView === 'workshop'
+  storedView === 'workbench' ||
+    storedView === 'search' ||
+    storedView === 'workshop' ||
+    storedView === 'automation'
     ? storedView
     : 'archive',
 )
@@ -85,6 +98,66 @@ async function openNotification(item: NotifyItem): Promise<void> {
     await selectProject(item.projectId)
   }
   selectSession(item.sessionId)
+}
+
+// ---- 例行任务事件（M11b）：运行结果 / 权限请求 → 通知中心 ----
+
+/** 按引擎 + 工作目录定位项目（必要时刷新一次项目列表）。 */
+async function resolveProjectId(engine: string, directory: string): Promise<string | null> {
+  const find = () =>
+    projects.value.find(item => item.engine === engine && item.worktree === directory)
+  const known = find()
+  if (known) return known.id
+  await loadProjects()
+  return find()?.id ?? null
+}
+
+async function handleRoutineEvent(payload: RoutineEventPayload): Promise<void> {
+  const projectId = payload.directory
+    ? await resolveProjectId(payload.engine, payload.directory)
+    : null
+  if (payload.kind === 'permission') {
+    pushNotification({
+      key: `rt:${payload.routineId}:perm:${payload.requestId ?? payload.startedAt}`,
+      kind: 'permission',
+      title: `「${payload.name}」等待审批`,
+      body: '例行任务被权限请求阻塞，点开处理',
+      sessionId: payload.sessionId,
+      projectId,
+      dedupe: 'key',
+    })
+    return
+  }
+  const failed = payload.kind === 'failed'
+  pushNotification({
+    key: `rt:${payload.routineId}:${payload.startedAt}`,
+    kind: failed ? 'failed' : 'done',
+    title: `「${payload.name}」例行${failed ? '失败' : '完成'}`,
+    body: failed
+      ? (payload.error ?? '执行失败')
+      : `${engineLabel(payload.engine)}${payload.status === 'interrupted' ? ' · 已打断' : ''}`,
+    sessionId: payload.sessionId,
+    projectId,
+    dedupe: 'key',
+  })
+}
+
+/** 打开某引擎会话（例行日志「打开会话」）：归档视图定位到项目与会话。 */
+async function openSessionByLocation(payload: {
+  engine: string
+  directory: string
+  sessionId: string
+}): Promise<void> {
+  const projectId = await resolveProjectId(payload.engine, payload.directory)
+  if (!projectId) {
+    reportError('未找到该会话所在项目（例行工作区可能尚未被引擎收录）')
+    return
+  }
+  setView('archive')
+  if (selectedProjectId.value !== projectId) {
+    await selectProject(projectId)
+  }
+  selectSession(payload.sessionId)
 }
 
 /** 从归档「⇥ 工作台」按钮打开：开出对应列并切到工作台。 */
@@ -220,7 +293,16 @@ async function reload() {
   }
 }
 
-onMounted(reload)
+onMounted(() => {
+  void reload()
+})
+
+// 例行任务事件（Rust 调度器广播）：通知中心 + 刷新由各视图自行订阅。
+const stopRoutineEvents = onRoutineEvent(payload => {
+  void handleRoutineEvent(payload).catch(reportError)
+})
+
+onBeforeUnmount(stopRoutineEvents)
 </script>
 
 <template>
@@ -281,6 +363,14 @@ onMounted(reload)
           @click="setView('workshop')"
         >
           工坊
+        </button>
+        <button
+          class="view-btn"
+          :class="{ active: view === 'automation' }"
+          title="自动化：定时任务——到点用引擎跑提示词，结果进通知中心"
+          @click="setView('automation')"
+        >
+          自动化
         </button>
       </div>
 
@@ -394,6 +484,11 @@ onMounted(reload)
         @open-hit="openSearchHit"
       />
       <WorkshopPane v-show="view === 'workshop'" @error="reportError" />
+      <AutomationPane
+        v-show="view === 'automation'"
+        @error="reportError"
+        @open-session="openSessionByLocation"
+      />
     </div>
 
     <SettingsDialog v-if="showSettings" @close="showSettings = false" />

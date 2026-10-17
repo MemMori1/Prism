@@ -171,3 +171,48 @@ export interface McpProbeResult {
   latencyMs: number
   error: string | null
 }
+
+// ---- 定时任务（M11b） ----
+
+/** 任务定义（列表接口附派生字段 nextRun / running）。 */
+export interface RoutineDefinition {
+  id: string
+  name: string
+  /** 五字段 cron（分 时 日 月 周）。 */
+  schedule: string
+  prompt: string
+  engine: string
+  enabled: boolean
+  createdAt: number
+  /** 最近一次触发时刻（无论成败）。 */
+  lastTrigger: number | null
+  /** succeeded / failed / interrupted / timeout / error */
+  lastStatus: string | null
+  lastSessionId: string | null
+  nextRun: number | null
+  running: boolean
+}
+
+export interface RoutineLogEntry {
+  startedAt: number
+  finishedAt: number | null
+  status: string
+  sessionId: string | null
+  engine: string
+  directory: string
+  error: string | null
+}
+
+/** 例行任务事件（Rust 调度器 → 前端通知 / 刷新）。 */
+export interface RoutineEventPayload {
+  kind: 'done' | 'failed' | 'permission'
+  routineId: string
+  name: string
+  engine: string
+  directory: string
+  sessionId: string | null
+  startedAt: number
+  status: string | null
+  error: string | null
+  requestId: string | null
+}
