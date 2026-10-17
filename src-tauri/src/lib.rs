@@ -1,6 +1,7 @@
 mod engines;
 mod ipc;
 mod routines;
+mod tray;
 
 use engines::codex::runtime::Runtime as CodexRuntime;
 use engines::opencode::runtime::Runtime;
@@ -38,18 +39,37 @@ pub fn run() {
             ipc::routine_delete,
             ipc::routine_run,
             ipc::routine_logs,
+            ipc::tray_status,
         ])
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));
             app.manage(CodexRuntime::new(app.handle().clone()));
             app.manage(routines::scheduler::RoutinesState::new());
             routines::scheduler::start(app.handle().clone());
+            tray::setup(app.handle())?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 关窗 ≠ 退出：隐藏窗口，进程与定时调度继续跑；退出走托盘菜单或 Cmd+Q。
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if !tray::is_quitting() {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .build(tauri::generate_context!())
         .expect("error while building Prism")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::ExitRequested { .. } => {
+                // Cmd+Q / 系统注销：放行退出，并解除关窗拦截。
+                tray::mark_quitting();
+            }
+            tauri::RunEvent::Reopen { .. } => {
+                // Dock 图标被点击：唤起主窗口（macOS）。
+                tray::show_main(app_handle);
+            }
+            tauri::RunEvent::Exit => {
                 if let Some(runtime) = app_handle.try_state::<Runtime>() {
                     runtime.shutdown();
                 }
@@ -57,5 +77,6 @@ pub fn run() {
                     codex.shutdown();
                 }
             }
+            _ => {}
         });
 }

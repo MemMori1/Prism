@@ -21,7 +21,12 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'error', message: string): void
   (e: 'settled'): void
-  (e: 'status', status: { running: number; waiting: number }): void
+  (e: 'status', status: {
+    running: number
+    waiting: number
+    runningIds: string[]
+    waitingIds: string[]
+  }): void
 }>()
 
 interface WorkbenchColumn {
@@ -43,11 +48,23 @@ const runningCount = computed(() => columns.value.filter(column => column.status
 const waitingCount = computed(() =>
   columns.value.reduce((sum, column) => sum + column.status.waiting, 0),
 )
+const runningIds = computed(() =>
+  columns.value.filter(column => column.status.running).map(column => column.sessionId),
+)
+const waitingIds = computed(() =>
+  columns.value.filter(column => column.status.waiting > 0).map(column => column.sessionId),
+)
 
-// 状态汇总上报（顶栏角标用）。
+// 状态汇总上报（顶栏角标 + 托盘用；id 列表供托盘与归档视图去重）。
 watch(
-  [runningCount, waitingCount],
-  () => emit('status', { running: runningCount.value, waiting: waitingCount.value }),
+  [runningCount, waitingCount, runningIds, waitingIds],
+  () =>
+    emit('status', {
+      running: runningCount.value,
+      waiting: waitingCount.value,
+      runningIds: runningIds.value,
+      waitingIds: waitingIds.value,
+    }),
   { immediate: true },
 )
 

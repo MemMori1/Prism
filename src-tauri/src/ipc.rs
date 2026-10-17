@@ -752,3 +752,9 @@ pub async fn routine_logs(id: String, limit: Option<usize>) -> Result<Vec<Routin
     let dir = store::logs_dir().ok_or_else(|| "无法定位 ~/.prism 数据目录".to_string())?;
     Ok(store::read_logs(&dir, &id, limit.unwrap_or(20)))
 }
+
+/// 托盘状态刷新：前端把「执行中 / 待审批」实时推给菜单栏（尽力而为，失败静默）。
+#[tauri::command]
+pub fn tray_status(app: tauri::AppHandle, running: u32, waiting: u32) {
+    crate::tray::update_status(&app, running, waiting);
+}

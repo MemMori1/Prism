@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, computed } from 'vue'
+import { onBeforeUnmount, onMounted, ref, computed, watch } from 'vue'
 import { api } from './api'
 import { relativeTime } from './format'
+import { mergeTrayCounts, type ArchiveStatus, type WorkbenchStatus } from './trayStatus'
 import {
   notifications,
   unreadCount,
@@ -44,7 +45,8 @@ const view = ref<AppView>(
     : 'archive',
 )
 const workbenchRef = ref<InstanceType<typeof WorkbenchPane> | null>(null)
-const wbStatus = ref<{ running: number; waiting: number }>({ running: 0, waiting: 0 })
+const wbStatus = ref<WorkbenchStatus>({ running: 0, waiting: 0, runningIds: [], waitingIds: [] })
+const archiveStatus = ref<ArchiveStatus>({ running: false, waiting: 0 })
 
 /** 搜索结果定位：切到归档、选中会话并滚动到命中消息。 */
 const pendingJump = ref<{ sessionId: string; messageId: string } | null>(null)
@@ -181,6 +183,24 @@ const selectedProject = computed(
 )
 const selectedSession = computed(
   () => sessions.value.find(session => session.id === selectedSessionId.value) ?? null,
+)
+
+// ---- 托盘状态（M12）：合并工作台 + 归档视图，实时推给菜单栏 ----
+
+const trayCounts = computed(() =>
+  mergeTrayCounts(wbStatus.value, archiveStatus.value, selectedSessionId.value),
+)
+watch(
+  trayCounts,
+  (counts, previous) => {
+    if (previous && previous.running === counts.running && previous.waiting === counts.waiting) {
+      return
+    }
+    void api.trayStatus(counts.running, counts.waiting).catch(() => {
+      // 托盘只是状态瞭望窗，失败静默（例如旧内核不带该命令）。
+    })
+  },
+  { immediate: true },
 )
 
 type EngineTone = 'muted' | 'ok' | 'warn' | 'error'
@@ -467,6 +487,7 @@ onBeforeUnmount(stopRoutineEvents)
           @settled="onSessionSettled"
           @open-workbench="openInWorkbench"
           @jump-consumed="pendingJump = null"
+          @status="archiveStatus = $event"
         />
       </div>
       <WorkbenchPane

@@ -89,4 +89,6 @@ export const api = {
   routineRun: (id: string) => invoke<void>('routine_run', { id }),
   routineLogs: (id: string, limit?: number) =>
     invoke<RoutineLogEntry[]>('routine_logs', { id, limit: limit ?? null }),
+  trayStatus: (running: number, waiting: number) =>
+    invoke<void>('tray_status', { running, waiting }),
 }
