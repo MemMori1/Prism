@@ -70,8 +70,8 @@ mod tests {
     #[test]
     fn encodes_project_dirs_like_cli() {
         assert_eq!(
-            encode_project_dir(Path::new("/Users/edwa2d4th/Desktop/project")),
-            "-Users-edwa2d4th-Desktop-project"
+            encode_project_dir(Path::new("/Users/example/Work/demo")),
+            "-Users-example-Work-demo"
         );
         // '.' 与 '_' 同样编码为 '-'（有损、不可逆，故 cwd 优先从档案内取）。
         assert_eq!(encode_project_dir(Path::new("/tmp/my.app_v2")), "-tmp-my-app-v2");
