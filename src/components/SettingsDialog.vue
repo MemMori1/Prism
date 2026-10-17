@@ -16,10 +16,12 @@ import {
 } from '../settingsSections'
 import { friendlyUpdateError } from '../updateStatus'
 import { readTheme, setThemeMode, THEME_MODES, type ThemeMode } from '../theme'
+import ModelProviders from './ModelProviders.vue'
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'open-view', view: AppView): void
+  (e: 'models-changed'): void
 }>()
 
 const activeSection = ref<SettingsSectionId>('system')
@@ -67,6 +69,7 @@ const engineRoles: Record<string, string> = {
   opencode: '运行轴',
   codex: '浏览 + 运行',
   claude: '历史浏览',
+  native: '内置运行轴',
 }
 
 const engineCards = computed(() =>
@@ -449,6 +452,10 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
                 </div>
               </div>
             </div>
+          </section>
+
+          <section v-show="activeSection === 'models'" class="settings-page">
+            <ModelProviders @changed="emit('models-changed')" />
           </section>
 
           <section v-show="activeSection === 'engines'" class="settings-page">

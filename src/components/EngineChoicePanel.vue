@@ -72,6 +72,25 @@ function pick(choice: EngineChoice) {
         >
           <span class="engine-icon" :class="`icon-${choice.icon}`" aria-hidden="true">
             <span v-if="choice.icon === 'claude'" class="ai-glyph">AI</span>
+            <svg
+              v-else-if="choice.icon === 'prism'"
+              viewBox="0 0 24 24"
+              width="19"
+              height="19"
+            >
+              <path
+                d="M12 3.4 20.6 12 12 20.6 3.4 12 12 3.4Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M12 8.1 15.9 12 12 15.9 8.1 12 12 8.1Z"
+                fill="currentColor"
+                opacity="0.55"
+              />
+            </svg>
             <svg v-else-if="choice.icon === 'codex'" viewBox="0 0 24 24" width="19" height="19">
               <path
                 d="M8.1 4.9a4.1 4.1 0 0 1 6.5 1.3 4.1 4.1 0 0 1 3.1 6 4.1 4.1 0 0 1-5 5 4.1 4.1 0 0 1-6.5-1.3 4.1 4.1 0 0 1-3.1-6 4.1 4.1 0 0 1 5-5Z"
@@ -95,6 +114,7 @@ function pick(choice: EngineChoice) {
             <span class="engine-name">{{ choice.label }}</span>
             <span class="engine-desc">{{ choice.description }}</span>
             <span v-if="choice.checking" class="engine-state">检测中…</span>
+            <span v-else-if="choice.needsSetup" class="engine-state">未配置 · 点开填 API Key</span>
             <span v-else-if="!choice.available" class="engine-state">当前不可用</span>
             <span v-else-if="selecting === choice.id" class="engine-state working">正在创建…</span>
           </span>

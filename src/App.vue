@@ -36,6 +36,7 @@ import SessionsPane from './components/SessionsPane.vue'
 import SplitHandle from './components/SplitHandle.vue'
 import SessionView from './components/SessionView.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import NativeSetup from './components/NativeSetup.vue'
 import WorkbenchPane from './components/WorkbenchPane.vue'
 import NewSessionPanel from './components/NewSessionPanel.vue'
 import SearchPane from './components/SearchPane.vue'
@@ -194,6 +195,10 @@ const sessionsLoading = ref(false)
 const selectedSessionId = ref<string | null>(null)
 const creating = ref(false)
 const enginePickerOpen = ref(false)
+/** 原生引擎 API 配置弹窗。 */
+const nativeSetupOpen = ref(false)
+/** 弹窗是从「新建原生会话」进来的：保存后自动继续建。 */
+const pendingNativeCreate = ref(false)
 const createError = ref<string | null>(null)
 
 const selectedProject = computed(
@@ -306,10 +311,36 @@ function cancelCreateSession() {
 async function createSession(engine: string) {
   const project = selectedProject.value
   if (!project || creating.value) return
+  // 原生引擎没配 API 时，先弹配置向导；保存后自动继续建会话。
+  if (engine === 'native') {
+    try {
+      const config = await api.nativeConfig()
+      if (!config.ready) {
+        pendingNativeCreate.value = true
+        nativeSetupOpen.value = true
+        return
+      }
+    } catch (cause) {
+      createError.value = cause instanceof Error ? cause.message : String(cause)
+      return
+    }
+  }
   creating.value = true
   createError.value = null
   try {
     const created = await api.sessionCreate(project.worktree, engine)
+    if (engine === 'native') {
+      // 原生会话挂在 `native:<目录>` 这个项目下，和当前项目（可能来自别家）不同，
+      // 所以要先把项目列表刷新出来，再切过去选中新会话。
+      await loadProjects()
+      const nativeProjectId = `native:${project.worktree}`
+      if (projects.value.some(item => item.id === nativeProjectId)) {
+        await selectProject(nativeProjectId)
+      }
+      selectedSessionId.value = created.sessionId
+      enginePickerOpen.value = false
+      return
+    }
     // DB 写入可能稍有延迟：重试几次让新会话出现在列表里。
     for (let attempt = 0; attempt < 6; attempt += 1) {
       const loaded = await api.listSessions(project.id)
@@ -324,6 +355,29 @@ async function createSession(engine: string) {
     createError.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     creating.value = false
+  }
+}
+
+/** 原生引擎配置保存后：刷新健康状态，若刚才是在建会话就继续。 */
+async function onNativeSaved() {
+  nativeSetupOpen.value = false
+  const resume = pendingNativeCreate.value
+  pendingNativeCreate.value = false
+  await refreshEngines()
+  if (resume) await createSession('native')
+}
+
+function closeNativeSetup() {
+  nativeSetupOpen.value = false
+  pendingNativeCreate.value = false
+}
+
+/** 只刷新引擎健康（原生引擎配置变了，卡片状态要跟着变）。 */
+async function refreshEngines() {
+  try {
+    health.value = await api.engineHealth()
+  } catch (cause) {
+    reportError(cause)
   }
 }
 
@@ -626,6 +680,13 @@ onBeforeUnmount(() => {
       v-if="showSettings"
       @close="showSettings = false"
       @open-view="openSettingsView"
+      @models-changed="refreshEngines"
+    />
+
+    <NativeSetup
+      v-if="nativeSetupOpen"
+      @close="closeNativeSetup"
+      @saved="onNativeSaved"
     />
   </div>
 </template>

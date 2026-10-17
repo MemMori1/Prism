@@ -1,7 +1,7 @@
 import type { EngineHealth, ProjectItem } from './types'
 
 /** 引擎选择页的图标样式（无第三方图标依赖，用内联 SVG / 文本绘制）。 */
-export type EngineIcon = 'claude' | 'codex' | 'opencode'
+export type EngineIcon = 'claude' | 'codex' | 'opencode' | 'prism'
 export type EngineAccent = 'claude' | 'codex' | 'primary'
 
 export interface EngineChoice {
@@ -14,12 +14,21 @@ export interface EngineChoice {
   available: boolean
   /** 尚未拿到健康数据。 */
   checking: boolean
+  /** 原生引擎：还没配 API（点开卡片去填）。 */
+  needsSetup?: boolean
 }
 
-/** 运行轴当前能从 Prism 直接建会话的引擎（Claude 运行轴仍在开发）。 */
-export const CREATABLE_ENGINE_IDS = ['opencode', 'codex'] as const
+/** 运行轴当前能从 Prism 直接建会话的引擎。 */
+export const CREATABLE_ENGINE_IDS = ['opencode', 'codex', 'native'] as const
 
 const PRESENTATION: ReadonlyArray<Omit<EngineChoice, 'available' | 'checking'>> = [
+  {
+    id: 'native',
+    label: 'Prism 原生',
+    description: '内置 agent：用自己的 API Key 直连模型，读写文件与跑命令',
+    icon: 'prism',
+    accent: 'primary',
+  },
   {
     id: 'claude',
     label: 'Claude Code',
@@ -52,6 +61,15 @@ export function engineChoices(health: EngineHealth[]): EngineChoice[] {
   const byId = new Map(health.map(item => [item.engineId, item]))
   return PRESENTATION.map(item => {
     const entry = byId.get(item.id)
+    // 原生引擎不依赖本机 CLI：永远可点，没配 API 时点开是配置向导。
+    if (item.id === 'native') {
+      return {
+        ...item,
+        available: true,
+        checking: false,
+        needsSetup: !!entry && !entry.ready,
+      }
+    }
     return {
       ...item,
       available: !!entry?.ready && creatable(item.id),

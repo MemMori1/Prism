@@ -12,6 +12,7 @@ use crate::engines::codex::runtime::Runtime as CodexRuntime;
 use crate::engines::core::{
     EngineHealth, ProjectItem, SearchHit, SearchStats, SessionSummary, TimelinePage, ToolDetail,
 };
+use crate::engines::native;
 use crate::engines::opencode;
 use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runtime, RuntimeStatus};
 use crate::engines::quota;
@@ -52,6 +53,11 @@ pub fn known_project_cwds() -> Vec<String> {
             cwds.extend(list.into_iter().map(|item| item.worktree));
         }
     }
+    cwds.extend(
+        native::store::list_projects()
+            .into_iter()
+            .map(|item| item.worktree),
+    );
     cwds.sort();
     cwds.dedup();
     cwds.retain(|cwd| Path::new(cwd).is_dir());
@@ -102,13 +108,168 @@ pub async fn engine_health() -> Result<Vec<EngineHealth>, String> {
             database_path: claude_root.map(|path| path.display().to_string()),
             cli_path: claude_cli.map(|path| path.display().to_string()),
         },
+        // 原生引擎：没有 CLI，也没有别人的数据库——配好 API 就算就绪。
+        EngineHealth {
+            engine_id: native::ENGINE_ID.to_string(),
+            display_name: "Prism 原生".to_string(),
+            ready: native::config::load().ready(),
+            database_path: native::config::dir().map(|path| path.display().to_string()),
+            cli_path: None,
+        },
     ])
+}
+
+// ---------------------------------------------------------------- 原生引擎
+
+/// 原生引擎的模型服务清单（不含密钥原文）。
+#[tauri::command]
+pub async fn native_config() -> Result<native::config::NativeConfigView, String> {
+    Ok(native::config::load().view())
+}
+
+/// 新增 / 更新一个模型服务；`apiKey` 留空表示沿用已存的密钥。
+#[tauri::command]
+pub async fn native_provider_save(
+    provider: native::config::ProviderInput,
+) -> Result<native::config::NativeConfigView, String> {
+    tauri::async_runtime::spawn_blocking(move || native::config::save_provider(provider))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 删除一个模型服务（选中的服务被删会自动改选别家）。
+#[tauri::command]
+pub async fn native_provider_delete(
+    id: String,
+) -> Result<native::config::NativeConfigView, String> {
+    tauri::async_runtime::spawn_blocking(move || native::config::delete_provider(&id))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 选默认模型。
+#[tauri::command]
+pub async fn native_model_select(
+    provider: String,
+    model: String,
+) -> Result<native::config::NativeConfigView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        native::config::select_model(&provider, &model)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 只改运行参数（最大工具往返次数）。
+#[tauri::command]
+pub async fn native_config_set(
+    limits: native::config::LimitsInput,
+) -> Result<native::config::NativeConfigView, String> {
+    tauri::async_runtime::spawn_blocking(move || native::config::update_limits(limits))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 拉取某个服务可用的模型（`GET {base}/models`）。
+///
+/// 三个入参都可由未保存的表单直接提供：新建服务时用户还没点保存，
+/// 也要能先「拉取模型」。`apiKey` 空则用这个服务已存的密钥。
+#[tauri::command]
+pub async fn native_models_fetch(
+    provider_id: Option<String>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+) -> Result<Vec<native::config::ModelEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let saved = provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|id| {
+                let config = native::config::load();
+                config.find(id).map(|item| item.clone())
+            });
+        let base = base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| saved.as_ref().map(|item| item.base_url.clone()))
+            .ok_or_else(|| "先把 Base URL 填上".to_string())?;
+        let key = api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| saved.as_ref().map(|item| item.api_key.clone()))
+            .unwrap_or_default();
+        // 用临时服务对象复用同一套 URL 拼接规则（表单里的值还没落盘）。
+        let draft = native::config::ProviderConfig {
+            id: saved
+                .as_ref()
+                .map(|item| item.id.clone())
+                .unwrap_or_else(|| "adhoc".to_string()),
+            label: saved
+                .as_ref()
+                .map(|item| item.label.clone())
+                .unwrap_or_default(),
+            protocol: "openai".to_string(),
+            base_url: base,
+            api_key: key,
+            models: Vec::new(),
+        };
+        native::provider::fetch_models(&draft)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
+/// 连通性探测：发一条最小请求验证 地址 / 密钥 / 模型。
+#[tauri::command]
+pub async fn native_probe(
+    provider_id: Option<String>,
+    model: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = native::config::load();
+        let picked = match provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(id) => {
+                let item = config
+                    .find(id)
+                    .ok_or_else(|| format!("模型服务不存在：{id}"))?;
+                let model = model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| item.models.first().map(|entry| entry.id.clone()))
+                    .ok_or_else(|| format!("{} 还没勾选模型", item.label))?;
+                Some((item.clone(), model))
+            }
+            None => None,
+        };
+        let (provider, model) = match picked {
+            Some(pair) => pair,
+            None => {
+                let (provider, model) = config.selection().ok_or_else(|| {
+                    "还没有可用的模型服务：先去 设置 → 模型管理 添加一个".to_string()
+                })?;
+                (provider.clone(), model.id.clone())
+            }
+        };
+        native::provider::probe(&provider, &model)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
 }
 
 /// 项目列表：各引擎合并（任一引擎缺数据不拖垮另一个），按最近活动排序。
 #[tauri::command]
-pub async fn list_projects() -> Result<Vec<ProjectItem>, String> {
-    let opencode_db = opencode::locator::database_path();
+pub async fn list_projects() -> Result<Vec<ProjectItem>, String> {    let opencode_db = opencode::locator::database_path();
     let codex_db = codex::locator::state_db();
     let claude_root = claude::locator::projects_dir();
     let items = tauri::async_runtime::spawn_blocking(move || {
@@ -131,6 +292,7 @@ pub async fn list_projects() -> Result<Vec<ProjectItem>, String> {
                 Err(cause) => eprintln!("[prism] list_projects(claude) 失败：{cause}"),
             }
         }
+        items.extend(native::store::list_projects());
         items.sort_by(|a, b| b.time_updated.cmp(&a.time_updated));
         items
     })
@@ -146,6 +308,15 @@ pub async fn list_sessions(
     project_id: String,
     limit: Option<i64>,
 ) -> Result<Vec<SessionSummary>, String> {
+    if native::is_native_project(&project_id) {
+        let limit = limit.unwrap_or(500).clamp(1, 1000) as usize;
+        return tauri::async_runtime::spawn_blocking(move || {
+            native::store::list_sessions(&project_id, limit)
+        })
+        .await
+        .map_err(|cause| cause.to_string());
+    }
+
     if codex::state::is_codex_project(&project_id) {
         let db_path = codex_state_db_path()?;
         let cwd = codex::state::cwd_of(&project_id)
@@ -187,6 +358,9 @@ pub async fn list_sessions(
 /// 按 id 读取单个会话概要（工作台恢复 / 刷新列时用）。
 #[tauri::command]
 pub async fn session_summary(session_id: String) -> Result<Option<SessionSummary>, String> {
+    if native::is_native_session(&session_id) {
+        return Ok(native::store::summary(&session_id));
+    }
     if claude::transcript::is_claude_session(&session_id) {
         let root = claude::locator::projects_dir()
             .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
@@ -228,6 +402,12 @@ pub async fn read_timeline(
     let limit = limit
         .unwrap_or_else(opencode::db::timeline_page_size)
         .clamp(1, 500);
+
+    if native::is_native_session(&session_id) {
+        return tauri::async_runtime::spawn_blocking(move || native::store::timeline(&session_id))
+            .await
+            .map_err(|cause| cause.to_string());
+    }
 
     if claude::transcript::is_claude_session(&session_id) {
         let root = claude::locator::projects_dir()
@@ -296,6 +476,10 @@ pub async fn read_timeline(
 pub async fn session_ledger(
     session_id: String,
 ) -> Result<crate::ledger::SessionLedger, String> {
+    if native::is_native_session(&session_id) {
+        // 原生引擎暂时不记文件账本（工具输出已在卡片里）。
+        return Ok(crate::ledger::aggregate(Vec::new()));
+    }
     if claude::transcript::is_claude_session(&session_id) {
         let root = claude::locator::projects_dir()
             .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
@@ -351,6 +535,10 @@ pub async fn read_tool_detail(
     message_id: String,
     call_id: String,
 ) -> Result<ToolDetail, String> {
+    if native::is_native_session(&session_id) {
+        let detail = native::store::tool_detail(&session_id, &call_id);
+        return detail.ok_or_else(|| format!("这条会话里找不到工具调用 {call_id}"));
+    }
     if claude::transcript::is_claude_session(&session_id) {
         let root = claude::locator::projects_dir()
             .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
@@ -444,6 +632,17 @@ pub async fn session_create(
                 .await
                 .map_err(|cause| cause.to_string())?
         }
+        // 原生引擎：不拉起任何进程，只在自己的库里建一条会话。
+        Some("native") => {
+            let meta =
+                tauri::async_runtime::spawn_blocking(move || native::store::create(&directory))
+                    .await
+                    .map_err(|cause| cause.to_string())??;
+            Ok(CreatedSession {
+                session_id: native::session_id_of(&meta.id),
+                directory: Some(meta.directory),
+            })
+        }
         Some(other) => Err(format!("该引擎（{other}）的运行轴尚在开发，暂不能新建会话")),
     }
 }
@@ -498,6 +697,7 @@ fn files_to_note(text: &str, files: &[FileRef]) -> String {
 /// options 可带文件附件 / 模型 / 推理档位（组合器）。
 #[tauri::command]
 pub async fn session_send(
+    app: tauri::AppHandle,
     runtime: tauri::State<'_, Runtime>,
     codex_runtime: tauri::State<'_, CodexRuntime>,
     session_id: String,
@@ -513,6 +713,20 @@ pub async fn session_send(
         options.files.len(),
         options.model
     );
+    if native::is_native_session(&session_id) {
+        // 原生引擎自己跑循环：流式增量走 engine-event，落定后写自己的 JSONL。
+        return tauri::async_runtime::spawn_blocking(move || {
+            native::agent::send(
+                &app,
+                &session_id,
+                &text,
+                options.provider.as_deref(),
+                options.model.as_deref(),
+            )
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
     if is_codex_session(&session_id) {
         let codex_runtime = codex_runtime.inner().clone();
         let text = files_to_note(&text, &options.files);
@@ -577,6 +791,44 @@ pub async fn engine_catalog(
             })
             .await
             .map_err(|cause| cause.to_string())?
+        }
+        "native" => {
+            // 原生引擎的模型目录就是设置里勾过的模型，按服务分组（provider 字段）。
+            let config = native::config::load();
+            let ready = config.ready();
+            let active = config
+                .selection()
+                .map(|(provider, model)| (provider.id.clone(), model.id.clone()));
+            let mut models = Vec::new();
+            for provider in &config.providers {
+                for model in &provider.models {
+                    let is_default = active
+                        .as_ref()
+                        .map(|(provider_id, model_id)| {
+                            provider_id == &provider.id && model_id == &model.id
+                        })
+                        .unwrap_or(false);
+                    models.push(catalog::EngineModel {
+                        id: model.id.clone(),
+                        label: model.display().to_string(),
+                        provider: Some(provider.id.clone()),
+                        variants: Vec::new(),
+                        default_variant: None,
+                        is_default,
+                    });
+                }
+            }
+            Ok(EngineCatalog {
+                engine: "native".to_string(),
+                available: ready,
+                reason: if ready {
+                    None
+                } else {
+                    Some("还没配置模型服务".to_string())
+                },
+                models,
+                commands: Vec::new(),
+            })
         }
         "codex" => {
             let codex_runtime = codex_runtime.inner().clone();
@@ -702,6 +954,10 @@ pub async fn session_interrupt(
 ) -> Result<(), String> {
     #[cfg(debug_assertions)]
     println!("[prism] session_interrupt -> {session_id}");
+    if native::is_native_session(&session_id) {
+        // 原生引擎的回合跑在阻塞线程里，目前没有取消通道（下一版加）。
+        return Err("原生引擎暂不支持中断当前回合".to_string());
+    }
     if is_codex_session(&session_id) {
         let codex_runtime = codex_runtime.inner().clone();
         return tauri::async_runtime::spawn_blocking(move || codex_runtime.interrupt(&session_id))
@@ -721,6 +977,10 @@ pub async fn session_permissions(
     codex_runtime: tauri::State<'_, CodexRuntime>,
     session_id: String,
 ) -> Result<Vec<PermissionRequest>, String> {
+    if native::is_native_session(&session_id) {
+        // 原生引擎目前不做逐条审批：只有路径守卫和命令超时两道闸。
+        return Ok(Vec::new());
+    }
     if is_codex_session(&session_id) {
         let codex_runtime = codex_runtime.inner().clone();
         return tauri::async_runtime::spawn_blocking(move || {

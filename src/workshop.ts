@@ -3,6 +3,7 @@ import type { AssetItem, AssetKind, McpServer } from './types'
 /** 工坊展示辅助：标签、分组与归属文案（纯函数，可单测）。 */
 
 export const ASSET_ENGINE_LABELS: Record<string, string> = {
+  native: 'Prism 原生',
   opencode: 'OpenCode',
   codex: 'Codex',
   claude: 'Claude Code',

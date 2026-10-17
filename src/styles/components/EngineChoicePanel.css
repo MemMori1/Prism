@@ -123,6 +123,11 @@ h2 {
   background: color-mix(in srgb, var(--engine-opencode) 14%, var(--panel));
 }
 
+.icon-prism {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
 .ai-glyph {
   font-family: Georgia, 'Times New Roman', serif;
   font-size: 13px;

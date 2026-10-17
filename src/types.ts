@@ -454,3 +454,54 @@ export interface SendOptions {
   provider?: string | null
   variant?: string | null
 }
+
+/** 一个模型服务里的模型（`active` = 当前选中的那个）。 */
+export interface NativeModel {
+  id: string
+  label: string
+  active: boolean
+}
+
+/** 模型服务（端点）：密钥不回传，只给末四位。 */
+export interface NativeProvider {
+  id: string
+  label: string
+  protocol: string
+  baseUrl: string
+  hasKey: boolean
+  keyHint: string
+  models: NativeModel[]
+  ready: boolean
+  /** 当前选中的模型是否落在这个服务上。 */
+  active: boolean
+}
+
+/** 当前选中的模型。 */
+export interface NativeSelection {
+  provider: string
+  model: string
+}
+
+/** 原生引擎的模型管理视图。 */
+export interface NativeConfigView {
+  providers: NativeProvider[]
+  active: NativeSelection | null
+  maxTurns: number
+  ready: boolean
+  modelCount: number
+}
+
+/** 新增 / 编辑一个模型服务；`apiKey` 留空 = 沿用已存的密钥。 */
+export interface NativeProviderInput {
+  id?: string | null
+  label: string
+  baseUrl: string
+  apiKey?: string
+  clearKey?: boolean
+  models: Array<{ id: string; label?: string | null }>
+}
+
+/** 只改运行参数。 */
+export interface NativeLimitsInput {
+  maxTurns?: number | null
+}

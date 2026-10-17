@@ -13,6 +13,10 @@ import type {
   GitSnapshot,
   McpProbeResult,
   McpServer,
+  NativeConfigView,
+  NativeLimitsInput,
+  NativeModel,
+  NativeProviderInput,
   PermissionRequest,
   ProjectItem,
   QuotaSummary,
@@ -147,4 +151,21 @@ export const api = {
   gitBranches: (directory: string) => invoke<GitBranches>('git_branches', { directory }),
   gitSwitchBranch: (directory: string, branch: string, create = false) =>
     invoke<GitSnapshot>('git_switch_branch', { directory, branch, create }),
+  /** 原生引擎（Prism 内置 agent）的模型服务。 */
+  nativeConfig: () => invoke<NativeConfigView>('native_config'),
+  nativeProviderSave: (provider: NativeProviderInput) =>
+    invoke<NativeConfigView>('native_provider_save', { provider }),
+  nativeProviderDelete: (id: string) =>
+    invoke<NativeConfigView>('native_provider_delete', { id }),
+  nativeModelSelect: (provider: string, model: string) =>
+    invoke<NativeConfigView>('native_model_select', { provider, model }),
+  nativeLimitsSet: (limits: NativeLimitsInput) =>
+    invoke<NativeConfigView>('native_config_set', { limits }),
+  nativeModelsFetch: (input: {
+    providerId?: string | null
+    baseUrl?: string | null
+    apiKey?: string | null
+  }) => invoke<NativeModel[]>('native_models_fetch', input),
+  nativeProbe: (providerId?: string | null, model?: string | null) =>
+    invoke<string>('native_probe', { providerId, model }),
 }

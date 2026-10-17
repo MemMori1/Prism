@@ -6,6 +6,7 @@ describe('设置工作区分类', () => {
     expect(SETTINGS_SECTIONS.map(section => section.label)).toEqual([
       '系统',
       '外观',
+      '模型',
       '引擎',
       '渠道',
       '智能增强',

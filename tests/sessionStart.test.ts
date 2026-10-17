@@ -24,11 +24,33 @@ function project(id: string, timeUpdated: number): ProjectItem {
 }
 
 describe('engineChoices', () => {
-  it('按 Claude、Codex、OpenCode 排列并保留卡片文案', () => {
+  it('原生引擎排在最前，其余按 Claude、Codex、OpenCode 排列', () => {
     const choices = engineChoices([health('opencode', true), health('codex', true), health('claude', true)])
-    expect(choices.map(item => item.id)).toEqual(['claude', 'codex', 'opencode'])
-    expect(choices.map(item => item.label)).toEqual(['Claude Code', 'Codex', 'OpenCode'])
-    expect(choices[2].description).toBe('使用 OpenCode 开始一个空白会话')
+    expect(choices.map(item => item.id)).toEqual(['native', 'claude', 'codex', 'opencode'])
+    expect(choices.map(item => item.label)).toEqual([
+      'Prism 原生',
+      'Claude Code',
+      'Codex',
+      'OpenCode',
+    ])
+    expect(choices[3].description).toBe('使用 OpenCode 开始一个空白会话')
+  })
+
+  it('原生引擎不依赖本机 CLI：没配置也可点，只标记待配置', () => {
+    const choices = engineChoices([
+      { ...health('native', false), cliPath: null },
+      health('codex', true),
+    ])
+    const native = choices.find(item => item.id === 'native')
+    expect(native).toMatchObject({ available: true, checking: false, needsSetup: true })
+  })
+
+  it('原生引擎配好之后不再提示待配置', () => {
+    const choices = engineChoices([health('native', true)])
+    expect(choices.find(item => item.id === 'native')).toMatchObject({
+      available: true,
+      needsSetup: false,
+    })
   })
 
   it('Claude 即使本机就绪也因运行轴未接入而不可用', () => {

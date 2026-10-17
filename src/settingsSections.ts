@@ -3,6 +3,7 @@
 export type SettingsSectionId =
   | 'system'
   | 'appearance'
+  | 'models'
   | 'engines'
   | 'channels'
   | 'intelligence'
@@ -39,6 +40,17 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
       'M7.5 10.5h.01',
       'M9.5 7.5h.01',
       'M14 7.5h.01',
+    ],
+  },
+  {
+    id: 'models',
+    label: '模型',
+    title: '模型管理',
+    description: '原生引擎的模型服务、密钥与默认模型。',
+    icon: [
+      'M4 7.6 12 3l8 4.6-8 4.6-8-4.6Z',
+      'm4 12.2 8 4.6 8-4.6',
+      'm4 16.6 8 4.6 8-4.6',
     ],
   },
   {

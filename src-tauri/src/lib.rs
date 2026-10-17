@@ -66,6 +66,13 @@ pub fn run() {
             ipc::routine_run,
             ipc::routine_logs,
             ipc::tray_status,
+            ipc::native_config,
+            ipc::native_config_set,
+            ipc::native_probe,
+            ipc::native_provider_save,
+            ipc::native_provider_delete,
+            ipc::native_model_select,
+            ipc::native_models_fetch,
         ])
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));
