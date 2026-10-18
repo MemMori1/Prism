@@ -29,6 +29,42 @@ const SKIP_DIRS: &[&str] = &[
     ".git", "node_modules", "target", "dist", "build", ".next", ".nuxt", ".venv", "__pycache__",
     ".turbo", ".cache", "vendor",
 ];
+/// 遍历时的文件数上限：到顶就在结论里说明，不能装成「都看过了」。
+const WALK_MAX_FILES: usize = 4000;
+/// 遍历的最大深度。按真实仓库的典型层级给：src-tauri/src/engines/native/*.rs
+/// 已经在第 4 层，原来限 3 层会把一多半源码挡在外面（实测漏搜过）。
+const WALK_MAX_DEPTH: usize = 6;
+
+/// 遍历被上限截断的情况。
+#[derive(Debug, Default, Clone, Copy)]
+struct WalkCut {
+    files: bool,
+    depth: bool,
+}
+
+impl WalkCut {
+    fn any(&self) -> bool {
+        self.files || self.depth
+    }
+
+    /// 一句人话：这次只扫了一部分，结论要打折看。
+    fn note(&self) -> Option<String> {
+        if !self.any() {
+            return None;
+        }
+        let mut reasons = Vec::new();
+        if self.files {
+            reasons.push(format!("文件数到顶（{WALK_MAX_FILES} 个）"));
+        }
+        if self.depth {
+            reasons.push(format!("目录到顶（{WALK_MAX_DEPTH} 层）"));
+        }
+        Some(format!(
+            "注意：这次扫描被截断了——{}，范围没扫全；把 path 指到更窄的目录再试。",
+            reasons.join("、")
+        ))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ToolOutcome {
@@ -77,7 +113,7 @@ pub fn specs() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "list_files",
-                "description": "列出目录下的文件，最多三层。",
+                "description": "列出目录下的文件，最多下探六层。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -268,7 +304,11 @@ fn list_files(root: &Path, args: &Value) -> ToolOutcome {
     };
     let pattern = str_arg(args, "pattern").map(str::to_string);
     let mut files = Vec::new();
-    walk(&start, 0, &mut files);
+    let cut = walk(&start, 0, &mut files);
+    let note = cut
+        .note()
+        .map(|note| format!("{note}\n"))
+        .unwrap_or_default();
     let mut out = String::new();
     let mut shown = 0;
     for file in files {
@@ -287,9 +327,9 @@ fn list_files(root: &Path, args: &Value) -> ToolOutcome {
         shown += 1;
     }
     if out.is_empty() {
-        return ToolOutcome::ok("（没有匹配的文件）");
+        return ToolOutcome::ok(format!("{note}（没有匹配的文件）"));
     }
-    ToolOutcome::ok(clamp(&out))
+    ToolOutcome::ok(clamp(&format!("{note}{out}")))
 }
 
 fn grep(root: &Path, args: &Value) -> ToolOutcome {
@@ -308,7 +348,12 @@ fn grep(root: &Path, args: &Value) -> ToolOutcome {
         pattern.to_string()
     };
     let mut files = Vec::new();
-    walk(&start, 0, &mut files);
+    let cut = walk(&start, 0, &mut files);
+    // 截断说明放在最前面：clamp 只保头，放后面会被截掉。
+    let note = cut
+        .note()
+        .map(|note| format!("{note}\n"))
+        .unwrap_or_default();
     let mut out = String::new();
     let mut hits = 0;
     for file in files {
@@ -340,14 +385,15 @@ fn grep(root: &Path, args: &Value) -> ToolOutcome {
             hits += 1;
             if hits >= GREP_HITS {
                 out.push_str("…（命中过多，已截断）\n");
-                return ToolOutcome::ok(clamp(&out));
+                return ToolOutcome::ok(clamp(&format!("{note}{out}")));
             }
         }
     }
     if out.is_empty() {
-        return ToolOutcome::ok("（没有命中）");
+        // 扫不全的时候「没有命中」是错误结论：必须把话说明白。
+        return ToolOutcome::ok(format!("{note}（没有命中）"));
     }
-    ToolOutcome::ok(clamp(&out))
+    ToolOutcome::ok(clamp(&format!("{note}{out}")))
 }
 
 fn write_file(root: &Path, args: &Value) -> ToolOutcome {
@@ -610,12 +656,19 @@ fn kill_tree(child: &mut Child) {
 }
 
 /// 递归收集文件（有深度与跳过规则，不跟符号链接）。
-fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-    if depth > 3 || out.len() >= LIST_ENTRIES * 4 {
-        return;
+/// 返回值说明这次遍历有没有被上限截断——截断过就必须在结论里讲清楚。
+fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> WalkCut {
+    let mut cut = WalkCut::default();
+    if depth > WALK_MAX_DEPTH {
+        cut.depth = true;
+        return cut;
+    }
+    if out.len() >= WALK_MAX_FILES {
+        cut.files = true;
+        return cut;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return cut;
     };
     let mut items: Vec<_> = entries.filter_map(Result::ok).collect();
     items.sort_by_key(|entry| entry.file_name());
@@ -630,11 +683,18 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             if SKIP_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            walk(&path, depth + 1, out);
+            let child = walk(&path, depth + 1, out);
+            cut.files |= child.files;
+            cut.depth |= child.depth;
         } else if file_type.is_file() {
+            if out.len() >= WALK_MAX_FILES {
+                cut.files = true;
+                break;
+            }
             out.push(path);
         }
     }
+    cut
 }
 
 /// 极简通配：只支持 `*` 与 `?`。
@@ -916,6 +976,52 @@ mod tests {
         assert!(outcome.text.contains("已被用户停止"), "{}", outcome.text);
         std::thread::sleep(Duration::from_millis(1800));
         assert!(!dir.join("marker").exists(), "孙子进程没被收掉");
+    }
+
+    /// 真实仓库的形状：文件在第 4 层（src-tauri/src/engines/native/*.rs）。
+    /// 原来深度限 3 层，从根上搜不到、还回一句「没有命中」。
+    #[test]
+    fn grep_reaches_deep_repo_layout() {
+        let dir = temp_dir("deepgrep");
+        let root = dir.to_string_lossy().to_string();
+        fs::create_dir_all(dir.join("src-tauri/src/engines/native")).unwrap();
+        fs::write(dir.join("src-tauri/src/engines/native/hit.txt"), "needle\n").unwrap();
+        let outcome = execute(&root, "grep", r#"{"pattern":"needle"}"#);
+        assert!(outcome.text.contains("hit.txt"), "{}", outcome.text);
+        assert!(
+            !outcome.text.contains("截断"),
+            "层数够，不该有截断提示：{}",
+            outcome.text
+        );
+    }
+
+    /// 真超上限时结论里必须说出来：不能回一句「没有命中」了事。
+    #[test]
+    fn grep_says_when_scan_was_cut() {
+        let dir = temp_dir("cutgrep");
+        let root = dir.to_string_lossy().to_string();
+        fs::create_dir_all(dir.join("a/b/c/d/e/f/g")).unwrap();
+        fs::write(dir.join("a/b/c/d/e/f/g/needle.txt"), "needle\n").unwrap();
+        let outcome = execute(&root, "grep", r#"{"pattern":"needle"}"#);
+        assert!(outcome.text.contains("没有命中"), "{}", outcome.text);
+        assert!(outcome.text.contains("截断"), "{}", outcome.text);
+        assert!(outcome.text.contains("path"), "要说清怎么缩小范围：{}", outcome.text);
+    }
+
+    /// 文件数到顶也一样：只能保证「扫过的那部分」。
+    #[test]
+    fn grep_says_when_file_cap_hit() {
+        let dir = temp_dir("capfiles");
+        let root = dir.to_string_lossy().to_string();
+        for index in 0..(WALK_MAX_FILES + 5) {
+            fs::write(dir.join(format!("f{index:05}.txt")), "x\n").unwrap();
+        }
+        let outcome = execute(&root, "grep", r#"{"pattern":"needle-nowhere"}"#);
+        assert!(outcome.text.contains("没有命中"), "{}", outcome.text);
+        assert!(outcome.text.contains("文件数到顶"), "{}", outcome.text);
+
+        let listed = execute(&root, "list_files", "{}");
+        assert!(listed.text.contains("文件数到顶"), "{}", listed.text);
     }
 
     #[test]
