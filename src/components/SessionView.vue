@@ -42,7 +42,6 @@ import TimelineItem from './TimelineItem.vue'
 import LiveTurnView from './LiveTurn.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import TagPicker from './TagPicker.vue'
-import LedgerPane from './LedgerPane.vue'
 import ModelMenu from './ModelMenu.vue'
 import BranchPicker from './BranchPicker.vue'
 
@@ -597,13 +596,6 @@ const titleEditing = ref(false)
 const titleDraft = ref('')
 const titleInput = ref<HTMLInputElement | null>(null)
 const tagPickerOpen = ref(false)
-/** 文件账本抽屉。 */
-const ledgerOpen = ref(false)
-
-function onLedgerJump(recordId: string) {
-  void performJump(recordId)
-}
-
 /** 分支切换成功：轻提示 + 让外层刷新项目列表里的分支徽标。 */
 function onBranchChanged(branch: string) {
   notice.value = `已切换到分支 ${branch}`
@@ -1192,7 +1184,6 @@ watch(
     stick.value = true
     tagPickerOpen.value = false
     titleEditing.value = false
-    ledgerOpen.value = false
     // 组合器：换会话时清空附件 / 目录缓存，装载该引擎的上次偏好
     catalog.value = null
     attachments.value = []
@@ -1308,28 +1299,6 @@ watch(
                   <path d="M13.5 6.5 17 10" />
                 </svg>
               </button>
-              <button
-                class="icon-btn"
-                :class="{ on: ledgerOpen }"
-                :aria-pressed="ledgerOpen"
-                title="文件账本：这个会话动过哪些文件"
-                aria-label="文件账本"
-                @click.stop="ledgerOpen = !ledgerOpen"
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.7"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z" />
-                  <path d="m3 12.5 9 4.5 9-4.5" />
-                  <path d="m3 17.5 9 4.5 9-4.5" />
-                </svg>
-              </button>
             </div>
             <button
               class="open-wb-btn"
@@ -1420,14 +1389,6 @@ watch(
           </div>
         </template>
         </div>
-
-        <LedgerPane
-          v-if="ledgerOpen && session"
-          :session-id="session.id"
-          :directory="session.directory"
-          @jump="onLedgerJump"
-          @close="ledgerOpen = false"
-        />
       </div>
 
       <button

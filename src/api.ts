@@ -26,7 +26,6 @@ import type {
   SearchHit,
   SearchStats,
   SendOptions,
-  SessionLedger,
   SessionSummary,
   TimelinePage,
   ToolDetail,
@@ -50,8 +49,6 @@ export const api = {
     }),
   readToolDetail: (sessionId: string, messageId: string, callId: string) =>
     invoke<ToolDetail>('read_tool_detail', { sessionId, messageId, callId }),
-  sessionLedger: (sessionId: string) =>
-    invoke<SessionLedger>('session_ledger', { sessionId }),
   runtimeStatus: () => invoke<RuntimeStatus>('runtime_status'),
   sessionCreate: (directory: string, engine?: string) =>
     invoke<CreatedSession>('session_create', { directory, engine: engine ?? null }),

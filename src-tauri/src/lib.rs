@@ -5,7 +5,6 @@ mod engines;
 mod files;
 mod gitinfo;
 mod ipc;
-mod ledger;
 mod routines;
 mod tray;
 
@@ -57,7 +56,6 @@ pub fn run() {
             ipc::tag_delete,
             ipc::tag_merge,
             ipc::git_info_batch,
-            ipc::session_ledger,
             ipc::workshop_mcp,
             ipc::mcp_probe,
             ipc::routines_list,

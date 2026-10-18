@@ -115,34 +115,6 @@ export interface GitInfo {
   isWorktree: boolean
 }
 
-/** 文件账本里的一次操作。 */
-export interface LedgerEvent {
-  recordId: string
-  callId?: string
-  time: number
-  kind: string
-  tool: string
-  added: number
-  removed: number
-}
-
-/** 账本里的一个文件（聚合）。 */
-export interface LedgerFile {
-  path: string
-  lastTime: number
-  added: number
-  removed: number
-  events: LedgerEvent[]
-}
-
-/** 一个会话的文件账本。 */
-export interface SessionLedger {
-  files: LedgerFile[]
-  totalEvents: number
-  changedFiles: number
-  truncated: boolean
-}
-
 export interface TimelinePage {
   records: TimelineRecord[]
   nextCursor: number | null
