@@ -190,12 +190,8 @@ pub fn specs() -> Vec<Value> {
 }
 
 /// 执行一次工具调用。`arguments` 是模型给的 JSON 字符串。
-pub fn execute(directory: &str, name: &str, arguments: &str) -> ToolOutcome {
-    execute_with_stop(directory, name, arguments, &|| false)
-}
-
-/// 同上，但带一个「该停手了吗」的探针：跑命令时每轮都问一次，
-/// 命中就连同命令拉起的子进程一起收掉（停止按钮不该等命令自己跑完）。
+/// 带一个「该停手了吗」的探针：跑命令时每轮都问一次，命中就连同命令拉起的
+/// 子进程一起收掉（停止按钮不该等命令自己跑完）。
 pub fn execute_with_stop(
     directory: &str,
     name: &str,
@@ -739,6 +735,11 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    /// 大多数用例不关心停止：固定传 false。
+    fn execute(root: &str, name: &str, arguments: &str) -> ToolOutcome {
+        execute_with_stop(root, name, arguments, &|| false)
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("prism-native-{tag}-{}", std::process::id()));
