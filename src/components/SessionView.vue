@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
+import { copyPlainText } from '../clipboard'
 import { annotationFor, ensureAnnotations, isStarred, setStar, setTitle, tagsOf, titleOf } from '../annotations'
 import {
   applyCompletion,
@@ -985,9 +986,41 @@ function resolveArtifactPath(raw: string): string {
   return `${base.replace(/\/+$/, '')}/${raw.replace(/^\.\//, '')}`
 }
 
+/**
+ * 代码块右上角的「复制」（v-html 里的内容没法挂 Vue 事件，统一在这里代理）。
+ * 点完把按钮改成「已复制」一会儿——不给反馈，用户会以为没点上。
+ */
+const copyTimers = new WeakMap<HTMLElement, number>()
+
+async function copyCodeBlock(button: HTMLElement, text: string) {
+  const ok = await copyPlainText(text)
+  const previous = copyTimers.get(button)
+  if (previous !== undefined) window.clearTimeout(previous)
+  // 失败也要说话：静默的按钮最让人以为「点了没反应」。
+  button.textContent = ok ? '已复制' : '复制失败'
+  button.classList.toggle('done', ok)
+  button.classList.toggle('failed', !ok)
+  copyTimers.set(
+    button,
+    window.setTimeout(() => {
+      button.textContent = '复制'
+      button.classList.remove('done', 'failed')
+      copyTimers.delete(button)
+    }, 1400),
+  )
+}
+
 function onTimelineClick(event: MouseEvent) {
   const target = event.target
   if (!(target instanceof HTMLElement)) return
+
+  const copyBtn = target.closest('.md-code-copy')
+  if (copyBtn instanceof HTMLElement) {
+    const code = copyBtn.closest('.md-code')?.querySelector('pre code')
+    if (code) void copyCodeBlock(copyBtn, code.textContent ?? '')
+    return
+  }
+
   const card = target.closest('.md-artifact')
   if (!(card instanceof HTMLElement)) return
   event.preventDefault()

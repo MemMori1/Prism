@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { api } from '../api'
 import type { TimelinePart, ToolDetail } from '../types'
 import { parsePatch, patchStats, type DiffRow } from '../diff'
+import { highlightJson } from '../highlight'
 import { basename } from '../format'
 
 const props = defineProps<{
@@ -266,7 +267,8 @@ function signOf(type: DiffRow['type']): string {
         <!-- 原始输入 -->
         <details v-if="rawInput" class="raw-input">
           <summary>原始输入 JSON</summary>
-          <pre class="tool-pre">{{ rawInput }}</pre>
+          <!-- 原始输入是 JSON.stringify 出来的，按 JSON 上色（复制仍拿到纯文本） -->
+          <pre class="tool-pre" v-html="highlightJson(rawInput)" />
         </details>
       </template>
     </div>

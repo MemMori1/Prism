@@ -20,6 +20,21 @@ describe('renderMarkdown', () => {
     expect(html).toContain('&lt;div&gt;hello&lt;/div&gt;')
   })
 
+  it('json 代码块：语言标签 + 复制按钮 + 语法色', () => {
+    const html = renderMarkdown('```json\n{"name":"prism","ok":true,"n":2}\n```')
+    expect(html).toContain('class="md-code"')
+    expect(html).toContain('>JSON<')
+    expect(html).toContain('md-code-copy')
+    expect(html).toContain('tok-key')
+    expect(html).toContain('tok-literal')
+  })
+
+  it('没有语言的代码块也有复制按钮，但不上色', () => {
+    const html = renderMarkdown('```\nplain text\n```')
+    expect(html).toContain('md-code-copy')
+    expect(html).not.toContain('tok-')
+  })
+
   it('javascript: 链接被中和', () => {
     const html = renderMarkdown('[点我](javascript:alert(1))')
     expect(html).not.toContain('javascript:')

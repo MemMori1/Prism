@@ -1,4 +1,5 @@
 import katex from 'katex'
+import { highlightCode } from './highlight'
 import { marked, type TokenizerAndRendererExtension, type Tokens } from 'marked'
 import { basename } from './format'
 
@@ -114,9 +115,23 @@ const inlineMath: TokenizerAndRendererExtension = {
 /** 单块预览的源码上限（字符），超过按普通代码块展示。 */
 const EMBED_LIMIT = 200 * 1024
 
+/**
+ * 代码块外壳：一条细头（语言 + 复制）+ 正文。
+ *
+ * JSON 上色（见 highlight.ts）；其他语言按原文转义。头里的复制按钮靠
+ * SessionView 的事件代理接（v-html 里的内容没法挂 Vue 事件）。
+ */
 function codeBlockHtml(source: string, lang: string): string {
   const langAttr = lang ? ` class="language-${escapeAttr(lang)}"` : ''
-  return `<pre><code${langAttr}>${escapeHtml(source)}</code></pre>\n`
+  const chip = lang ? `<span class="md-code-lang">${escapeHtml(lang.toUpperCase())}</span>` : ''
+  return (
+    `<div class="md-code">` +
+    `<div class="md-code-head">${chip}` +
+    `<button class="md-code-copy" type="button" title="复制这段代码">复制</button>` +
+    `</div>` +
+    `<pre><code${langAttr}>${highlightCode(source, lang)}</code></pre>` +
+    `</div>\n`
+  )
 }
 
 function renderHtmlEmbed(source: string): string {

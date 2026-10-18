@@ -74,6 +74,132 @@
   line-height: 1.6;
 }
 
+/* ---------- 代码块（JSON 等）：一条细头 + 等宽正文 ---------- */
+
+.md-code {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  /* 用面板色而不是 --code-bg：聊天底色和 code-bg 太接近，块会糊在背景里。 */
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.md-code-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
+.md-code-lang {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.md-code-copy {
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--faint);
+  font-family: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.md-code:hover .md-code-copy,
+.md-code-copy:focus-visible {
+  opacity: 1;
+}
+
+.md-code-copy:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.md-code-copy.done {
+  opacity: 1;
+  color: var(--green);
+}
+
+.md-code-copy.failed {
+  opacity: 1;
+  color: var(--red);
+}
+
+/* 头已经画了边框，正文这块只负责滚动 */
+.md-code pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow-x: auto;
+}
+
+.md-code pre code {
+  display: block;
+  font-size: 11.5px;
+  line-height: 1.65;
+  tab-size: 2;
+  min-width: max-content;
+}
+
+/* JSON 长行折行：一串 url / 长数组在窄栏里横滚最难读，宁可换行。 */
+.md-code pre code.language-json {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 嵌在 HTML / SVG 预览里的源码：别再来一层边框 */
+.md-embed-src .md-code {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.md-embed-src .md-code-head {
+  display: none;
+}
+
+/* ---------- 语法色（JSON，见 highlight.ts） ---------- */
+
+.tok-key {
+  color: var(--accent-text);
+}
+
+.tok-string {
+  color: var(--green);
+}
+
+.tok-number {
+  color: var(--amber);
+}
+
+.tok-literal {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .md blockquote {
   margin: 8px 0;
   padding: 2px 12px;
