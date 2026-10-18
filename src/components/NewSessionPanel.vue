@@ -14,12 +14,15 @@ const props = withDefaults(
     busy?: boolean
     error?: string | null
     cancelable?: boolean
+    /** 上次用的 Agent：选择器里标「上次使用」。 */
+    recent?: string | null
   }>(),
   {
     projects: () => [],
     busy: false,
     error: null,
     cancelable: true,
+    recent: null,
   },
 )
 
@@ -94,6 +97,7 @@ const projectOptions = computed(() => [
       :choices="choices"
       :selecting="choosing"
       :error="error"
+      :recent="recent"
       :hint="busy ? '正在创建空白会话…' : '创建后可直接在会话里输入第一条消息'"
       @select="selectEngine"
     />

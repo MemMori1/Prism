@@ -48,6 +48,7 @@ import HomePane from './components/HomePane.vue'
 import AppRail from './components/AppRail.vue'
 import { toggleDevtools } from './devtools'
 import { VIEW_KEY, isAppView, type AppView } from './nav'
+import { lastStartEngine, rememberStart } from './startPrefs'
 
 const health = ref<EngineHealth[]>([])
 const error = ref<string | null>(null)
@@ -336,6 +337,8 @@ async function createSession(engine: string) {
   createError.value = null
   try {
     const created = await api.sessionCreate(project.worktree, engine)
+    // 记住这次的选择：下次「新建会话」默认就用它（选择器里标「上次使用」）。
+    rememberStart({ engine, directory: project.worktree })
     if (engine === 'native') {
       // 原生会话挂在 `native:<目录>` 这个项目下，和当前项目（可能来自别家）不同，
       // 所以要先把项目列表刷新出来，再切过去选中新会话。
@@ -649,6 +652,7 @@ onBeforeUnmount(() => {
             :engines="health"
             :busy="creating"
             :error="createError"
+            :recent="lastStartEngine"
             @select="createSession"
             @cancel="cancelCreateSession"
           />

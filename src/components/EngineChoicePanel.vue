@@ -13,6 +13,8 @@ const props = withDefaults(
     error?: string | null
     /** 整块锁住（工作台：还没选工作目录）：行点了没反应，视觉上也压暗。 */
     locked?: boolean
+    /** 上次用的 Agent：那一行标「上次使用」，新建会话默认就是它。 */
+    recent?: string | null
   }>(),
   {
     title: '选择本次任务使用的 Agent',
@@ -21,6 +23,7 @@ const props = withDefaults(
     hint: null,
     error: null,
     locked: false,
+    recent: null,
   },
 )
 
@@ -46,6 +49,8 @@ const rows = computed(() =>
     choice,
     chip: chipOf(choice),
     spinning: spinning(choice),
+    /** 上次用的那一行：标出来，省得每次新建都要重新挑。 */
+    recent: !!props.recent && props.recent === choice.id,
     /** 品牌 mark（没有就退回下面的首字母）。 */
     glyph: ENGINE_GLYPHS[choice.icon] ?? null,
   })),
@@ -154,6 +159,7 @@ function pick(choice: EngineChoice) {
               <span v-if="row.chip" class="engine-chip" :class="row.chip.tone">
                 {{ row.chip.text }}
               </span>
+              <span v-if="row.recent" class="engine-chip recent">上次使用</span>
             </span>
             <span class="engine-desc">{{ row.choice.description }}</span>
           </span>

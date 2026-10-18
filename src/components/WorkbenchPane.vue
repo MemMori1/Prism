@@ -20,6 +20,8 @@ import {
   WORKBENCH_DEFAULT_WIDTH,
 } from '../workbench'
 import { engineChoices } from '../sessionStart'
+import { engineLabel } from '../workshop'
+import { lastStartDirectory, lastStartEngine, rememberStart } from '../startPrefs'
 import { basename } from '../format'
 import type { EngineHealth, ProjectItem, SessionSummary } from '../types'
 import EngineChoicePanel from './EngineChoicePanel.vue'
@@ -111,6 +113,17 @@ const focusedColumn = computed(
 
 const choices = computed(() => engineChoices(props.health))
 
+/** 上次用的 Agent：选择器里标「上次使用」，按钮上写出来新建会沿用它。 */
+const recentEngineLabel = computed(() => {
+  const id = lastStartEngine.value
+  return id ? engineLabel(id) : null
+})
+
+/** 「＋ 新建会话」按钮文案：把会沿用的 Agent 写出来，省得每次重新挑。 */
+const newSessionLabel = computed(() =>
+  recentEngineLabel.value ? `＋ 新建会话 · ${recentEngineLabel.value}` : '＋ 新建会话',
+)
+
 const pickerHint = computed(() => {
   if (!selectedDir.value) return '先在左边选一个工作目录，或用「＋ 新增」在本机挑一个文件夹'
   if (creatingSession.value) return '正在创建空白会话…'
@@ -137,6 +150,8 @@ const dirOptions = computed(() => [
 watch(
   () => props.projects.map(project => `${project.id}\u0000${project.worktree}`).join('\n'),
   () => {
+    // 项目列表到位后再补一次「上次用的目录」（首屏时可能还没加载出来）。
+    restoreLastDirectory()
     const id = selectedDirId.value
     if (!id) return
     if (id.startsWith(EXTRA_DIR_PREFIX)) {
@@ -361,6 +376,23 @@ function focusSession(sessionId: string) {
 function chooseDir(dirId: string) {
   selectedDirId.value = dirId || null
   sessionError.value = null
+  // 记住这次挑的目录：下次进工作台默认就是它，不用再挑一次。
+  const dir = selectedDir.value
+  if (dir) rememberStart({ directory: dir.worktree })
+}
+
+/** 上次用的目录还在列表里的话，一进来就替用户选好（新建会话默认沿用上次）。 */
+function restoreLastDirectory() {
+  if (selectedDirId.value) return
+  const last = lastStartDirectory.value
+  if (!last) return
+  const project = props.projects.find(item => samePath(item.worktree, last))
+  if (project) {
+    selectedDirId.value = project.id
+    return
+  }
+  const extra = extraDirs.value.find(item => samePath(item.worktree, last))
+  if (extra) selectedDirId.value = extra.id
 }
 
 /** 新增目录：挑一个本机文件夹当工作目录（还没被引擎收录也能直接在里面建会话）。 */
@@ -376,6 +408,7 @@ async function addDirectory() {
     if (known) {
       selectedDirId.value = known.id
       sessionError.value = null
+      rememberStart({ directory: known.worktree })
       return
     }
     const id = `${EXTRA_DIR_PREFIX}${picked}`
@@ -387,6 +420,7 @@ async function addDirectory() {
     }
     selectedDirId.value = id
     sessionError.value = null
+    rememberStart({ directory: picked })
   } catch (cause) {
     report(cause)
   }
@@ -400,6 +434,8 @@ async function onEngineSelected(engine: string) {
   sessionError.value = null
   try {
     const created = await api.sessionCreate(dir.worktree, engine)
+    // 记住这次的选择：下次「新建会话」默认沿用这个 Agent 与目录。
+    rememberStart({ engine, directory: dir.worktree })
     const summary = await fetchSummaryWithRetry(created.sessionId)
     addColumn(created.sessionId, summary ?? undefined)
     // 右栏原地变成新会话的聊天框，两栏布局保持不变。
@@ -489,6 +525,8 @@ function columnTitle(column: WorkbenchColumn) {
 // ---- 恢复布局 ----
 
 onMounted(() => {
+  // 默认沿用上次挑的工作目录（还在列表里才用），省得每次都挑。
+  restoreLastDirectory()
   const saved = loadLayout()
   if (!saved.length) return
   void Promise.all(
@@ -580,10 +618,10 @@ defineExpose({ openColumn, showStartPage })
         <button
           class="wb-start-new"
           :class="{ on: !focusedId }"
-          title="选一个 Agent 新建会话"
+          title="选一个 Agent 新建会话（默认沿用上次）"
           @click="showStartPage(null)"
         >
-          ＋ 新建会话
+          {{ newSessionLabel }}
         </button>
 
         <div class="wb-start-head">
@@ -677,6 +715,7 @@ defineExpose({ openColumn, showStartPage })
           :choices="choices"
           :selecting="choosingEngine"
           :locked="!selectedDir"
+          :recent="lastStartEngine"
           :description="pickerDescription"
           :hint="pickerHint"
           :error="sessionError"
@@ -691,7 +730,7 @@ defineExpose({ openColumn, showStartPage })
       title="新建会话并开一列"
       @click="showStartPage(null)"
     >
-      ＋ 新建会话
+      {{ newSessionLabel }}
     </button>
   </section>
 </template>

@@ -215,6 +215,12 @@ h2 {
   color: var(--amber);
 }
 
+/* 上次用的那一行：安静地标一下，不抢「不可用 / 未配置」这些提醒的注意力。 */
+.engine-chip.recent {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
 .engine-go {
   flex: none;
   display: flex;
