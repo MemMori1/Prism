@@ -25,6 +25,7 @@ import { lastStartDirectory, lastStartEngine, rememberStart } from '../startPref
 import { basename } from '../format'
 import type { EngineHealth, ProjectItem, SessionSummary } from '../types'
 import EngineChoicePanel from './EngineChoicePanel.vue'
+import NewSessionDraft from './NewSessionDraft.vue'
 import SelectMenu from './SelectMenu.vue'
 import SessionView from './SessionView.vue'
 
@@ -78,7 +79,13 @@ const selectedDirId = ref<string | null>(null)
 /** 手动新增、还没被引擎收录成项目的目录。 */
 const extraDirs = ref<ExtraDir[]>([])
 const creatingSession = ref(false)
-const choosingEngine = ref<string | null>(null)
+/**
+ * 选完 Agent 的草稿：会话还没建，右栏先给输入框。
+ * 发出第一条消息才真的建会话（不然聊不聊都会留下没名字的空壳，而目前删不掉）。
+ */
+const draftEngine = ref<string | null>(null)
+/** 右栏新会话的聊天框：草稿那条消息由它发出去（流式 / 审批走平时那条路）。 */
+const rightView = ref<InstanceType<typeof SessionView> | null>(null)
 const sessionError = ref<string | null>(null)
 
 /** 选中的目录（项目或手动新增的）；没选就是 null。 */
@@ -126,13 +133,12 @@ const newSessionLabel = computed(() =>
 
 const pickerHint = computed(() => {
   if (!selectedDir.value) return '先在左边选一个工作目录，或用「＋ 新增」在本机挑一个文件夹'
-  if (creatingSession.value) return '正在创建空白会话…'
-  return '创建后右栏直接就是聊天框，可以发第一条消息'
+  return '选完 Agent 右栏就是输入框——发出第一条消息才真的建会话'
 })
 
 const pickerDescription = computed(() =>
   selectedDir.value
-    ? '工作目录已选好。挑一个 Agent，选完右栏原地变成聊天框。'
+    ? '工作目录已选好。挑一个 Agent，先写第一条指令再看要不要建会话。'
     : '还没选工作目录。先在左边选一个，右边才会解锁。',
 )
 
@@ -426,11 +432,22 @@ async function addDirectory() {
   }
 }
 
-async function onEngineSelected(engine: string) {
+/**
+ * 选中 Agent：不建会话，只把右栏换成首条消息框。
+ * 真正建会话在 startFromDraft（用户点了发送）——这样空会话不会因为一次误点留下来。
+ */
+function onEngineSelected(engine: string) {
+  if (!selectedDir.value) return
+  sessionError.value = null
+  draftEngine.value = engine
+}
+
+/** 草稿发出第一条消息：建会话 → 开列 → 让那一列把这条消息发出去。 */
+async function startFromDraft(text: string) {
   const dir = selectedDir.value
-  if (!dir || creatingSession.value) return
+  const engine = draftEngine.value
+  if (!dir || !engine || !text.trim() || creatingSession.value) return
   creatingSession.value = true
-  choosingEngine.value = engine
   sessionError.value = null
   try {
     const created = await api.sessionCreate(dir.worktree, engine)
@@ -438,14 +455,22 @@ async function onEngineSelected(engine: string) {
     rememberStart({ engine, directory: dir.worktree })
     const summary = await fetchSummaryWithRetry(created.sessionId)
     addColumn(created.sessionId, summary ?? undefined)
-    // 右栏原地变成新会话的聊天框，两栏布局保持不变。
+    draftEngine.value = null
+    // 右栏原地变成这个新会话的聊天框。
     focusedId.value = created.sessionId
+    await nextTick()
+    const view = rightView.value
+    if (view) {
+      await view.sendText(text)
+    } else {
+      // 概要没拉到时右栏是「加载中」：直接发，别把用户刚写的话吞了。
+      await api.sessionSend(created.sessionId, text)
+    }
     emit('settled')
   } catch (cause) {
     sessionError.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     creatingSession.value = false
-    choosingEngine.value = null
   }
 }
 
@@ -695,6 +720,7 @@ defineExpose({ openColumn, showStartPage })
         <template v-if="focusedColumn">
           <SessionView
             v-if="focusedColumn.session"
+            ref="rightView"
             embedded
             :session="focusedColumn.session"
             :has-project="true"
@@ -710,10 +736,19 @@ defineExpose({ openColumn, showStartPage })
           </div>
         </template>
 
+        <NewSessionDraft
+          v-else-if="draftEngine"
+          :engine-label="engineLabel(draftEngine)"
+          :directory="selectedDir?.worktree ?? ''"
+          :busy="creatingSession"
+          :error="sessionError"
+          @send="startFromDraft"
+          @change="draftEngine = null"
+        />
+
         <EngineChoicePanel
           v-else
           :choices="choices"
-          :selecting="choosingEngine"
           :locked="!selectedDir"
           :recent="lastStartEngine"
           :description="pickerDescription"

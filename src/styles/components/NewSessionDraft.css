@@ -1,0 +1,207 @@
+/*
+ * 新建会话草稿：选完 Agent 后的首条消息框。
+ * 和 EngineChoicePanel 同一套骨架（居中、560px 宽、卡片圆角），
+ * 视觉上像是「选择器原地变成输入框」。
+ */
+
+.draft-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+  padding: 52px 24px 40px;
+  background: color-mix(in srgb, var(--bg) 62%, var(--panel));
+}
+
+.draft-inner {
+  width: min(560px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.draft-mark {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--accent-text);
+  box-shadow: var(--shadow-sm);
+}
+
+.draft-inner h2 {
+  margin: 14px 0 5px;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: 0.1px;
+}
+
+.draft-desc {
+  margin: 0 0 18px;
+  max-width: 430px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.draft-desc b {
+  margin: 0 4px 0 3px;
+  color: var(--text);
+  font-weight: 620;
+}
+
+/* ---------- 卡片：输入框 + 一条工具栏 ---------- */
+
+.draft-box {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+  text-align: left;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.draft-box:hover {
+  border-color: var(--border-strong);
+}
+
+.draft-box.focused {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.draft-input {
+  width: 100%;
+  min-height: 78px;
+  max-height: 220px;
+  resize: none;
+  overflow-y: auto;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 12px 14px 4px;
+}
+
+.draft-input:focus {
+  outline: none;
+}
+
+.draft-input:disabled {
+  opacity: 0.6;
+}
+
+.draft-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 8px;
+}
+
+.draft-change {
+  flex: none;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.draft-change:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.draft-change:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.draft-hint {
+  flex: 1;
+  min-width: 0;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-align: right;
+}
+
+/* 和会话页的发送按钮同一个样子（同一条发送手感）。 */
+.draft-bar .send-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 35%, transparent);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    transform 0.12s ease;
+}
+
+.draft-bar .send-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.draft-bar .send-btn:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.draft-bar .send-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.draft-bar .send-btn:disabled {
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--faint);
+  box-shadow: none;
+  cursor: default;
+}
+
+/* ---------- 状态行 ---------- */
+
+.draft-status {
+  margin: 12px 0 0;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.draft-error {
+  margin: 12px 0 0;
+  max-width: 100%;
+  padding: 7px 11px;
+  border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 11.5px;
+  line-height: 1.5;
+}

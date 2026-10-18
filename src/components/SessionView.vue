@@ -1118,6 +1118,19 @@ async function send() {
   }
 }
 
+/**
+ * 外面塞一条消息进来并发出去（工作台「新建会话」草稿的首条消息）。
+ * 走的是和输入框点发送完全一样的路径：流式输出、审批、收口都照常。
+ */
+async function sendText(text: string) {
+  const value = text.trim()
+  if (!value || sending.value) return
+  draft.value = value
+  await send()
+}
+
+defineExpose({ sendText })
+
 /** 一次性提示（4 秒后自动消失）。 */
 function flashNotice(text: string) {
   notice.value = text
