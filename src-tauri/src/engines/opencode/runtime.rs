@@ -863,31 +863,31 @@ mod tests {
 
     #[test]
     fn parses_permission_request() {
-        // 真机抓到的 permission.asked 形状
+        // permission.asked 的真实字段形状；id 一律用假值，别贴真机会话
         let value = json!({
             "action": "read",
-            "id": "per_14720267a001XATm8hoUGHTavL",
+            "id": "per_test0000aaaa0000bbbb0000",
             "resources": [".env"],
             "save": ["*"],
-            "sessionID": "ses_eb8dfe32fffeQv9WGD2nw6h9yZ",
+            "sessionID": "ses_test0000aaaa0000bbbb0000",
             "source": {
-                "id": "call-901f9a53-7c7c-4040-97a8-77ddb15dfcfc",
-                "messageID": "msg_147201d8d001cOnrnh5D2Lk9UV",
+                "id": "call-00000000-0000-4000-8000-000000000000",
+                "messageID": "msg_test0000aaaa0000bbbb0000",
                 "type": "tool"
             }
         });
         let request = parse_permission(&value).expect("应可解析");
-        assert_eq!(request.id, "per_14720267a001XATm8hoUGHTavL");
+        assert_eq!(request.id, "per_test0000aaaa0000bbbb0000");
         assert_eq!(request.action, "read");
         assert_eq!(request.resources, vec![".env".to_string()]);
         assert!(request.message.is_none());
         assert_eq!(
             request.source_call_id.as_deref(),
-            Some("call-901f9a53-7c7c-4040-97a8-77ddb15dfcfc")
+            Some("call-00000000-0000-4000-8000-000000000000")
         );
         assert_eq!(
             request.source_message_id.as_deref(),
-            Some("msg_147201d8d001cOnrnh5D2Lk9UV")
+            Some("msg_test0000aaaa0000bbbb0000")
         );
 
         // 缺 id 无法成请求；缺字段则宽松兜底

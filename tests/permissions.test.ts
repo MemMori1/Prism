@@ -9,16 +9,16 @@ import {
   repliedRequestId,
 } from '../src/permissions'
 
-/** 真机抓到的 permission.asked data 形状（读 .env 触发）。 */
+/** permission.asked 的真实字段形状（读 .env 触发）；id 一律用假值，别贴真机会话。 */
 const askedData = {
   action: 'read',
-  id: 'per_14720267a001XATm8hoUGHTavL',
+  id: 'per_test0000aaaa0000bbbb0000',
   resources: ['.env'],
   save: ['*'],
-  sessionID: 'ses_eb8dfe32fffeQv9WGD2nw6h9yZ',
+  sessionID: 'ses_test0000aaaa0000bbbb0000',
   source: {
-    id: 'call-901f9a53-7c7c-4040-97a8-77ddb15dfcfc',
-    messageID: 'msg_147201d8d001cOnrnh5D2Lk9UV',
+    id: 'call-00000000-0000-4000-8000-000000000000',
+    messageID: 'msg_test0000aaaa0000bbbb0000',
     type: 'tool',
   },
 }
@@ -38,13 +38,13 @@ describe('permissionFromEvent', () => {
   it('解析引擎真实形状', () => {
     const parsed = permissionFromEvent(askedData)
     expect(parsed).toEqual({
-      id: 'per_14720267a001XATm8hoUGHTavL',
-      sessionId: 'ses_eb8dfe32fffeQv9WGD2nw6h9yZ',
+      id: 'per_test0000aaaa0000bbbb0000',
+      sessionId: 'ses_test0000aaaa0000bbbb0000',
       action: 'read',
       resources: ['.env'],
       message: null,
-      sourceMessageId: 'msg_147201d8d001cOnrnh5D2Lk9UV',
-      sourceCallId: 'call-901f9a53-7c7c-4040-97a8-77ddb15dfcfc',
+      sourceMessageId: 'msg_test0000aaaa0000bbbb0000',
+      sourceCallId: 'call-00000000-0000-4000-8000-000000000000',
     })
   })
 
