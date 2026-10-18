@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   clampColumnWidth,
   parseWorkbenchLayout,
+  restoreColumnAction,
   serializeWorkbenchLayout,
   workbenchShowsStartPage,
   WORKBENCH_DEFAULT_WIDTH,
@@ -62,6 +63,20 @@ describe('serializeWorkbenchLayout', () => {
       { sessionId: 'a', width: 500 },
       { sessionId: 'b', width: WORKBENCH_MIN_WIDTH },
     ])
+  })
+})
+
+describe('restoreColumnAction（恢复布局不许静默丢列）', () => {
+  it('只有后端确认会话不存在才丢列', () => {
+    expect(restoreColumnAction('missing')).toBe('drop')
+  })
+
+  it('查询失败必须留着——后端一次抖动不能替用户把列写没了', () => {
+    expect(restoreColumnAction('error')).toBe('keep')
+  })
+
+  it('正常拿到概要也是留着（画成聊天框）', () => {
+    expect(restoreColumnAction('ok')).toBe('keep')
   })
 })
 

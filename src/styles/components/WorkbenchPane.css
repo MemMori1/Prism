@@ -344,6 +344,12 @@
   font-size: 12px;
 }
 
+.wb-missing-acts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .wb-resize {
   position: absolute;
   top: 0;

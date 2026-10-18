@@ -20,6 +20,17 @@ export function workbenchShowsStartPage(startOpen: boolean, columnCount: number)
   return startOpen || columnCount === 0
 }
 
+/** 一次会话概要查询的结果：ok＝拿到了；missing＝后端确认会话不存在；error＝这次没拉到（网络抖动、后端没起来）。 */
+export type SummaryLookupKind = 'ok' | 'missing' | 'error'
+
+/**
+ * 恢复上次并排布局时，一条存下来的列该怎么办。
+ * 只有「后端确认这个会话不存在」才丢；查询失败一律留着——否则后端一次抖动就把用户并排的列写没了。
+ */
+export function restoreColumnAction(kind: SummaryLookupKind): 'keep' | 'drop' {
+  return kind === 'missing' ? 'drop' : 'keep'
+}
+
 /** 列宽夹到可用区间；非法数字回落到默认宽。 */
 export function clampColumnWidth(width: number): number {
   if (!Number.isFinite(width)) return WORKBENCH_DEFAULT_WIDTH

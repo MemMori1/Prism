@@ -14,6 +14,7 @@ import { api } from '../api'
 import {
   clampColumnWidth,
   parseWorkbenchLayout,
+  restoreColumnAction,
   serializeWorkbenchLayout,
   workbenchShowsStartPage,
   WORKBENCH_DEFAULT_WIDTH,
@@ -221,13 +222,42 @@ function loadLayout() {
 
 // ---- 会话概要 ----
 
-async function fetchSummary(sessionId: string): Promise<SessionSummary | null> {
+/** 一次查询的结果；`missing`＝后端确认没这个会话，`error`＝这次没拉到（不许当成不存在）。 */
+type SummaryLookup =
+  | { kind: 'ok'; summary: SessionSummary }
+  | { kind: 'missing' }
+  | { kind: 'error'; error: unknown }
+
+/**
+ * 查一次会话概要：`api.sessionSummary` 解析出 null＝后端确认没这个会话；抛错＝这次查询失败。
+ * 恢复布局时必须区分这两者，所以不能只看「有没有拿到」。
+ */
+async function lookupSummary(sessionId: string): Promise<SummaryLookup> {
   try {
-    return await api.sessionSummary(sessionId)
-  } catch (cause) {
-    report(cause)
-    return null
+    const summary = await api.sessionSummary(sessionId)
+    return summary ? { kind: 'ok', summary } : { kind: 'missing' }
+  } catch (error) {
+    return { kind: 'error', error }
   }
+}
+
+/** 列内刷新用：拉不到就报一句、返回 null（列保持现状，不删）。 */
+async function fetchSummary(sessionId: string): Promise<SessionSummary | null> {
+  const result = await lookupSummary(sessionId)
+  if (result.kind === 'error') report(result.error)
+  return result.kind === 'ok' ? result.summary : null
+}
+
+/** 恢复布局用：查询失败（后端还没起来之类）重试几次，只有确认不存在才返回 missing。 */
+async function lookupSummaryForRestore(sessionId: string): Promise<SummaryLookup> {
+  let last: SummaryLookup = { kind: 'error', error: null }
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const result = await lookupSummary(sessionId)
+    if (result.kind !== 'error') return result
+    last = result
+    await sleep(300 * (attempt + 1))
+  }
+  return last
 }
 
 /** 新建会话后 DB 写入可能滞后：重试几次。 */
@@ -268,6 +298,22 @@ function closeColumn(sessionId: string) {
   columns.value = columns.value.filter(column => column.sessionId !== sessionId)
   if (focusedId.value === sessionId) focusedId.value = null
   saveLayout()
+}
+
+/** 列里会话概要没拉到时原地重试；确认不存在只提示用户关闭，不自动删列。 */
+async function retryColumn(sessionId: string) {
+  const column = columns.value.find(item => item.sessionId === sessionId)
+  if (!column) return
+  const result = await lookupSummary(sessionId)
+  if (result.kind === 'ok') {
+    column.session = result.summary
+    return
+  }
+  if (result.kind === 'missing') {
+    report(new Error('这个会话已经不存在了，可以关掉这一列'))
+    return
+  }
+  report(result.error)
 }
 
 /** 让某列滚进视野并闪一下，提示「就是这一列」。 */
@@ -431,6 +477,11 @@ function statusText(column: WorkbenchColumn) {
   return '空闲'
 }
 
+/** 左栏列表第二行：概要还没到手（正在拉 / 这次没拉到）就别说「空闲」。 */
+function rowSubText(column: WorkbenchColumn) {
+  return column.session ? statusText(column) : '加载中…'
+}
+
 function columnTitle(column: WorkbenchColumn) {
   return column.session?.title || '未命名会话'
 }
@@ -443,20 +494,30 @@ onMounted(() => {
   void Promise.all(
     saved.map(async item => ({
       ...item,
-      summary: await fetchSummary(item.sessionId),
+      lookup: await lookupSummaryForRestore(item.sessionId),
     })),
   ).then(restored => {
+    let dropped = false
     for (const item of restored) {
-      if (!item.summary) continue // 会话已不存在：静默丢弃。
+      // 后端确认这个会话不存在：丢这一条。
+      if (restoreColumnAction(item.lookup.kind) === 'drop') {
+        dropped = true
+        continue
+      }
+      if (item.lookup.kind === 'error') {
+        // 只是这次没拉到：列留着（下面会渲染成「加载中/重试」），原因报到顶栏。
+        report(item.lookup.error)
+      }
       if (columns.value.some(column => column.sessionId === item.sessionId)) continue
       columns.value.push({
         sessionId: item.sessionId,
         width: item.width,
-        session: item.summary,
+        session: item.lookup.kind === 'ok' ? item.lookup.summary : null,
         status: { running: false, waiting: 0 },
       })
     }
-    saveLayout()
+    // 只有确实丢过列才写回布局；查询失败绝不写——写下去等于替用户把列删了。
+    if (dropped) saveLayout()
   })
 })
 
@@ -503,7 +564,10 @@ defineExpose({ openColumn, showStartPage })
         />
         <div v-else class="wb-missing">
           <div>会话加载中或已不存在</div>
-          <button class="wb-btn wide" @click="closeColumn(column.sessionId)">关闭这一列</button>
+          <div class="wb-missing-acts">
+            <button class="wb-btn wide" @click="retryColumn(column.sessionId)">重试</button>
+            <button class="wb-btn wide" @click="closeColumn(column.sessionId)">关闭这一列</button>
+          </div>
         </div>
 
         <div class="wb-resize" title="拖动调整宽度" @pointerdown="startResize($event, column)" />
@@ -543,7 +607,7 @@ defineExpose({ openColumn, showStartPage })
             <span class="wb-start-item-main">
               <span class="wb-start-item-title">{{ columnTitle(column) }}</span>
               <span class="wb-start-item-sub" :class="dotClass(column)">
-                {{ statusText(column) }}
+                {{ rowSubText(column) }}
               </span>
             </span>
           </button>
@@ -600,7 +664,12 @@ defineExpose({ openColumn, showStartPage })
             @settled="onColumnSettled(focusedColumn.sessionId)"
             @status="onColumnStatus(focusedColumn.sessionId, $event)"
           />
-          <div v-else class="wb-missing">会话加载中或已不存在</div>
+          <div v-else class="wb-missing">
+            <div>会话加载中或已不存在</div>
+            <div class="wb-missing-acts">
+              <button class="wb-btn wide" @click="retryColumn(focusedColumn.sessionId)">重试</button>
+            </div>
+          </div>
         </template>
 
         <EngineChoicePanel
