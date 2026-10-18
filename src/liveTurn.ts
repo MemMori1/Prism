@@ -252,3 +252,53 @@ export function reduceLiveTurn(state: LiveTurn, event: EngineEventLike): LiveTur
       return state
   }
 }
+
+// ---- 收口：live 块与 DB 记录的去重 ----
+
+/** 收口的时间容差：引擎时间戳与前端时钟可能有小偏差（毫秒）。 */
+export const LIVE_TURN_TOLERANCE_MS = 3000
+
+/** 结构上兼容时间线记录（本模块不依赖 types）。 */
+export interface TimelineLikeRecord {
+  id: string
+  role: string
+  completed: boolean
+  timeCreated: number
+}
+
+/** live 块当前代表的范围：画了哪些消息、这一轮从哪一刻开始。 */
+export interface LiveCoverage {
+  /** live 块正在展示的助手消息 id。 */
+  ids: Set<string>
+  /** 本轮开跑时刻（execution.started，毫秒）。 */
+  startedAt: number | null
+  /** live 块是否还占着屏幕（跑着、还有内容或报了错）。 */
+  open: boolean
+}
+
+/** 取 live 块的代表范围（收口时拿它跟 DB 记录对账）。 */
+export function liveCoverage(turn: LiveTurn, startedAt: number | null): LiveCoverage {
+  return {
+    ids: new Set(
+      turn.parts
+        .map(part => part.messageId)
+        .filter(messageId => messageId && messageId !== 'unknown'),
+    ),
+    startedAt,
+    open: turn.running || turn.parts.length > 0 || !!turn.error,
+  }
+}
+
+/**
+ * 这条助手记录是否已由 live 块代表：同一条消息、落在本轮时间窗内、或还没完结。
+ * 是的话收口前别并进时间线——否则同一轮会画两份（live 一份、记录一份）。
+ */
+export function coveredByLive(record: TimelineLikeRecord, coverage: LiveCoverage): boolean {
+  if (!coverage.open) return false
+  if (record.role !== 'assistant') return false
+  if (!record.completed) return true
+  if (coverage.ids.has(record.id)) return true
+  return (
+    coverage.startedAt !== null && record.timeCreated >= coverage.startedAt - LIVE_TURN_TOLERANCE_MS
+  )
+}

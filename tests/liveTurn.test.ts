@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  coveredByLive,
   createLiveTurn,
+  liveCoverage,
   reduceLiveTurn,
   summarizeToolInput,
   type LivePart,
   type LiveToolPart,
+  type TimelineLikeRecord,
 } from '../src/liveTurn'
 
 const data = (extra: Record<string, unknown> = {}) => ({
@@ -158,5 +161,48 @@ describe('reduceLiveTurn', () => {
     expect(tools[0].status).toBe('completed')
     expect(tools[1].status).toBe('running')
     expect(tools[1].summary).toBe('x')
+  })
+})
+
+describe('coveredByLive', () => {
+  const record = (extra: Partial<TimelineLikeRecord> = {}): TimelineLikeRecord => ({
+    id: 'msg_1',
+    role: 'assistant',
+    completed: true,
+    timeCreated: 10_000,
+    ...extra,
+  })
+
+  const turn = run([
+    { type: 'session.execution.started', data: data() },
+    { type: 'session.text.delta', data: data({ delta: '你' }) },
+  ])
+
+  it('live 块关着时什么都不算它代表', () => {
+    const coverage = liveCoverage(createLiveTurn(), null)
+    expect(coveredByLive(record(), coverage)).toBe(false)
+  })
+
+  it('同一条消息：即使已经落库、已收跑，也不算代表', () => {
+    // 这是「聊天完成后两份、随后一份消失」的根源：落库记录不能再画一遍。
+    const idle = reduceLiveTurn(turn, { type: 'session.execution.succeeded', data: data() })
+    const coverage = liveCoverage(idle, 9_500)
+    expect(coveredByLive(record(), coverage)).toBe(true)
+  })
+
+  it('本轮时间窗内的助手记录同样算代表（事件没带 id 时的兜底）', () => {
+    const coverage = liveCoverage(turn, 9_500)
+    expect(coveredByLive(record({ id: 'msg_other' }), coverage)).toBe(true)
+  })
+
+  it('窗口外的旧记录、用户消息、还没完结的之外都不拦', () => {
+    const coverage = liveCoverage(turn, 9_500)
+    expect(coveredByLive(record({ id: 'msg_old', timeCreated: 9_500 - 3_001 }), coverage)).toBe(false)
+    expect(coveredByLive({ ...record(), role: 'user', id: 'msg_user' }, coverage)).toBe(false)
+  })
+
+  it('本轮还没写库完的助手记录不并进来', () => {
+    const coverage = liveCoverage(turn, 9_500)
+    expect(coveredByLive(record({ id: 'msg_partial', completed: false }), coverage)).toBe(true)
   })
 })

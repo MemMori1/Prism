@@ -14,7 +14,14 @@ import {
   type Trigger,
 } from '../composer'
 import { onEngineEvent } from '../engineEvents'
-import { createLiveTurn, reduceLiveTurn, type LiveTurn } from '../liveTurn'
+import {
+  coveredByLive,
+  createLiveTurn,
+  liveCoverage,
+  reduceLiveTurn,
+  type LiveCoverage,
+  type LiveTurn,
+} from '../liveTurn'
 import { pushNotification } from '../notify'
 import {
   mergePermissions,
@@ -34,6 +41,7 @@ import type {
   PermissionRequest,
   SendOptions,
   SessionSummary,
+  TimelinePage,
   TimelineRecord,
 } from '../types'
 import { formatCost, formatTokens, fullTime } from '../format'
@@ -773,44 +781,38 @@ function scheduleSettle(sessionId: string) {
 }
 
 /**
- * turn 收口：以 DB 为准合并新增记录，然后清掉 live 块。
+ * turn 收口：等 DB 落定本轮结果，先收掉 live 块、再把记录并进时间线。
  * DB 写入可能略滞后于 execution.* 事件，必要时重试刷新兜底。
  */
 async function settleTurn(sessionId: string) {
   if (props.session?.id !== sessionId) return
-  let additions = await refreshTail()
+  const coverage = liveCoverage(live.value, liveStartedAt.value)
+  let page = await readTailOnce(sessionId)
   if (props.session?.id !== sessionId) return
-  if (!coveredBy(additions)) {
+  if (!page || !hasTurnResult(page, coverage)) {
     await sleep(800)
     if (props.session?.id !== sessionId) return
-    additions = await refreshTail()
+    page = await readTailOnce(sessionId)
   }
   if (props.session?.id !== sessionId) return
-  if (!coveredBy(additions)) {
+  if (!page || !hasTurnResult(page, coverage)) {
     await sleep(1200)
     if (props.session?.id !== sessionId) return
-    await refreshTail()
+    page = await readTailOnce(sessionId)
   }
   if (props.session?.id !== sessionId) return
+  // 顺序要紧：先收 live 再并记录。反过来的话，同一轮会 live 一份、记录一份。
   if (!live.value.running) {
     live.value = createLiveTurn()
     liveStartedAt.value = null
   }
+  if (page) mergeTail(page)
   emit('settled')
 }
 
-/** 本次刷新新增的记录里是否已覆盖本轮结果。 */
-function coveredBy(additions: TimelineRecord[]): boolean {
-  const startedAt = liveStartedAt.value
-  if (startedAt === null) {
-    return additions.some(record => record.role === 'assistant')
-  }
-  return additions.some(
-    record =>
-      record.role === 'assistant' &&
-      record.completed &&
-      record.timeCreated >= startedAt - 3000,
-  )
+/** DB 最新一页里是否已有本轮结果（收口看 DB，不看「本次刷新新增了什么」）。 */
+function hasTurnResult(page: TimelinePage, coverage: LiveCoverage): boolean {
+  return page.records.some(record => coveredByLive(record, coverage))
 }
 
 // ---- 时间线分页 ----
@@ -826,40 +828,37 @@ function maybeStick() {
   if (stick.value) scrollToBottom()
 }
 
-/** 合并 DB 最新一页里尚未出现过的记录（重连/收口时用），返回本次新增。 */
+/** 读最新一页；失败则上报并返回 null。 */
+async function readTailOnce(sessionId: string): Promise<TimelinePage | null> {
+  try {
+    const page = await api.readTimeline(sessionId)
+    if (props.session?.id !== sessionId) return null
+    return page
+  } catch (cause) {
+    report(cause)
+    return null
+  }
+}
+
+/** 把一页里还没出现过的记录并进时间线（live 块已在展示的不算），返回新增。 */
+function mergeTail(page: TimelinePage): TimelineRecord[] {
+  const known = new Set(records.value.map(record => record.id))
+  const coverage = liveCoverage(live.value, liveStartedAt.value)
+  const additions = page.records.filter(
+    record => !known.has(record.id) && !coveredByLive(record, coverage),
+  )
+  if (additions.length) {
+    records.value = [...records.value, ...additions]
+  }
+  return additions
+}
+
+/** 合并 DB 最新一页里尚未出现过的记录（重连/收口时用）。 */
 async function refreshTail(): Promise<TimelineRecord[]> {
   const sessionId = props.session?.id
   if (!sessionId) return []
-  try {
-    const page = await api.readTimeline(sessionId)
-    if (props.session?.id !== sessionId) return []
-    const known = new Set(records.value.map(record => record.id))
-    // live 块正在展示的助手消息（插话后可能已完结落库，避免重复渲染）。
-    const liveMessageIds = new Set(
-      live.value.parts
-        .map(part => part.messageId)
-        .filter(messageId => messageId && messageId !== 'unknown'),
-    )
-    const additions = page.records.filter(record => {
-      if (known.has(record.id)) return false
-      // 执行中：引擎可能已在写未完结（或已由 live 展示）的助手消息。
-      if (
-        live.value.running &&
-        record.role === 'assistant' &&
-        (!record.completed || liveMessageIds.has(record.id))
-      ) {
-        return false
-      }
-      return true
-    })
-    if (additions.length) {
-      records.value = [...records.value, ...additions]
-    }
-    return additions
-  } catch (cause) {
-    report(cause)
-    return []
-  }
+  const page = await readTailOnce(sessionId)
+  return page ? mergeTail(page) : []
 }
 
 async function loadInitial(sessionId: string) {
