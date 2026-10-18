@@ -1,5 +1,7 @@
 /*
- * 顶部会话导航（logo 右侧）：收起＝当前会话，展开＝最近会话 + 新建入口。
+ * 顶部会话导航（logo 右侧）：**一个控件 + 一个面板**。
+ * 收起态只有 `<Agent> 的会话`；会话都收在面板里，顶栏不再摊出一排标签。
+ * 面板两栏：左＝Agent，右＝这个 Agent 的会话。
  * 视觉跟顶栏的通知按钮、面板同一套：同高的小按钮 + 绝对定位面板 + 全屏背板。
  */
 
@@ -7,6 +9,8 @@
   position: relative;
   display: flex;
   align-items: center;
+  gap: 8px;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -59,12 +63,6 @@
   color: var(--muted);
 }
 
-.nav-glyph.xs {
-  width: 14px;
-  height: 14px;
-  color: var(--muted);
-}
-
 .nav-btn.on .nav-glyph {
   color: inherit;
 }
@@ -112,7 +110,7 @@
   }
 }
 
-/* ---------- 展开面板 ---------- */
+/* ---------- 展开面板：左 Agent / 右会话 ---------- */
 
 .nav-backdrop {
   position: fixed;
@@ -125,7 +123,7 @@
   top: calc(100% + 8px);
   left: 0;
   z-index: 31;
-  width: 360px;
+  width: 500px;
   max-width: calc(100vw - 28px);
   display: flex;
   flex-direction: column;
@@ -136,14 +134,144 @@
   overflow: hidden;
 }
 
+.nav-cols {
+  display: flex;
+  min-height: 0;
+}
+
+/* 左：Agent 列。窄、固定，点一下就换右栏。 */
+.nav-agents {
+  flex: none;
+  width: 156px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 6px 8px;
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 60%, var(--panel-2));
+  overflow-y: auto;
+  max-height: 52vh;
+}
+
+.nav-sec-title {
+  margin: 0 4px 4px;
+  color: var(--faint);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+
+.nav-agent {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.nav-agent:hover {
+  background: var(--panel-2);
+}
+
+/* 选中的那个 Agent：右栏看的就是它的会话。 */
+.nav-agent.on {
+  background: var(--accent-soft);
+}
+
+.nav-agent.on .nav-agent-label {
+  color: var(--accent-text);
+}
+
+.nav-agent.muted {
+  color: var(--faint);
+}
+
+.nav-agent.muted .nav-glyph {
+  opacity: 0.55;
+}
+
+.nav-agent-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.nav-agent-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.nav-agent-tag {
+  flex: none;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-text);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
+/* 右：这个 Agent 的会话。 */
+.nav-sessions {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-sessions-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px 5px;
+}
+
+.nav-sessions-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.nav-sessions-count {
+  flex: none;
+  color: var(--faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
 .nav-search {
   flex: none;
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
+  margin: 0 8px 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
   color: var(--faint);
+}
+
+.nav-search:focus-within {
+  border-color: var(--border-strong);
 }
 
 .nav-search svg {
@@ -173,9 +301,9 @@
 .nav-list {
   flex: 1;
   min-height: 0;
-  max-height: 46vh;
+  max-height: 44vh;
   overflow-y: auto;
-  padding: 4px;
+  padding: 0 4px 6px;
 }
 
 .nav-empty {
@@ -185,22 +313,32 @@
   line-height: 1.6;
 }
 
+/* 一行会话：点主区域＝激活左侧那条；右侧 ⇥＝在工作台开一列。 */
 .nav-item {
-  width: 100%;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 6px;
+  padding: 0 4px 0 0;
+  border-radius: var(--radius-sm);
+}
+
+.nav-item.on {
+  background: var(--panel-2);
+}
+
+.nav-item-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
   padding: 6px 8px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
+  font-family: inherit;
   text-align: left;
   cursor: pointer;
-}
-
-.nav-item.on {
-  background: var(--panel-2);
 }
 
 .nav-item.here .nav-item-title {
@@ -231,72 +369,67 @@
   font-size: 10.5px;
 }
 
-/* ---------- 底部：用哪个 Agent 新建（点哪个用哪个，不限次数） ---------- */
+/* 悬停 / 键盘选中才露出来：默认不抢注意力。 */
+.nav-item-workbench {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
 
+.nav-item:hover .nav-item-workbench,
+.nav-item.on .nav-item-workbench,
+.nav-item-workbench:focus-visible {
+  opacity: 1;
+}
+
+.nav-item-workbench:hover {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* 面板底部：用左列选中的 Agent 开一个新的（换 Agent 也从这儿走）。 */
 .nav-foot {
   flex: none;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 9px 9px;
+  padding: 6px;
   border-top: 1px solid var(--border);
   background: color-mix(in srgb, var(--panel) 70%, var(--panel-2));
 }
 
-.nav-foot-title {
-  margin: 0 0 0 2px;
-  color: var(--faint);
-  font-size: 10.5px;
-  letter-spacing: 0.04em;
-}
-
-.nav-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.nav-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 9px 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--panel-2);
-  color: var(--text);
+.nav-foot-new {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
   font-family: inherit;
   font-size: 11.5px;
+  text-align: center;
   cursor: pointer;
   transition:
     border-color 0.15s ease,
     color 0.15s ease;
 }
 
-.nav-chip:hover:not(:disabled) {
+.nav-foot-new:hover {
   border-color: var(--accent);
   color: var(--accent-text);
 }
 
-.nav-chip:hover:not(:disabled) .nav-glyph.xs {
-  color: inherit;
-}
-
-/* 上次用过的那个：描边淡一点强调，并挂个「上次」角标。 */
-.nav-chip.used {
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-}
-
-.nav-chip:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.nav-chip-used {
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  font-size: 9.5px;
-  line-height: 14px;
+.nav-foot-new:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

@@ -7,6 +7,13 @@
   background: var(--bg);
 }
 
+/* 一页＝一个 Agent 的工作区：页面外壳不参与布局（display: contents），
+ * 里面的多列画布 / 两栏页直接排进 .workbench。非当前页由 v-show 设成 display: none 藏起来。
+ * `.wb-page.current` 只当定位钩子（让某列滚进视野时别选到后台页面里的同名列）。 */
+.wb-page {
+  display: contents;
+}
+
 .wb-scroll {
   display: flex;
   align-items: stretch;

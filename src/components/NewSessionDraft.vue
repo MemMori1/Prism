@@ -26,8 +26,6 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (e: 'send', text: string): void
-  /** 换个 Agent：回选择器。 */
-  (e: 'change'): void
 }>()
 
 const text = ref('')
@@ -93,16 +91,7 @@ function onKeydown(event: KeyboardEvent) {
           @keydown="onKeydown"
         />
         <div class="draft-bar">
-          <button
-            class="draft-change"
-            type="button"
-            :disabled="busy"
-            title="回选择器，换成别的 Agent"
-            @click="emit('change')"
-          >
-            换个 Agent
-          </button>
-          <span class="draft-hint">Enter 发送 · Shift+Enter 换行</span>
+          <span class="draft-hint">Enter 发送 · Shift+Enter 换行 · 换 Agent ⇒ 顶栏面板底部「＋ 新建会话」</span>
           <button
             class="send-btn"
             type="button"

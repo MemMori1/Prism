@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { filterNavSessions, mergeRecentSessions } from '../src/sessionNav'
+import {
+  filterNavSessions,
+  mergeRecentSessions,
+  navAgentList,
+  sessionsOfEngine,
+} from '../src/sessionNav'
 import type { SessionSummary } from '../src/types'
 
 function session(id: string, title: string | null, timeUpdated: number): SessionSummary {
@@ -78,5 +83,71 @@ describe('filterNavSessions', () => {
   it('没命中＝空；标题为 null 不会炸', () => {
     expect(filterNavSessions(items, 'zzz')).toEqual([])
     expect(filterNavSessions(items, 's3')).toEqual([])
+  })
+})
+
+describe('sessionsOfEngine（面板右栏只列选中 Agent 的会话）', () => {
+  const items = [
+    { session: { ...session('a', 'A', 300), engine: 'native' }, projectName: 'Prism' },
+    { session: { ...session('b', 'B', 200), engine: 'opencode' }, projectName: 'Prism' },
+    { session: { ...session('c', 'C', 100), engine: 'native' }, projectName: 'hsbg-helper' },
+  ]
+
+  it('只留这个 Agent 的，别的引擎再近也不出现', () => {
+    expect(sessionsOfEngine(items, 'native').map(item => item.session.id)).toEqual(['a', 'c'])
+    expect(sessionsOfEngine(items, 'opencode').map(item => item.session.id)).toEqual(['b'])
+  })
+
+  it('顺序还是最近优先（交给调用方前已经排好）', () => {
+    expect(sessionsOfEngine(items, 'native')[0].session.id).toBe('a')
+  })
+
+  it('还没挑 Agent（null）＝没有可列的会话', () => {
+    expect(sessionsOfEngine(items, null)).toEqual([])
+  })
+
+  it('这个 Agent 一条都没有＝空', () => {
+    expect(sessionsOfEngine(items, 'codex')).toEqual([])
+  })
+})
+
+describe('navAgentList（面板左列）', () => {
+  const items = [
+    { session: { ...session('a', 'A', 300), engine: 'native' }, projectName: 'Prism' },
+    { session: { ...session('b', 'B', 200), engine: 'opencode' }, projectName: 'Prism' },
+    { session: { ...session('c', 'C', 100), engine: 'native' }, projectName: 'hsbg-helper' },
+  ]
+  const known = [
+    { id: 'native', available: true },
+    { id: 'codex', available: false },
+    { id: 'opencode', available: true },
+  ]
+
+  it('顺序照给定的来，会话数按最近会话算', () => {
+    expect(navAgentList(items, known).map(item => [item.id, item.count])).toEqual([
+      ['native', 2],
+      ['codex', 0],
+      ['opencode', 1],
+    ])
+  })
+
+  it('一条会话都没有的 Agent 也留着（否则用户没法在左边点它）', () => {
+    expect(navAgentList([], known)).toHaveLength(3)
+  })
+
+  it('可用性透传（置灰用）', () => {
+    expect(navAgentList(items, known).find(item => item.id === 'codex')?.available).toBe(false)
+  })
+
+  it('最近会话里冒出来的陌生引擎补在后面，不会漏', () => {
+    const extra = [{ session: { ...session('d', 'D', 400), engine: 'gemini' }, projectName: 'X' }]
+    const list = navAgentList(extra, known)
+    expect(list.map(item => item.id)).toEqual(['native', 'codex', 'opencode', 'gemini'])
+    expect(list[3]).toEqual({ id: 'gemini', count: 1, available: true })
+  })
+
+  it('目录里重复的 id 只算一次', () => {
+    const list = navAgentList(items, [...known, { id: 'native', available: true }])
+    expect(list.filter(item => item.id === 'native')).toHaveLength(1)
   })
 })

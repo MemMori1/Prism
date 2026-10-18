@@ -1,24 +1,38 @@
 <script setup lang="ts">
 /**
- * 工作台：两种状态。
+ * 工作台：**一页 ＝ 一个 Agent 的工作区**。
+ *
+ * 每页里有两种状态：
  * 1) 多列并排：一屏多列，每列一个会话（完整指挥能力：发送 / 插话 / 停止 / 审批）。
- * 2) 两栏「新建会话」页：左＝当前进行的会话 + 底部目录选择（可新增本机文件夹），右＝选 Agent → 原地变聊天框。
- *    没选目录前右侧 Agent 锁住（工作目录要用户自己挑，不默认替用户选）。
- * 点进工作台（侧栏 / 恢复上次视图）默认落在 2)；1) 只在点「⊞ 并排看」或从归档「⇥ 工作台」开列时出现。
- * 多列始终挂载（两栏页里也照旧收事件），这样左栏列出的会话状态是活的。
- * 布局持久化在 localStorage；列内会话概要按需拉取、收口后刷新。
+ * 2) 两栏「新建会话」页：左＝当前进行的会话 + 底部目录选择（可新增本机文件夹），
+ *    右＝本页还没挑 Agent 时先挑 Agent；挑过之后右栏就是这个 Agent 的草稿输入框——
+ *    发出第一条消息才真的建会话（不然聊不聊都会留下没名字的空壳，而目前删不掉）。
+ *
+ * 页面绑定的 Agent 定了就不在页内换：换 Agent 走顶栏「‹Agent› 的会话」面板底部的
+ * 「＋ 用 … 新建会话」（会给那个 Agent 开一页 / 用它自己的草稿框）。
+ * 所有页面都挂载（非当前页只是藏起来），后台页面里的会话照旧收引擎事件——左栏状态、托盘角标才是活的。
+ * 页面数据（Agent / 目录 / 列 / 聚焦）持久化在 workspace.ts；列内会话概要按需拉取、收口后刷新。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
+import { clampColumnWidth, restoreColumnAction, workbenchShowsStartPage } from '../workbench'
 import {
-  clampColumnWidth,
-  parseWorkbenchLayout,
-  restoreColumnAction,
-  serializeWorkbenchLayout,
-  workbenchShowsStartPage,
-  WORKBENCH_DEFAULT_WIDTH,
-} from '../workbench'
+  allColumns,
+  bindPageAgent,
+  bindPageDirectory,
+  claimPage,
+  currentPage,
+  currentPageId,
+  ensurePageOfAgent,
+  newColumn,
+  pageOfSession,
+  pages,
+  persistWorkspace,
+  switchPage,
+  type WorkspaceColumn,
+  type WorkspacePage,
+} from '../workspace'
 import { engineChoices } from '../sessionStart'
 import { engineLabel } from '../workshop'
 import { lastStartDirectory, lastStartEngine, rememberStart } from '../startPrefs'
@@ -37,8 +51,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'error', message: string): void
   (e: 'settled'): void
-  /** 当前盯着哪条会话（顶部导航显示「当前会话」用）；带概要，省得 App 再查一次。 */
-  (e: 'focus', payload: { sessionId: string | null; session: SessionSummary | null }): void
   (e: 'status', status: {
     running: number
     waiting: number
@@ -46,13 +58,6 @@ const emit = defineEmits<{
     waitingIds: string[]
   }): void
 }>()
-
-interface WorkbenchColumn {
-  sessionId: string
-  width: number
-  session: SessionSummary | null
-  status: { running: boolean; waiting: number }
-}
 
 /** 手动新增的目录：还没被引擎收录成项目，选中后照样能在里面建会话。 */
 interface ExtraDir {
@@ -63,70 +68,50 @@ interface ExtraDir {
 
 const EXTRA_DIR_PREFIX = 'dir:'
 
-const STORAGE_KEY = 'prism-workbench-v1'
-
-const scroller = ref<HTMLElement | null>(null)
-const columns = ref<WorkbenchColumn[]>([])
 const flashId = ref<string | null>(null)
-/**
- * 两栏「新建会话」页是否在前台。
- * 默认 true：点进工作台先看到的就是它（哪怕 localStorage 里存着列）。
- * 只有点「⊞ 并排看」或从归档「⇥ 工作台」开列时才落到多列画布。
- */
-const startOpen = ref(true)
-/** 右栏显示的会话；null＝选 Agent。 */
-const focusedId = ref<string | null>(null)
-/** 多列画布里最近碰过的那一列（顶部导航显示「当前会话」用）。 */
-const touchedId = ref<string | null>(null)
-/** 选中的工作目录：项目 id 或手动新增目录的 id；null＝还没选（右侧 Agent 锁住）。 */
-const selectedDirId = ref<string | null>(null)
-/** 手动新增、还没被引擎收录成项目的目录。 */
+/** 手动新增、还没被引擎收录成项目的目录（本次运行里加的，不落盘）。 */
 const extraDirs = ref<ExtraDir[]>([])
 const creatingSession = ref(false)
-/**
- * 选完 Agent 的草稿：会话还没建，右栏先给输入框。
- * 发出第一条消息才真的建会话（不然聊不聊都会留下没名字的空壳，而目前删不掉）。
- */
-const draftEngine = ref<string | null>(null)
-/** 右栏新会话的聊天框：草稿那条消息由它发出去（流式 / 审批走平时那条路）。 */
-const rightView = ref<InstanceType<typeof SessionView> | null>(null)
 const sessionError = ref<string | null>(null)
 
-/** 选中的目录（项目或手动新增的）；没选就是 null。 */
+/** 每个会话的聊天框实例：草稿那条消息要交给它的 sendText 发出去（流式 / 审批走平时那条路）。 */
+const sessionViews = new Map<string, InstanceType<typeof SessionView>>()
+
+function bindView(sessionId: string, view: unknown) {
+  if (view) sessionViews.set(sessionId, view as InstanceType<typeof SessionView>)
+  else sessionViews.delete(sessionId)
+}
+
+/** 当前页面。 */
+const page = currentPage
+
+/**
+ * 本页的工作目录（绝对路径）。页面自己记着：切页 / 重启后各页目录都在，
+ * 顶栏面板底部「＋ 用 … 新建会话」开出来的新页会自动沿用上次用过的目录。
+ */
 const selectedDir = computed<ExtraDir | null>(() => {
-  const id = selectedDirId.value
-  if (!id) return null
-  const extra = extraDirs.value.find(item => item.id === id)
-  if (extra) return extra
-  const project = props.projects.find(item => item.id === id)
-  if (!project) return null
-  return {
-    id: project.id,
-    label: project.name || basename(project.worktree),
-    worktree: project.worktree,
+  const path = page.value.directory
+  if (!path) return null
+  const project = props.projects.find(item => samePath(item.worktree, path))
+  if (project) {
+    return {
+      id: project.id,
+      label: project.name || basename(project.worktree),
+      worktree: project.worktree,
+    }
   }
+  const extra = extraDirs.value.find(item => samePath(item.worktree, path))
+  if (extra) return extra
+  return { id: `${EXTRA_DIR_PREFIX}${path}`, label: basename(path) || path, worktree: path }
 })
 
-/** 两栏「新建会话」页在前台吗；不在就画多列并排。 */
-const startPage = computed(() => workbenchShowsStartPage(startOpen.value, columns.value.length))
-
-/** 多列里画哪些列：两栏页聚焦的那一条由右栏画，同一个会话不会出现两个 SessionView。 */
-const canvasColumns = computed(() =>
-  startPage.value
-    ? columns.value.filter(column => column.sessionId !== focusedId.value)
-    : columns.value,
-)
-
-/** 右栏那一条；null 表示右栏显示选 Agent。 */
-const focusedColumn = computed(
-  () => columns.value.find(column => column.sessionId === focusedId.value) ?? null,
-)
+const selectedDirId = computed(() => selectedDir.value?.id ?? '')
 
 const choices = computed(() => engineChoices(props.health))
 
 const pickerHint = computed(() => {
   if (!selectedDir.value) return '先在左边选一个工作目录，或用「＋ 新增」在本机挑一个文件夹'
-  return '选完 Agent 右栏就是输入框——发出第一条消息才真的建会话'
+  return '挑一个 Agent 开始这一页——之后这一页只用它；要换就去顶栏面板底部「＋ 新建会话」'
 })
 
 const pickerDescription = computed(() =>
@@ -135,52 +120,62 @@ const pickerDescription = computed(() =>
     : '还没选工作目录。先在左边选一个，右边才会解锁。',
 )
 
-/** 目录下拉：手动新增的排在前面；同路径的项目优先，避免出现两份。 */
-const dirOptions = computed(() => [
-  ...extraDirs.value
-    .filter(extra => !props.projects.some(item => samePath(item.worktree, extra.worktree)))
-    .map(extra => ({ value: extra.id, label: extra.label })),
-  ...props.projects.map(item => ({
-    value: item.id,
-    label: item.name || basename(item.worktree),
-  })),
-])
-
-watch(
-  () => props.projects.map(project => `${project.id}\u0000${project.worktree}`).join('\n'),
-  () => {
-    // 项目列表到位后再补一次「上次用的目录」（首屏时可能还没加载出来）。
-    restoreLastDirectory()
-    const id = selectedDirId.value
-    if (!id) return
-    if (id.startsWith(EXTRA_DIR_PREFIX)) {
-      // 新增的目录一旦被引擎收录成项目，就跟着切到项目 id：下拉里不会出现两份。
-      const extra = extraDirs.value.find(item => item.id === id)
-      const known = extra
-        ? props.projects.find(item => samePath(item.worktree, extra.worktree))
-        : undefined
-      if (known) {
-        extraDirs.value = extraDirs.value.filter(item => item.id !== id)
-        selectedDirId.value = known.id
-      }
-      return
-    }
-    if (!props.projects.some(item => item.id === id)) selectedDirId.value = null
-  },
+/** 「＋ 新建会话」按钮的提示：本页已经绑了 Agent 就直说用谁。 */
+const newSessionHint = computed(() =>
+  page.value.agent
+    ? `新建会话：用本页的 ${engineLabel(page.value.agent)}（换 Agent ⇒ 顶栏面板底部「＋ 新建会话」）`
+    : '新建会话：先在右栏挑一个 Agent（这一页之后只用它）',
 )
 
-const runningCount = computed(() => columns.value.filter(column => column.status.running).length)
+/** 目录下拉：手动新增的排在前面；同路径的项目优先，避免出现两份。 */
+const dirOptions = computed(() => {
+  const options = [
+    ...extraDirs.value
+      .filter(extra => !props.projects.some(item => samePath(item.worktree, extra.worktree)))
+      .map(extra => ({ value: extra.id, label: extra.label })),
+    ...props.projects.map(item => ({
+      value: item.id,
+      label: item.name || basename(item.worktree),
+    })),
+  ]
+  // 页面记着的目录这会儿不在列表里（项目被删掉之类）也要能显示出来。
+  const current = selectedDir.value
+  if (current && !options.some(option => option.value === current.id)) {
+    options.unshift({ value: current.id, label: current.label })
+  }
+  return options
+})
+
+/** 本页的两栏「新建会话」页在前台吗；不在就画多列并排。 */
+function showsStartPage(target: WorkspacePage): boolean {
+  return workbenchShowsStartPage(target.startOpen, target.columns.length)
+}
+
+/** 多列里画哪些列：两栏页聚焦的那一条由右栏画，同一个会话不会出现两个 SessionView。 */
+function canvasColumnsOf(target: WorkspacePage): WorkspaceColumn[] {
+  if (!showsStartPage(target)) return target.columns
+  return target.columns.filter(column => column.sessionId !== target.focusedId)
+}
+
+/** 某一页右栏聚焦的那一条；null 表示右栏显示挑 Agent / 该页的草稿框。 */
+function focusedColumnOf(target: WorkspacePage): WorkspaceColumn | null {
+  return target.columns.find(column => column.sessionId === target.focusedId) ?? null
+}
+
+const focusedColumn = computed(() => focusedColumnOf(page.value))
+
+const runningCount = computed(() => allColumns.value.filter(column => column.status.running).length)
 const waitingCount = computed(() =>
-  columns.value.reduce((sum, column) => sum + column.status.waiting, 0),
+  allColumns.value.reduce((sum, column) => sum + column.status.waiting, 0),
 )
 const runningIds = computed(() =>
-  columns.value.filter(column => column.status.running).map(column => column.sessionId),
+  allColumns.value.filter(column => column.status.running).map(column => column.sessionId),
 )
 const waitingIds = computed(() =>
-  columns.value.filter(column => column.status.waiting > 0).map(column => column.sessionId),
+  allColumns.value.filter(column => column.status.waiting > 0).map(column => column.sessionId),
 )
 
-// 状态汇总上报（顶栏角标 + 托盘用；id 列表供托盘与归档视图去重）。
+// 状态汇总上报（顶栏角标 + 托盘用；id 列表供托盘与归档视图去重）。跨页统计：后台页面的会话也算。
 watch(
   [runningCount, waitingCount, runningIds, waitingIds],
   () =>
@@ -197,33 +192,6 @@ function report(cause: unknown) {
   emit('error', cause instanceof Error ? cause.message : String(cause))
 }
 
-/**
- * 顶部导航的「当前会话」要显示哪一列：两栏页看聚焦的那条，多列画布看最近碰过的那一列。
- * 多列里没有「唯一焦点」，用最后一次 pointerdown 当意图。
- */
-const navColumn = computed(
-  () =>
-    focusedColumn.value ??
-    columns.value.find(item => item.sessionId === touchedId.value) ??
-    null,
-)
-
-// 两个源：换了哪一列、或那一列的概要换了（标题/用量刷新）都要把新概要推给顶栏。
-watch(
-  [() => navColumn.value?.sessionId ?? null, () => navColumn.value?.session ?? null],
-  () =>
-    emit('focus', {
-      sessionId: navColumn.value?.sessionId ?? null,
-      session: navColumn.value?.session ?? null,
-    }),
-  { immediate: true },
-)
-
-/** 点了某一列（选文字、点按钮都算）：记下来给顶部导航显示。 */
-function touchColumn(sessionId: string) {
-  touchedId.value = sessionId
-}
-
 /** 目录比路径：忽略结尾的斜杠。 */
 function samePath(a: string, b: string): boolean {
   return a.replace(/\/+$/, '') === b.replace(/\/+$/, '')
@@ -237,28 +205,6 @@ function shortPath(path: string): string {
 
 function sleep(ms: number) {
   return new Promise(resolve => window.setTimeout(resolve, ms))
-}
-
-// ---- 布局持久化 ----
-
-function saveLayout() {
-  const data = columns.value.map(column => ({
-    sessionId: column.sessionId,
-    width: column.width,
-  }))
-  try {
-    localStorage.setItem(STORAGE_KEY, serializeWorkbenchLayout(data))
-  } catch {
-    // 存储失败不影响使用。
-  }
-}
-
-function loadLayout() {
-  try {
-    return parseWorkbenchLayout(localStorage.getItem(STORAGE_KEY))
-  } catch {
-    return []
-  }
 }
 
 // ---- 会话概要 ----
@@ -313,38 +259,44 @@ async function fetchSummaryWithRetry(sessionId: string): Promise<SessionSummary 
 
 // ---- 列的开合 ----
 
+function columnOf(sessionId: string): WorkspaceColumn | null {
+  for (const item of pages.value) {
+    const column = item.columns.find(entry => entry.sessionId === sessionId)
+    if (column) return column
+  }
+  return null
+}
+
 /** 加一列（已存在则只刷新概要），不改变当前看到的是哪一屏。 */
 function addColumn(sessionId: string, session?: SessionSummary) {
-  const existing = columns.value.find(column => column.sessionId === sessionId)
+  const target = page.value
+  const existing = target.columns.find(column => column.sessionId === sessionId)
   if (existing) {
     if (session) existing.session = session
     return
   }
-  columns.value.push({
-    sessionId,
-    width: WORKBENCH_DEFAULT_WIDTH,
-    session: session ?? null,
-    status: { running: false, waiting: 0 },
-  })
-  saveLayout()
+  const column = newColumn(sessionId)
+  if (session) column.session = session
+  target.columns.push(column)
+  persistWorkspace()
   if (!session) {
     void fetchSummary(sessionId).then(summary => {
-      const column = columns.value.find(item => item.sessionId === sessionId)
-      if (column) column.session = summary
+      const entry = target.columns.find(item => item.sessionId === sessionId)
+      if (entry) entry.session = summary
     })
   }
 }
 
 function closeColumn(sessionId: string) {
-  columns.value = columns.value.filter(column => column.sessionId !== sessionId)
-  if (focusedId.value === sessionId) focusedId.value = null
-  if (touchedId.value === sessionId) touchedId.value = null
-  saveLayout()
+  const target = page.value
+  target.columns = target.columns.filter(column => column.sessionId !== sessionId)
+  if (target.focusedId === sessionId) target.focusedId = null
+  persistWorkspace()
 }
 
 /** 列里会话概要没拉到时原地重试；确认不存在只提示用户关闭，不自动删列。 */
 async function retryColumn(sessionId: string) {
-  const column = columns.value.find(item => item.sessionId === sessionId)
+  const column = columnOf(sessionId)
   if (!column) return
   const result = await lookupSummary(sessionId)
   if (result.kind === 'ok') {
@@ -365,97 +317,139 @@ function focusColumn(sessionId: string) {
     if (flashId.value === sessionId) flashId.value = null
   }, 1200)
   void nextTick(() => {
-    const el = scroller.value?.querySelector(`[data-session-id="${sessionId}"]`)
+    const el = document.querySelector(`.wb-page.current [data-session-id="${sessionId}"]`)
     el?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
   })
 }
 
-/** 归档「⇥ 工作台」调用：开一列并直接看多列并排。 */
-function openColumn(sessionId: string, session?: SessionSummary) {
-  addColumn(sessionId, session)
-  startOpen.value = false
-  focusedId.value = null
-  focusColumn(sessionId)
-}
-
-/** 顶部导航点会话：这一条已经开在列里就直接切过去（返回 true），没开则交给调用方去归档。 */
-function focusIfOpen(sessionId: string): boolean {
-  if (!columns.value.some(column => column.sessionId === sessionId)) return false
-  startOpen.value = false
-  focusedId.value = null
-  sessionError.value = null
-  touchedId.value = sessionId
-  focusColumn(sessionId)
-  return true
+/** 在某一页里定位一条会话：落到多列画布并闪一下（那一页不是当前页就只切状态）。 */
+function revealInPage(target: WorkspacePage, sessionId: string) {
+  target.startOpen = false
+  target.focusedId = null
+  persistWorkspace()
+  if (target.id === currentPageId.value) {
+    sessionError.value = null
+    focusColumn(sessionId)
+  }
 }
 
 /**
- * 顶部导航的新建入口：进两栏页。给了 Agent（上次用的）就直接开草稿输入框，
- * 没给、或这个 Agent 这会儿不可用，就回选择器——不弹窗拦人。
+ * 开一列：归档「⇥ 工作台」、顶栏点一条会话都走它。
+ * 已经在列里（任何一页）→ 切到那一页并定位；没开 → 落到它那个 Agent 的页面（没有就新开一页）。
  */
-function startDraft(engine: string | null) {
-  startOpen.value = true
-  focusedId.value = null
+async function openColumn(sessionId: string, session?: SessionSummary) {
+  const owner = pageOfSession(sessionId)
+  if (owner) {
+    switchPage(owner.id)
+    revealInPage(owner, sessionId)
+    return
+  }
+
+  let summary: SessionSummary | null = session ?? null
+  if (!summary) {
+    const result = await lookupSummary(sessionId)
+    if (result.kind === 'error') report(result.error)
+    if (result.kind === 'ok') summary = result.summary
+  }
+
+  const engine = summary?.engine ?? null
+  // 会话属于哪个 Agent 就落到哪个 Agent 的页面：页面不混 Agent。
+  if (engine) ensurePageOfAgent(engine, summary?.directory ?? null)
+  const target = page.value
+  if (engine) claimPage(target, engine, summary?.directory ?? null)
+  addColumn(sessionId, summary ?? undefined)
+  revealInPage(target, sessionId)
+}
+
+/**
+ * 顶栏导航点一条会话：**落进两栏「新建会话」页**——左栏（当前进行的会话）加一行并选中，
+ * 右栏就是它的对话。不会切到多列并排：那是「⊞ 并排看」或顶栏 ⇥ 的显式动作。
+ */
+async function openInStartPage(sessionId: string, session?: SessionSummary) {
+  const owner = pageOfSession(sessionId)
+  if (owner) {
+    switchPage(owner.id)
+    owner.startOpen = true
+    owner.focusedId = sessionId
+    sessionError.value = null
+    persistWorkspace()
+    return
+  }
+
+  let summary: SessionSummary | null = session ?? null
+  if (!summary) {
+    const result = await lookupSummary(sessionId)
+    if (result.kind === 'error') report(result.error)
+    if (result.kind === 'ok') summary = result.summary
+  }
+
+  const engine = summary?.engine ?? null
+  // 会话属于哪个 Agent 就落到哪个 Agent 的页面：页面不混 Agent。
+  if (engine) ensurePageOfAgent(engine, summary?.directory ?? null)
+  const target = page.value
+  if (engine) claimPage(target, engine, summary?.directory ?? null)
+  addColumn(sessionId, summary ?? undefined)
+  showStartPage(sessionId)
+}
+
+/**
+ * 「＋ 新建会话」：回本页的两栏页。
+ * 本页已经绑了 Agent 就直接是这个 Agent 的草稿框（页内不换 Agent）；还没绑就是选择器。
+ */
+function startNewSession() {
+  page.value.startOpen = true
+  page.value.focusedId = null
   sessionError.value = null
-  const usable = engine
-    ? choices.value.some(choice => choice.id === engine && choice.available)
-    : false
-  draftEngine.value = usable ? engine : null
+  persistWorkspace()
 }
 
 // ---- 两栏「新建会话」页 ----
 
-/** 切到两栏页；focus 为 null 时右栏是选 Agent。 */
+/** 切到两栏页；focus 为 null 时右栏是本页的草稿框（没绑 Agent 则是选择器）。 */
 function showStartPage(focus: string | null) {
-  startOpen.value = true
-  focusedId.value = focus
+  page.value.startOpen = true
+  page.value.focusedId = focus
   sessionError.value = null
-}
-
-/**
- * 「＋ 新建会话」：回两栏页**重新挑 Agent**。
- *
- * 这里必须把已选的草稿清掉：不清的话，选过一次 Agent 之后右栏永远是那个草稿框，
- * 选择器再也回不去，看起来就是「选完一个工具就不让换了」。
- */
-function startNewSession() {
-  draftEngine.value = null
-  showStartPage(null)
+  persistWorkspace()
 }
 
 /** 回到多列并排。 */
 function showColumns() {
-  startOpen.value = false
-  focusedId.value = null
+  page.value.startOpen = false
+  page.value.focusedId = null
   sessionError.value = null
+  persistWorkspace()
 }
 
 /** 左栏点一条会话：右栏换成它的聊天框。 */
 function focusSession(sessionId: string) {
-  focusedId.value = sessionId
+  page.value.focusedId = sessionId
   sessionError.value = null
+  persistWorkspace()
+}
+
+function resolveDirPath(dirId: string): string | null {
+  const extra = extraDirs.value.find(item => item.id === dirId)
+  if (extra) return extra.worktree
+  return props.projects.find(item => item.id === dirId)?.worktree ?? null
 }
 
 function chooseDir(dirId: string) {
-  selectedDirId.value = dirId || null
   sessionError.value = null
-  // 记住这次挑的目录：下次进工作台默认就是它，不用再挑一次。
-  const dir = selectedDir.value
-  if (dir) rememberStart({ directory: dir.worktree })
+  const path = resolveDirPath(dirId)
+  if (!path) return
+  bindPageDirectory(page.value, path)
+  // 记住这次挑的目录：下次新页面默认就是它，不用再挑一次。
+  rememberStart({ directory: path })
 }
 
-/** 上次用的目录还在列表里的话，一进来就替用户选好（新建会话默认沿用上次）。 */
+/** 上次用的目录还在的话，进页面就替用户选好（新页面默认沿用上次）。 */
 function restoreLastDirectory() {
-  if (selectedDirId.value) return
+  const target = page.value
+  if (target.directory) return
   const last = lastStartDirectory.value
   if (!last) return
-  const project = props.projects.find(item => samePath(item.worktree, last))
-  if (project) {
-    selectedDirId.value = project.id
-    return
-  }
-  const extra = extraDirs.value.find(item => samePath(item.worktree, last))
-  if (extra) selectedDirId.value = extra.id
+  bindPageDirectory(target, last)
 }
 
 /** 新增目录：挑一个本机文件夹当工作目录（还没被引擎收录也能直接在里面建会话）。 */
@@ -469,7 +463,7 @@ async function addDirectory() {
     if (typeof picked !== 'string' || !picked) return
     const known = props.projects.find(item => samePath(item.worktree, picked))
     if (known) {
-      selectedDirId.value = known.id
+      bindPageDirectory(page.value, known.worktree)
       sessionError.value = null
       rememberStart({ directory: known.worktree })
       return
@@ -481,7 +475,7 @@ async function addDirectory() {
         { id, label: basename(picked) || picked, worktree: picked },
       ]
     }
-    selectedDirId.value = id
+    bindPageDirectory(page.value, picked)
     sessionError.value = null
     rememberStart({ directory: picked })
   } catch (cause) {
@@ -490,19 +484,19 @@ async function addDirectory() {
 }
 
 /**
- * 选中 Agent：不建会话，只把右栏换成首条消息框。
+ * 选中 Agent：不建会话，只把这一页绑给这个 Agent，右栏换成首条消息框。
  * 真正建会话在 startFromDraft（用户点了发送）——这样空会话不会因为一次误点留下来。
  */
 function onEngineSelected(engine: string) {
   if (!selectedDir.value) return
   sessionError.value = null
-  draftEngine.value = engine
+  bindPageAgent(page.value, engine)
 }
 
 /** 草稿发出第一条消息：建会话 → 开列 → 让那一列把这条消息发出去。 */
 async function startFromDraft(text: string) {
   const dir = selectedDir.value
-  const engine = draftEngine.value
+  const engine = page.value.agent
   if (!dir || !engine || !text.trim() || creatingSession.value) return
   creatingSession.value = true
   sessionError.value = null
@@ -512,11 +506,11 @@ async function startFromDraft(text: string) {
     rememberStart({ engine, directory: dir.worktree })
     const summary = await fetchSummaryWithRetry(created.sessionId)
     addColumn(created.sessionId, summary ?? undefined)
-    draftEngine.value = null
+    page.value.focusedId = created.sessionId
+    persistWorkspace()
     // 右栏原地变成这个新会话的聊天框。
-    focusedId.value = created.sessionId
     await nextTick()
-    const view = rightView.value
+    const view = sessionViews.get(created.sessionId)
     if (view) {
       await view.sendText(text)
     } else {
@@ -535,7 +529,7 @@ async function startFromDraft(text: string) {
 
 let resizeState: { sessionId: string; startX: number; startWidth: number } | null = null
 
-function startResize(event: PointerEvent, column: WorkbenchColumn) {
+function startResize(event: PointerEvent, column: WorkspaceColumn) {
   event.preventDefault()
   resizeState = { sessionId: column.sessionId, startX: event.clientX, startWidth: column.width }
   window.addEventListener('pointermove', onResizeMove)
@@ -546,7 +540,7 @@ function startResize(event: PointerEvent, column: WorkbenchColumn) {
 
 function onResizeMove(event: PointerEvent) {
   if (!resizeState) return
-  const column = columns.value.find(item => item.sessionId === resizeState?.sessionId)
+  const column = columnOf(resizeState.sessionId)
   if (!column) return
   column.width = clampColumnWidth(resizeState.startWidth + (event.clientX - resizeState.startX))
 }
@@ -557,18 +551,18 @@ function stopResize() {
   window.removeEventListener('pointerup', stopResize)
   document.body.style.cursor = ''
   document.body.style.userSelect = ''
-  saveLayout()
+  persistWorkspace()
 }
 
 // ---- 列内事件 ----
 
 function onColumnStatus(sessionId: string, status: { running: boolean; waiting: number }) {
-  const column = columns.value.find(item => item.sessionId === sessionId)
+  const column = columnOf(sessionId)
   if (column) column.status = status
 }
 
 async function onColumnSettled(sessionId: string) {
-  const column = columns.value.find(item => item.sessionId === sessionId)
+  const column = columnOf(sessionId)
   if (column) {
     const summary = await fetchSummary(sessionId)
     if (summary) column.session = summary
@@ -576,255 +570,286 @@ async function onColumnSettled(sessionId: string) {
   emit('settled')
 }
 
-function dotClass(column: WorkbenchColumn) {
+function dotClass(column: WorkspaceColumn) {
   if (column.status.waiting > 0) return 'tone-wait'
   if (column.status.running) return 'tone-run'
   return 'tone-idle'
 }
 
-function dotTitle(column: WorkbenchColumn) {
+function dotTitle(column: WorkspaceColumn) {
   if (column.status.waiting > 0) return '等待审批'
   if (column.status.running) return '执行中'
   return '空闲'
 }
 
 /** 左栏列表里的状态文案。 */
-function statusText(column: WorkbenchColumn) {
+function statusText(column: WorkspaceColumn) {
   if (column.status.waiting > 0) return `等审批 ${column.status.waiting}`
   if (column.status.running) return '执行中'
   return '空闲'
 }
 
 /** 左栏列表第二行：概要还没到手（正在拉 / 这次没拉到）就别说「空闲」。 */
-function rowSubText(column: WorkbenchColumn) {
+function rowSubText(column: WorkspaceColumn) {
   return column.session ? statusText(column) : '加载中…'
 }
 
-function columnTitle(column: WorkbenchColumn) {
+function columnTitle(column: WorkspaceColumn) {
   return column.session?.title || '未命名会话'
 }
 
 // ---- 恢复布局 ----
 
+/** 把存下来的列认回来：拉概要、认页面绑的 Agent、确认不存在的列才丢。 */
+async function restoreColumns() {
+  const targets = pages.value.flatMap(target =>
+    target.columns.map(column => ({ target, sessionId: column.sessionId })),
+  )
+  if (!targets.length) return
+
+  const results = await Promise.all(
+    targets.map(async item => ({ ...item, lookup: await lookupSummaryForRestore(item.sessionId) })),
+  )
+
+  let dropped = false
+  for (const item of results) {
+    const column = item.target.columns.find(entry => entry.sessionId === item.sessionId)
+    if (!column) continue
+    // 后端确认这个会话不存在：丢这一条。
+    if (restoreColumnAction(item.lookup.kind) === 'drop') {
+      dropped = true
+      item.target.columns = item.target.columns.filter(entry => entry.sessionId !== item.sessionId)
+      if (item.target.focusedId === item.sessionId) item.target.focusedId = null
+      continue
+    }
+    // 只是这次没拉到：列留着（渲染成「加载中/重试」），原因报到顶栏。
+    if (item.lookup.kind !== 'ok') {
+      if (item.lookup.kind === 'error') report(item.lookup.error)
+      continue
+    }
+    column.session = item.lookup.summary
+    // 从旧版单画布迁来的页面还没绑 Agent：按第一条会话的 Agent 认领（页面不混 Agent）。
+    claimPage(item.target, item.lookup.summary.engine, item.lookup.summary.directory)
+  }
+  // 只有确实丢过列才写回布局；查询失败绝不写——写下去等于替用户把列删了。
+  if (dropped) persistWorkspace()
+}
+
 onMounted(() => {
   // 默认沿用上次挑的工作目录（还在列表里才用），省得每次都挑。
   restoreLastDirectory()
-  const saved = loadLayout()
-  if (!saved.length) return
-  void Promise.all(
-    saved.map(async item => ({
-      ...item,
-      lookup: await lookupSummaryForRestore(item.sessionId),
-    })),
-  ).then(restored => {
-    let dropped = false
-    for (const item of restored) {
-      // 后端确认这个会话不存在：丢这一条。
-      if (restoreColumnAction(item.lookup.kind) === 'drop') {
-        dropped = true
-        continue
-      }
-      if (item.lookup.kind === 'error') {
-        // 只是这次没拉到：列留着（下面会渲染成「加载中/重试」），原因报到顶栏。
-        report(item.lookup.error)
-      }
-      if (columns.value.some(column => column.sessionId === item.sessionId)) continue
-      columns.value.push({
-        sessionId: item.sessionId,
-        width: item.width,
-        session: item.lookup.kind === 'ok' ? item.lookup.summary : null,
-        status: { running: false, waiting: 0 },
-      })
-    }
-    // 只有确实丢过列才写回布局；查询失败绝不写——写下去等于替用户把列删了。
-    if (dropped) saveLayout()
-  })
+  void restoreColumns()
 })
+
+// 新页 / 切页：目录还没选就沿用上次用过的；项目列表到位后也补一次（首屏可能还没加载出来）。
+watch([currentPageId, () => props.projects], () => restoreLastDirectory())
 
 onBeforeUnmount(() => {
   stopResize()
 })
 
-defineExpose({ openColumn, showStartPage, focusIfOpen, startDraft })
+defineExpose({
+  openColumn,
+  openInStartPage,
+  showStartPage,
+  showColumns,
+  startNewSession,
+  focusSession,
+})
 </script>
 
 <template>
   <section class="workbench">
-    <!-- 多列并排：一直挂载，两栏页里也继续收引擎事件，左栏的状态才是活的。 -->
-    <div v-show="!startPage" ref="scroller" class="wb-scroll">
-      <div
-        v-for="column in canvasColumns"
-        :key="column.sessionId"
-        class="wb-column"
-        :class="{ flash: flashId === column.sessionId }"
-        :data-session-id="column.sessionId"
-        :style="{ width: `${column.width}px` }"
-        @pointerdown="touchColumn(column.sessionId)"
-      >
-        <header class="wb-head">
-          <span class="wb-dot" :class="dotClass(column)" :title="dotTitle(column)" />
-          <span class="wb-title" :title="columnTitle(column)">{{ columnTitle(column) }}</span>
-          <span
-            v-if="column.status.waiting"
-            class="wb-waiting"
-            :title="`${column.status.waiting} 个权限请求等待审批`"
-          >
-            审批 {{ column.status.waiting }}
-          </span>
-          <button class="wb-btn" title="关闭这一列" @click="closeColumn(column.sessionId)">✕</button>
-        </header>
-
-        <SessionView
-          v-if="column.session"
-          embedded
-          :session="column.session"
-          :has-project="true"
-          @error="report"
-          @settled="onColumnSettled(column.sessionId)"
-          @status="onColumnStatus(column.sessionId, $event)"
-        />
-        <div v-else class="wb-missing">
-          <div>会话加载中或已不存在</div>
-          <div class="wb-missing-acts">
-            <button class="wb-btn wide" @click="retryColumn(column.sessionId)">重试</button>
-            <button class="wb-btn wide" @click="closeColumn(column.sessionId)">关闭这一列</button>
-          </div>
-        </div>
-
-        <div class="wb-resize" title="拖动调整宽度" @pointerdown="startResize($event, column)" />
-      </div>
-    </div>
-
-    <!-- 两栏「新建会话」页：左＝目录 + 当前进行的会话，右＝选 Agent → 聊天框。 -->
-    <div v-if="startPage" class="wb-start">
-      <aside class="wb-start-left" aria-label="当前进行的会话与目录">
-        <button
-          class="wb-start-new"
-          :class="{ on: !focusedId }"
-          title="新建会话：选一个 Agent（上次用过的会标出来）"
-          @click="startNewSession"
+    <!-- 一页＝一个 Agent 的工作区。所有页面都挂载（非当前页藏起来），后台页面里的会话照旧收引擎事件。 -->
+    <div
+      v-for="item in pages"
+      :key="item.id"
+      v-show="item.id === currentPageId"
+      class="wb-page"
+      :class="{ current: item.id === currentPageId }"
+    >
+      <!-- 多列并排：一直挂载，两栏页里也继续收引擎事件，左栏的状态才是活的。 -->
+      <div v-show="!showsStartPage(item)" class="wb-scroll">
+        <div
+          v-for="column in canvasColumnsOf(item)"
+          :key="column.sessionId"
+          class="wb-column"
+          :class="{ flash: flashId === column.sessionId }"
+          :data-session-id="column.sessionId"
+          :style="{ width: `${column.width}px` }"
         >
-          ＋ 新建会话
-        </button>
-
-        <div class="wb-start-head">
-          <span>当前进行的会话</span>
-          <span v-if="columns.length" class="wb-start-count">{{ columns.length }}</span>
-        </div>
-
-        <div class="wb-start-list">
-          <p v-if="!columns.length" class="wb-start-empty">
-            还没有打开的会话——选一个 Agent 建一个，或在归档里点「工作台」
-          </p>
-          <button
-            v-for="column in columns"
-            :key="column.sessionId"
-            class="wb-start-item"
-            :class="{ active: column.sessionId === focusedId }"
-            :title="columnTitle(column)"
-            @click="focusSession(column.sessionId)"
-          >
+          <header class="wb-head">
             <span class="wb-dot" :class="dotClass(column)" :title="dotTitle(column)" />
-            <span class="wb-start-item-main">
-              <span class="wb-start-item-title">{{ columnTitle(column) }}</span>
-              <span class="wb-start-item-sub" :class="dotClass(column)">
-                {{ rowSubText(column) }}
-              </span>
-            </span>
-          </button>
-        </div>
-
-        <div class="wb-start-foot">
-          <button
-            v-if="columns.length"
-            class="wb-start-back"
-            title="回到多列并排视图"
-            @click="showColumns"
-          >
-            ⊞ 并排看
-          </button>
-
-          <div class="wb-start-dir">
-            <div class="wb-start-dir-head">
-              <span class="wb-start-label">目录</span>
-              <button
-                class="wb-start-add"
-                title="新增目录：在本机挑一个文件夹"
-                @click="addDirectory"
-              >
-                ＋ 新增
-              </button>
-            </div>
-            <SelectMenu
-              :model-value="selectedDirId ?? ''"
-              :options="dirOptions"
-              placeholder="选择目录…"
-              size="sm"
-              title="选择工作目录"
-              @update:model-value="chooseDir"
-            />
-            <p
-              class="wb-start-path"
-              :class="{ empty: !selectedDir }"
-              :title="selectedDir?.worktree ?? '还没选目录'"
+            <span class="wb-title" :title="columnTitle(column)">{{ columnTitle(column) }}</span>
+            <span
+              v-if="column.status.waiting"
+              class="wb-waiting"
+              :title="`${column.status.waiting} 个权限请求等待审批`"
             >
-              {{ selectedDir ? shortPath(selectedDir.worktree) : '还没选目录，右边 Agent 会锁住' }}
-            </p>
-          </div>
-        </div>
-      </aside>
+              审批 {{ column.status.waiting }}
+            </span>
+            <button class="wb-btn" title="关闭这一列" @click="closeColumn(column.sessionId)">✕</button>
+          </header>
 
-      <div class="wb-start-right">
-        <template v-if="focusedColumn">
           <SessionView
-            v-if="focusedColumn.session"
-            ref="rightView"
+            v-if="column.session"
+            :ref="el => bindView(column.sessionId, el)"
             embedded
-            :session="focusedColumn.session"
+            :session="column.session"
             :has-project="true"
             @error="report"
-            @settled="onColumnSettled(focusedColumn.sessionId)"
-            @status="onColumnStatus(focusedColumn.sessionId, $event)"
+            @settled="onColumnSettled(column.sessionId)"
+            @status="onColumnStatus(column.sessionId, $event)"
           />
           <div v-else class="wb-missing">
             <div>会话加载中或已不存在</div>
             <div class="wb-missing-acts">
-              <button class="wb-btn wide" @click="retryColumn(focusedColumn.sessionId)">重试</button>
+              <button class="wb-btn wide" @click="retryColumn(column.sessionId)">重试</button>
+              <button class="wb-btn wide" @click="closeColumn(column.sessionId)">关闭这一列</button>
             </div>
           </div>
-        </template>
 
-        <NewSessionDraft
-          v-else-if="draftEngine"
-          :engine-label="engineLabel(draftEngine)"
-          :directory="selectedDir?.worktree ?? ''"
-          :busy="creatingSession"
-          :error="sessionError"
-          @send="startFromDraft"
-          @change="draftEngine = null"
-        />
-
-        <EngineChoicePanel
-          v-else
-          :choices="choices"
-          :locked="!selectedDir"
-          :recent="lastStartEngine"
-          :description="pickerDescription"
-          :hint="pickerHint"
-          :error="sessionError"
-          @select="onEngineSelected"
-        />
+          <div class="wb-resize" title="拖动调整宽度" @pointerdown="startResize($event, column)" />
+        </div>
       </div>
-    </div>
 
-    <button
-      v-if="!startPage"
-      class="wb-add"
-      title="新建会话：回两栏页挑 Agent"
-      @click="startNewSession"
-    >
-      ＋ 新建会话
-    </button>
+      <!-- 两栏「新建会话」页：左＝目录 + 当前进行的会话，右＝挑 Agent（挑过就是草稿框）。 -->
+      <div v-if="showsStartPage(item)" class="wb-start">
+        <aside class="wb-start-left" aria-label="当前进行的会话与目录">
+          <button
+            class="wb-start-new"
+            :class="{ on: !item.focusedId }"
+            :title="newSessionHint"
+            @click="startNewSession"
+          >
+            ＋ 新建会话
+          </button>
+
+          <div class="wb-start-head">
+            <span>当前进行的会话</span>
+            <span v-if="item.columns.length" class="wb-start-count">{{ item.columns.length }}</span>
+          </div>
+
+          <div class="wb-start-list">
+            <p v-if="!item.columns.length" class="wb-start-empty">
+              这一页还没有会话——
+              {{ item.agent ? `用 ${engineLabel(item.agent)} 建一个` : '先挑一个 Agent' }}；
+              换 Agent 走顶栏面板底部的「＋ 新建会话」
+            </p>
+            <button
+              v-for="column in item.columns"
+              :key="column.sessionId"
+              class="wb-start-item"
+              :class="{ active: column.sessionId === item.focusedId }"
+              :title="columnTitle(column)"
+              @click="focusSession(column.sessionId)"
+            >
+              <span class="wb-dot" :class="dotClass(column)" :title="dotTitle(column)" />
+              <span class="wb-start-item-main">
+                <span class="wb-start-item-title">{{ columnTitle(column) }}</span>
+                <span class="wb-start-item-sub" :class="dotClass(column)">
+                  {{ rowSubText(column) }}
+                </span>
+              </span>
+            </button>
+          </div>
+
+          <div class="wb-start-foot">
+            <button
+              v-if="item.columns.length"
+              class="wb-start-back"
+              title="回到多列并排视图"
+              @click="showColumns"
+            >
+              ⊞ 并排看
+            </button>
+
+            <div class="wb-start-dir">
+              <div class="wb-start-dir-head">
+                <span class="wb-start-label">目录</span>
+                <button
+                  class="wb-start-add"
+                  title="新增目录：在本机挑一个文件夹"
+                  @click="addDirectory"
+                >
+                  ＋ 新增
+                </button>
+              </div>
+              <SelectMenu
+                :model-value="selectedDirId"
+                :options="dirOptions"
+                placeholder="选择目录…"
+                size="sm"
+                title="选择工作目录"
+                @update:model-value="chooseDir"
+              />
+              <p
+                class="wb-start-path"
+                :class="{ empty: !selectedDir }"
+                :title="selectedDir?.worktree ?? '还没选目录'"
+              >
+                {{ selectedDir ? shortPath(selectedDir.worktree) : '还没选目录，右边 Agent 会锁住' }}
+              </p>
+            </div>
+          </div>
+        </aside>
+
+        <div class="wb-start-right">
+          <template
+            v-for="focused in item.columns.filter(column => column.sessionId === item.focusedId)"
+            :key="focused.sessionId"
+          >
+            <SessionView
+              v-if="focused.session"
+              :ref="el => bindView(focused.sessionId, el)"
+              embedded
+              :session="focused.session"
+              :has-project="true"
+              @error="report"
+              @settled="onColumnSettled(focused.sessionId)"
+              @status="onColumnStatus(focused.sessionId, $event)"
+            />
+            <div v-else class="wb-missing">
+              <div>会话加载中或已不存在</div>
+              <div class="wb-missing-acts">
+                <button class="wb-btn wide" @click="retryColumn(focused.sessionId)">重试</button>
+              </div>
+            </div>
+          </template>
+
+          <template v-if="!focusedColumnOf(item)">
+            <NewSessionDraft
+              v-if="item.agent"
+              :engine-label="engineLabel(item.agent)"
+              :directory="item.directory ?? ''"
+              :busy="creatingSession"
+              :error="sessionError"
+              @send="startFromDraft"
+            />
+
+            <EngineChoicePanel
+              v-else
+              :choices="choices"
+              :locked="!item.directory"
+              :recent="lastStartEngine"
+              :description="pickerDescription"
+              :hint="pickerHint"
+              :error="sessionError"
+              @select="onEngineSelected"
+            />
+          </template>
+        </div>
+      </div>
+
+      <button
+        v-if="!showsStartPage(item)"
+        class="wb-add"
+        :title="newSessionHint"
+        @click="startNewSession"
+      >
+        ＋ 新建会话
+      </button>
+    </div>
   </section>
 </template>
 
