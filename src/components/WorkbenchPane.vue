@@ -2,11 +2,13 @@
 /**
  * 工作台：两种状态。
  * 1) 多列并排：一屏多列，每列一个会话（完整指挥能力：发送 / 插话 / 停止 / 审批）。
- * 2) 两栏「新建会话」页：左＝目录选择 + 当前进行的会话，右＝选 Agent → 原地变聊天框。
+ * 2) 两栏「新建会话」页：左＝当前进行的会话 + 底部目录选择（可新增本机文件夹），右＝选 Agent → 原地变聊天框。
+ *    没选目录前右侧 Agent 锁住（工作目录要用户自己挑，不默认替用户选）。
  * 多列始终挂载（两栏页里也照旧收事件），这样左栏列出的会话状态是活的。
  * 布局持久化在 localStorage；列内会话概要按需拉取、收口后刷新。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
 import {
   clampColumnWidth,
@@ -14,7 +16,7 @@ import {
   serializeWorkbenchLayout,
   WORKBENCH_DEFAULT_WIDTH,
 } from '../workbench'
-import { engineChoices, newestProject } from '../sessionStart'
+import { engineChoices } from '../sessionStart'
 import { basename } from '../format'
 import type { EngineHealth, ProjectItem, SessionSummary } from '../types'
 import EngineChoicePanel from './EngineChoicePanel.vue'
@@ -44,6 +46,15 @@ interface WorkbenchColumn {
   status: { running: boolean; waiting: number }
 }
 
+/** 手动新增的目录：还没被引擎收录成项目，选中后照样能在里面建会话。 */
+interface ExtraDir {
+  id: string
+  label: string
+  worktree: string
+}
+
+const EXTRA_DIR_PREFIX = 'dir:'
+
 const STORAGE_KEY = 'prism-workbench-v1'
 
 const scroller = ref<HTMLElement | null>(null)
@@ -53,17 +64,28 @@ const flashId = ref<string | null>(null)
 const startOpen = ref(false)
 /** 右栏显示的会话；null＝选 Agent。 */
 const focusedId = ref<string | null>(null)
-const activeProjectId = ref<string | null>(null)
+/** 选中的工作目录：项目 id 或手动新增目录的 id；null＝还没选（右侧 Agent 锁住）。 */
+const selectedDirId = ref<string | null>(null)
+/** 手动新增、还没被引擎收录成项目的目录。 */
+const extraDirs = ref<ExtraDir[]>([])
 const creatingSession = ref(false)
 const choosingEngine = ref<string | null>(null)
 const sessionError = ref<string | null>(null)
 
-/** 没有显式选择时，默认用最近活跃的项目。 */
-const activeProject = computed(
-  () =>
-    props.projects.find(project => project.id === activeProjectId.value) ??
-    newestProject(props.projects),
-)
+/** 选中的目录（项目或手动新增的）；没选就是 null。 */
+const selectedDir = computed<ExtraDir | null>(() => {
+  const id = selectedDirId.value
+  if (!id) return null
+  const extra = extraDirs.value.find(item => item.id === id)
+  if (extra) return extra
+  const project = props.projects.find(item => item.id === id)
+  if (!project) return null
+  return {
+    id: project.id,
+    label: project.name || basename(project.worktree),
+    worktree: project.worktree,
+  }
+})
 
 /** 两栏「新建会话」页在前台吗；不在就画多列并排。 */
 const startPage = computed(() => startOpen.value || !columns.value.length)
@@ -82,13 +104,23 @@ const focusedColumn = computed(
 
 const choices = computed(() => engineChoices(props.health))
 
-const pickerHint = computed(() =>
-  creatingSession.value ? '正在创建空白会话…' : '创建后右栏直接就是聊天框，可以发第一条消息',
+const pickerHint = computed(() => {
+  if (!selectedDir.value) return '先在左边选一个工作目录，或用「＋ 新增」在本机挑一个文件夹'
+  if (creatingSession.value) return '正在创建空白会话…'
+  return '创建后右栏直接就是聊天框，可以发第一条消息'
+})
+
+const pickerDescription = computed(() =>
+  selectedDir.value
+    ? '工作目录已选好。挑一个 Agent，选完右栏原地变成聊天框。'
+    : '还没选工作目录。先在左边选一个，右边才会解锁。',
 )
 
-/** 多项目时左栏可切换工作目录。 */
-const projectOptions = computed(() => [
-  ...(activeProject.value ? [] : [{ value: '', label: '选择项目', disabled: true }]),
+/** 目录下拉：手动新增的排在前面；同路径的项目优先，避免出现两份。 */
+const dirOptions = computed(() => [
+  ...extraDirs.value
+    .filter(extra => !props.projects.some(item => samePath(item.worktree, extra.worktree)))
+    .map(extra => ({ value: extra.id, label: extra.label })),
   ...props.projects.map(item => ({
     value: item.id,
     label: item.name || basename(item.worktree),
@@ -96,11 +128,23 @@ const projectOptions = computed(() => [
 ])
 
 watch(
-  () => props.projects.map(project => project.id).join('\n'),
+  () => props.projects.map(project => `${project.id}\u0000${project.worktree}`).join('\n'),
   () => {
-    if (activeProjectId.value && !props.projects.some(item => item.id === activeProjectId.value)) {
-      activeProjectId.value = null
+    const id = selectedDirId.value
+    if (!id) return
+    if (id.startsWith(EXTRA_DIR_PREFIX)) {
+      // 新增的目录一旦被引擎收录成项目，就跟着切到项目 id：下拉里不会出现两份。
+      const extra = extraDirs.value.find(item => item.id === id)
+      const known = extra
+        ? props.projects.find(item => samePath(item.worktree, extra.worktree))
+        : undefined
+      if (known) {
+        extraDirs.value = extraDirs.value.filter(item => item.id !== id)
+        selectedDirId.value = known.id
+      }
+      return
     }
+    if (!props.projects.some(item => item.id === id)) selectedDirId.value = null
   },
 )
 
@@ -130,6 +174,17 @@ watch(
 
 function report(cause: unknown) {
   emit('error', cause instanceof Error ? cause.message : String(cause))
+}
+
+/** 目录比路径：忽略结尾的斜杠。 */
+function samePath(a: string, b: string): boolean {
+  return a.replace(/\/+$/, '') === b.replace(/\/+$/, '')
+}
+
+/** 路径提示：太长就只留尾部三段，前面用 … 代替。 */
+function shortPath(path: string): string {
+  const parts = path.replace(/\/+$/, '').split('/')
+  return parts.length <= 4 ? path : `…/${parts.slice(-3).join('/')}`
 }
 
 function sleep(ms: number) {
@@ -251,19 +306,48 @@ function focusSession(sessionId: string) {
   sessionError.value = null
 }
 
-function chooseProject(projectId: string) {
-  activeProjectId.value = projectId
+function chooseDir(dirId: string) {
+  selectedDirId.value = dirId || null
   sessionError.value = null
 }
 
+/** 新增目录：挑一个本机文件夹当工作目录（还没被引擎收录也能直接在里面建会话）。 */
+async function addDirectory() {
+  try {
+    const picked = await openDirectoryDialog({
+      directory: true,
+      multiple: false,
+      title: '选择工作目录',
+    })
+    if (typeof picked !== 'string' || !picked) return
+    const known = props.projects.find(item => samePath(item.worktree, picked))
+    if (known) {
+      selectedDirId.value = known.id
+      sessionError.value = null
+      return
+    }
+    const id = `${EXTRA_DIR_PREFIX}${picked}`
+    if (!extraDirs.value.some(item => item.id === id)) {
+      extraDirs.value = [
+        ...extraDirs.value,
+        { id, label: basename(picked) || picked, worktree: picked },
+      ]
+    }
+    selectedDirId.value = id
+    sessionError.value = null
+  } catch (cause) {
+    report(cause)
+  }
+}
+
 async function onEngineSelected(engine: string) {
-  const project = activeProject.value
-  if (!project || creatingSession.value) return
+  const dir = selectedDir.value
+  if (!dir || creatingSession.value) return
   creatingSession.value = true
   choosingEngine.value = engine
   sessionError.value = null
   try {
-    const created = await api.sessionCreate(project.worktree, engine)
+    const created = await api.sessionCreate(dir.worktree, engine)
     const summary = await fetchSummaryWithRetry(created.sessionId)
     addColumn(created.sessionId, summary ?? undefined)
     // 右栏原地变成新会话的聊天框，两栏布局保持不变。
@@ -422,25 +506,7 @@ defineExpose({ openColumn })
 
     <!-- 两栏「新建会话」页：左＝目录 + 当前进行的会话，右＝选 Agent → 聊天框。 -->
     <div v-if="startPage" class="wb-start">
-      <aside class="wb-start-left" aria-label="目录与当前进行的会话">
-        <div class="wb-start-field">
-          <span class="wb-start-label">目录</span>
-          <SelectMenu
-            v-if="projects.length > 1"
-            :model-value="activeProject?.id ?? ''"
-            :options="projectOptions"
-            size="sm"
-            inline
-            title="选择工作目录"
-            max-width="100%"
-            @update:model-value="chooseProject"
-          />
-          <span v-else-if="activeProject" class="wb-start-project" :title="activeProject.worktree">
-            <span class="wb-dot tone-idle" />
-            {{ activeProject.name || basename(activeProject.worktree) }}
-          </span>
-        </div>
-
+      <aside class="wb-start-left" aria-label="当前进行的会话与目录">
         <button
           class="wb-start-new"
           :class="{ on: !focusedId }"
@@ -477,14 +543,44 @@ defineExpose({ openColumn })
           </button>
         </div>
 
-        <button
-          v-if="columns.length"
-          class="wb-start-back"
-          title="回到多列并排视图"
-          @click="showColumns"
-        >
-          ⊞ 并排看
-        </button>
+        <div class="wb-start-foot">
+          <button
+            v-if="columns.length"
+            class="wb-start-back"
+            title="回到多列并排视图"
+            @click="showColumns"
+          >
+            ⊞ 并排看
+          </button>
+
+          <div class="wb-start-dir">
+            <div class="wb-start-dir-head">
+              <span class="wb-start-label">目录</span>
+              <button
+                class="wb-start-add"
+                title="新增目录：在本机挑一个文件夹"
+                @click="addDirectory"
+              >
+                ＋ 新增
+              </button>
+            </div>
+            <SelectMenu
+              :model-value="selectedDirId ?? ''"
+              :options="dirOptions"
+              placeholder="选择目录…"
+              size="sm"
+              title="选择工作目录"
+              @update:model-value="chooseDir"
+            />
+            <p
+              class="wb-start-path"
+              :class="{ empty: !selectedDir }"
+              :title="selectedDir?.worktree ?? '还没选目录'"
+            >
+              {{ selectedDir ? shortPath(selectedDir.worktree) : '还没选目录，右边 Agent 会锁住' }}
+            </p>
+          </div>
+        </div>
       </aside>
 
       <div class="wb-start-right">
@@ -505,6 +601,8 @@ defineExpose({ openColumn })
           v-else
           :choices="choices"
           :selecting="choosingEngine"
+          :locked="!selectedDir"
+          :description="pickerDescription"
           :hint="pickerHint"
           :error="sessionError"
           @select="onEngineSelected"

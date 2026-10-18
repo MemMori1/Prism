@@ -40,36 +40,61 @@
   background: var(--panel);
 }
 
-.wb-start-field {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex: none;
-  min-width: 0;
-  padding: 0 2px;
-}
-
 .wb-start-label {
   flex: none;
   font-size: 10.5px;
   color: var(--faint);
 }
 
-.wb-start-project {
-  display: inline-flex;
-  align-items: center;
+/* 左栏底部：回多列 + 目录（选了目录右侧 Agent 才解锁）。 */
+.wb-start-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wb-start-dir {
+  display: flex;
+  flex-direction: column;
   gap: 6px;
-  min-width: 0;
-  height: 26px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel-2);
-  color: var(--muted);
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+
+.wb-start-dir-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.wb-start-add {
+  flex: none;
+  padding: 2px 5px;
+  border-radius: 5px;
+  color: var(--accent-text);
   font-size: 11px;
+  font-weight: 600;
+}
+
+.wb-start-add:hover {
+  background: var(--accent-soft);
+}
+
+.wb-start-path {
+  margin: 0;
+  min-height: 14px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.wb-start-path.empty {
+  color: var(--faint);
 }
 
 .wb-start-new {

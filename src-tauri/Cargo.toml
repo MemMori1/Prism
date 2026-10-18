@@ -31,4 +31,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# 工作台「新增目录」挑本机文件夹。
+tauri-plugin-dialog = "2"
 chrono = "0.4.45"
