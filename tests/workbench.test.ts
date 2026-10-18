@@ -3,6 +3,7 @@ import {
   clampColumnWidth,
   parseWorkbenchLayout,
   serializeWorkbenchLayout,
+  workbenchShowsStartPage,
   WORKBENCH_DEFAULT_WIDTH,
   WORKBENCH_MAX_WIDTH,
   WORKBENCH_MIN_WIDTH,
@@ -61,5 +62,22 @@ describe('serializeWorkbenchLayout', () => {
       { sessionId: 'a', width: 500 },
       { sessionId: 'b', width: WORKBENCH_MIN_WIDTH },
     ])
+  })
+})
+
+describe('workbenchShowsStartPage（进工作台默认落在两栏「新建会话」页）', () => {
+  it('有列时也是两栏页在前台——localStorage 存着列也不落到多列画布', () => {
+    expect(workbenchShowsStartPage(true, 1)).toBe(true)
+    expect(workbenchShowsStartPage(true, 4)).toBe(true)
+  })
+
+  it('点「⊞ 并排看」后才看多列画布', () => {
+    expect(workbenchShowsStartPage(false, 1)).toBe(false)
+    expect(workbenchShowsStartPage(false, 4)).toBe(false)
+  })
+
+  it('一列都没有时永远是两栏页（没有列可看）', () => {
+    expect(workbenchShowsStartPage(false, 0)).toBe(true)
+    expect(workbenchShowsStartPage(true, 0)).toBe(true)
   })
 })

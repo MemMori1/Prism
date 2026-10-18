@@ -4,6 +4,7 @@
  * 1) 多列并排：一屏多列，每列一个会话（完整指挥能力：发送 / 插话 / 停止 / 审批）。
  * 2) 两栏「新建会话」页：左＝当前进行的会话 + 底部目录选择（可新增本机文件夹），右＝选 Agent → 原地变聊天框。
  *    没选目录前右侧 Agent 锁住（工作目录要用户自己挑，不默认替用户选）。
+ * 点进工作台（侧栏 / 恢复上次视图）默认落在 2)；1) 只在点「⊞ 并排看」或从归档「⇥ 工作台」开列时出现。
  * 多列始终挂载（两栏页里也照旧收事件），这样左栏列出的会话状态是活的。
  * 布局持久化在 localStorage；列内会话概要按需拉取、收口后刷新。
  */
@@ -14,6 +15,7 @@ import {
   clampColumnWidth,
   parseWorkbenchLayout,
   serializeWorkbenchLayout,
+  workbenchShowsStartPage,
   WORKBENCH_DEFAULT_WIDTH,
 } from '../workbench'
 import { engineChoices } from '../sessionStart'
@@ -60,8 +62,12 @@ const STORAGE_KEY = 'prism-workbench-v1'
 const scroller = ref<HTMLElement | null>(null)
 const columns = ref<WorkbenchColumn[]>([])
 const flashId = ref<string | null>(null)
-/** 两栏「新建会话」页是否在前台（点＋才切过去；没开列时无论如何都在前台）。 */
-const startOpen = ref(false)
+/**
+ * 两栏「新建会话」页是否在前台。
+ * 默认 true：点进工作台先看到的就是它（哪怕 localStorage 里存着列）。
+ * 只有点「⊞ 并排看」或从归档「⇥ 工作台」开列时才落到多列画布。
+ */
+const startOpen = ref(true)
 /** 右栏显示的会话；null＝选 Agent。 */
 const focusedId = ref<string | null>(null)
 /** 选中的工作目录：项目 id 或手动新增目录的 id；null＝还没选（右侧 Agent 锁住）。 */
@@ -88,7 +94,7 @@ const selectedDir = computed<ExtraDir | null>(() => {
 })
 
 /** 两栏「新建会话」页在前台吗；不在就画多列并排。 */
-const startPage = computed(() => startOpen.value || !columns.value.length)
+const startPage = computed(() => workbenchShowsStartPage(startOpen.value, columns.value.length))
 
 /** 多列里画哪些列：两栏页聚焦的那一条由右栏画，同一个会话不会出现两个 SessionView。 */
 const canvasColumns = computed(() =>
@@ -458,7 +464,7 @@ onBeforeUnmount(() => {
   stopResize()
 })
 
-defineExpose({ openColumn })
+defineExpose({ openColumn, showStartPage })
 </script>
 
 <template>

@@ -11,6 +11,15 @@ export const WORKBENCH_MIN_WIDTH = 360
 export const WORKBENCH_MAX_WIDTH = 900
 export const WORKBENCH_DEFAULT_WIDTH = 480
 
+/**
+ * 工作台的落地页：进工作台（侧栏点进来、或恢复上次就停在工作台）默认是两栏「新建会话」页。
+ * 只有在页面里显式点了「⊞ 并排看」，或从归档点「⇥ 工作台」开列时，才看多列画布。
+ * 一列都没有时无论如何都是两栏页（没有列可看）。
+ */
+export function workbenchShowsStartPage(startOpen: boolean, columnCount: number): boolean {
+  return startOpen || columnCount === 0
+}
+
 /** 列宽夹到可用区间；非法数字回落到默认宽。 */
 export function clampColumnWidth(width: number): number {
   if (!Number.isFinite(width)) return WORKBENCH_DEFAULT_WIDTH

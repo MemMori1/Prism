@@ -79,6 +79,11 @@ async function openSearchHit(hit: SearchHit): Promise<void> {
 }
 
 function setView(next: AppView) {
+  // 点工作台（侧栏、设置里的快捷入口）一律先落在两栏「新建会话」页。
+  // 「⇥ 工作台」这类明确要开列的，在 setView 之后再切到多列画布。
+  if (next === 'workbench') {
+    workbenchRef.value?.showStartPage(null)
+  }
   view.value = next
   try {
     localStorage.setItem(VIEW_KEY, next)
@@ -179,11 +184,12 @@ async function openSessionByLocation(payload: {
   selectSession(payload.sessionId)
 }
 
-/** 从归档「⇥ 工作台」按钮打开：开出对应列并切到工作台。 */
+/** 从归档「⇥ 工作台」按钮打开：开出对应列并切到工作台（落到多列画布）。 */
 function openInWorkbench(sessionId: string) {
   const summary = sessions.value.find(item => item.id === sessionId) ?? null
-  workbenchRef.value?.openColumn(sessionId, summary ?? undefined)
+  // 先切视图（进工作台默认落在两栏页），再开列并落到多列画布。
   setView('workbench')
+  workbenchRef.value?.openColumn(sessionId, summary ?? undefined)
 }
 
 const projects = ref<ProjectItem[]>([])
