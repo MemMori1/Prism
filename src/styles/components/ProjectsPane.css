@@ -48,6 +48,28 @@
   align-items: center;
 }
 
+/* 类型下拉 + 关键词筛选同排：下拉贴最左，输入框吃掉剩余宽度 */
+.pane-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pane-filters .pane-filter {
+  flex: 1;
+  min-width: 0;
+}
+
+.type-filter {
+  flex: none;
+  max-width: 104px;
+}
+
+/* 与 28px 的筛选框对齐；sm 默认 26px */
+.type-filter :deep(.sel-trigger) {
+  height: 28px;
+}
+
 .filter-icon {
   position: absolute;
   left: 8px;
@@ -287,6 +309,11 @@
 .engine-badge.engine-claude {
   color: var(--green);
   border-color: color-mix(in srgb, var(--green) 35%, var(--border));
+}
+
+.engine-badge.engine-native {
+  color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
 }
 
 .project-item.active .project-name {

@@ -28,6 +28,8 @@
   padding: 14px 22px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+  /* 让下面的元信息行能按自身宽度取舍（三栏可拖拽，主栏会变窄） */
+  container-type: inline-size;
 }
 
 .session-heading {
@@ -223,9 +225,10 @@
 
 .meta-dir {
   font-family: var(--font-mono);
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 40%;
 }
 
 .meta-chip {
@@ -241,6 +244,29 @@
 .meta-time {
   margin-left: auto;
   flex: none;
+}
+
+/* 模型名可能很长：在 chip 内省略，别把后面几项顶出边界 */
+.meta-model {
+  display: block;
+  min-width: 0;
+  max-width: 232px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 主栏被拖窄时按重要性依次收：先藏时间，再藏成本；路径和 token 始终保留 */
+@container (max-width: 640px) {
+  .meta-time {
+    display: none;
+  }
+}
+
+@container (max-width: 540px) {
+  .meta-cost {
+    display: none;
+  }
 }
 
 .timeline-area {
@@ -672,6 +698,42 @@
   gap: 6px;
   flex: 0 1 auto;
   min-width: 0;
+}
+
+/* 分支 chip 从会话头挪进输入框：头部变窄时不再和模型挤在一起。
+   做成无边框的轻量样式，悬停才描边，和左侧 + / @ 两个按钮同一档存在感。 */
+.composer-branch {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 148px;
+  margin-left: -2px;
+}
+
+.composer-branch :deep(.branch-chip) {
+  max-width: 100%;
+  height: 22px;
+  padding: 0 7px;
+  border-color: transparent;
+  background: transparent;
+  font-size: 10.5px;
+}
+
+.composer-branch :deep(.branch-chip:hover:not(:disabled)) {
+  border-color: var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.composer-branch :deep(.branch-chip.on) {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* 只读会话没有输入框，分支切换挂在提示条右端 */
+.readonly-branch {
+  flex: none;
+  margin-left: auto;
 }
 
 .composer-right .sel {

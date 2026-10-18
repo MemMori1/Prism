@@ -4,6 +4,9 @@ import type { ProjectItem } from '../types'
 import { basename } from '../format'
 import { ensureGitInfo, gitInfoOf } from '../gitInfo'
 import { pinnedSet, togglePinned } from '../projectPins'
+import { ALL_ENGINES, engineBadge, filterByEngine, projectEngineOptions } from '../projectFilter'
+import { engineLabel } from '../workshop'
+import SelectMenu from './SelectMenu.vue'
 
 const props = defineProps<{
   projects: ProjectItem[]
@@ -32,20 +35,42 @@ function isWorktree(project: ProjectItem): boolean {
   return gitInfoOf(project.worktree)?.isWorktree ?? false
 }
 
-const ENGINE_LABELS: Record<string, string> = {
-  opencode: 'OC',
-  codex: 'CX',
-  claude: 'CC',
-}
-
-function engineLabel(engine: string): string {
-  return ENGINE_LABELS[engine] ?? engine.slice(0, 2).toUpperCase()
-}
-
 /* ---------- 筛选 ---------- */
+
+const STORAGE_KEY = 'prism-project-engine'
+
+function storedEngine(): string {
+  try {
+    return localStorage.getItem(STORAGE_KEY) || ALL_ENGINES
+  } catch {
+    return ALL_ENGINES
+  }
+}
+
+/** 项目类型（引擎）筛选；「全部类型」时不过滤。 */
+const engineFilter = ref(storedEngine())
+
+const engineOptions = computed(() => projectEngineOptions(props.projects))
+
+// 记录的类型在今天不存在了（项目被删 / 引擎没接），退回全部，别留一个空列表。
+// 列表还没加载出来时不判定，否则刷新瞬间会把用户选的类型清掉。
+watch(engineOptions, options => {
+  if (options.length <= 1) return
+  if (!options.some(option => option.value === engineFilter.value)) engineFilter.value = ALL_ENGINES
+})
+
+watch(engineFilter, value => {
+  try {
+    localStorage.setItem(STORAGE_KEY, value)
+  } catch {
+    // 隐私模式下写不进去，忽略即可。
+  }
+})
 
 const filterText = ref('')
 const term = computed(() => filterText.value.trim().toLowerCase())
+
+const filtering = computed(() => !!term.value || engineFilter.value !== ALL_ENGINES)
 
 function matchProject(project: ProjectItem): boolean {
   const needle = term.value
@@ -59,7 +84,7 @@ function matchProject(project: ProjectItem): boolean {
   )
 }
 
-const matches = computed(() => props.projects.filter(matchProject))
+const matches = computed(() => filterByEngine(props.projects, engineFilter.value).filter(matchProject))
 
 /* ---------- 行装配：置顶段 + 同仓分组 ---------- */
 
@@ -138,7 +163,17 @@ const rows = computed<Row[]>(() => {
 })
 
 const countLabel = computed(() =>
-  term.value ? `${matches.value.length}/${props.projects.length}` : `${props.projects.length}`,
+  filtering.value ? `${matches.value.length}/${props.projects.length}` : `${props.projects.length}`,
+)
+
+/** 筛空了的话，说清是被哪个条件筛掉的。 */
+const emptyTitle = computed(() => {
+  if (term.value) return `没有匹配「${filterText.value.trim()}」的项目`
+  return `没有 ${engineLabel(engineFilter.value)} 类型的项目`
+})
+
+const emptyHint = computed(() =>
+  term.value ? '试试项目名、路径、分支或引擎' : '换个类型，或先用这个引擎跑一次会话',
 )
 
 function select(project: ProjectItem): void {
@@ -235,34 +270,44 @@ onBeforeUnmount(() => {
         <span v-if="projects.length" class="pane-count">{{ countLabel }}</span>
       </div>
 
-      <label class="pane-filter">
-        <svg class="filter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-          <circle cx="10.8" cy="10.8" r="6.8" />
-          <path d="m20 20-4.4-4.4" />
-        </svg>
-        <input
-          v-model="filterText"
-          class="filter-input"
-          type="text"
-          placeholder="筛选项目 / 路径 / 分支"
-          spellcheck="false"
-          autocomplete="off"
-          aria-label="筛选项目"
-          @keydown.esc="filterText = ''"
+      <div class="pane-filters">
+        <SelectMenu
+          v-model="engineFilter"
+          class="type-filter"
+          :options="engineOptions"
+          size="sm"
+          inline
+          title="项目类型"
         />
-        <button v-if="filterText" class="filter-clear" title="清空筛选" @click="filterText = ''">✕</button>
-      </label>
+        <label class="pane-filter">
+          <svg class="filter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <circle cx="10.8" cy="10.8" r="6.8" />
+            <path d="m20 20-4.4-4.4" />
+          </svg>
+          <input
+            v-model="filterText"
+            class="filter-input"
+            type="text"
+            placeholder="筛选项目"
+            spellcheck="false"
+            autocomplete="off"
+            aria-label="筛选项目"
+            @keydown.esc="filterText = ''"
+          />
+          <button v-if="filterText" class="filter-clear" title="清空筛选" @click="filterText = ''">✕</button>
+        </label>
+      </div>
     </div>
 
     <div class="pane-body">
       <div v-if="loading && !projects.length" class="pane-empty">加载中…</div>
       <div v-else-if="!projects.length" class="pane-empty">
         未发现任何项目<br />
-        <span class="hint">用 OpenCode、Codex 或 Claude Code 跑过会话后会自动出现</span>
+        <span class="hint">用 OpenCode、Codex、Claude Code 或 Prism 原生跑过会话后会自动出现</span>
       </div>
       <div v-else-if="!rows.length" class="pane-empty">
-        没有匹配「{{ filterText.trim() }}」的项目<br />
-        <span class="hint">试试项目名、路径、分支或引擎</span>
+        {{ emptyTitle }}<br />
+        <span class="hint">{{ emptyHint }}</span>
       </div>
 
       <template v-for="row in rows" :key="row.key">
@@ -330,7 +375,7 @@ onBeforeUnmount(() => {
           </span>
 
           <span class="engine-badge" :class="`engine-${row.project.engine}`">
-            {{ engineLabel(row.project.engine) }}
+            {{ engineBadge(row.project.engine) }}
           </span>
           <span class="project-count">{{ row.project.sessionCount }}</span>
 

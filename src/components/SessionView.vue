@@ -1363,13 +1363,12 @@ watch(
         </div>
         <div class="session-meta">
           <span class="meta-dir" :title="session.directory">{{ session.directory }}</span>
-          <BranchPicker :directory="session.directory" @changed="onBranchChanged" />
-          <span v-if="session.model" class="meta-chip">{{ session.model }}</span>
-          <span class="meta-chip">
+          <span v-if="session.model" class="meta-chip meta-model">{{ session.model }}</span>
+          <span class="meta-chip meta-tokens">
             ↓{{ formatTokens(session.tokensInput + session.tokensReasoning) }}
             ↑{{ formatTokens(session.tokensOutput) }}
           </span>
-          <span v-if="session.cost" class="meta-chip">{{ formatCost(session.cost) }}</span>
+          <span v-if="session.cost" class="meta-chip meta-cost">{{ formatCost(session.cost) }}</span>
           <span class="meta-time">{{ fullTime(session.timeCreated) }}</span>
         </div>
       </header>
@@ -1436,6 +1435,11 @@ watch(
             该引擎暂为只读浏览（运行轴尚在开发）——发消息请到对应应用；
             回到 Prism 点「刷新」即可看到新内容。
           </span>
+          <BranchPicker
+            class="readonly-branch"
+            :directory="session.directory"
+            @changed="onBranchChanged"
+          />
         </div>
         <template v-else>
           <div v-if="pendingPermissions.length" class="permission-stack">
@@ -1577,6 +1581,12 @@ watch(
                 <span v-if="attachments.length && composerMenu !== 'file'" class="rail-dot" />
               </button>
             </div>
+
+            <BranchPicker
+              class="composer-branch"
+              :directory="session.directory"
+              @changed="onBranchChanged"
+            />
 
             <span class="composer-hint" role="status">{{ composerHint }}</span>
 
