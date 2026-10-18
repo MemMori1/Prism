@@ -1,6 +1,9 @@
 <script setup lang="ts">
 /**
- * 工作台：一屏多列，每列一个会话（完整指挥能力：发送 / 插话 / 停止 / 审批）。
+ * 工作台：两种状态。
+ * 1) 多列并排：一屏多列，每列一个会话（完整指挥能力：发送 / 插话 / 停止 / 审批）。
+ * 2) 两栏「新建会话」页：左＝目录选择 + 当前进行的会话，右＝选 Agent → 原地变聊天框。
+ * 多列始终挂载（两栏页里也照旧收事件），这样左栏列出的会话状态是活的。
  * 布局持久化在 localStorage；列内会话概要按需拉取、收口后刷新。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -11,9 +14,11 @@ import {
   serializeWorkbenchLayout,
   WORKBENCH_DEFAULT_WIDTH,
 } from '../workbench'
+import { engineChoices, newestProject } from '../sessionStart'
+import { basename } from '../format'
 import type { EngineHealth, ProjectItem, SessionSummary } from '../types'
-import { newestProject } from '../sessionStart'
-import NewSessionPanel from './NewSessionPanel.vue'
+import EngineChoicePanel from './EngineChoicePanel.vue'
+import SelectMenu from './SelectMenu.vue'
 import SessionView from './SessionView.vue'
 
 const props = defineProps<{
@@ -44,9 +49,13 @@ const STORAGE_KEY = 'prism-workbench-v1'
 const scroller = ref<HTMLElement | null>(null)
 const columns = ref<WorkbenchColumn[]>([])
 const flashId = ref<string | null>(null)
-const pickerOpen = ref(false)
+/** 两栏「新建会话」页是否在前台（点＋才切过去；没开列时无论如何都在前台）。 */
+const startOpen = ref(false)
+/** 右栏显示的会话；null＝选 Agent。 */
+const focusedId = ref<string | null>(null)
 const activeProjectId = ref<string | null>(null)
 const creatingSession = ref(false)
+const choosingEngine = ref<string | null>(null)
 const sessionError = ref<string | null>(null)
 
 /** 没有显式选择时，默认用最近活跃的项目。 */
@@ -55,6 +64,36 @@ const activeProject = computed(
     props.projects.find(project => project.id === activeProjectId.value) ??
     newestProject(props.projects),
 )
+
+/** 两栏「新建会话」页在前台吗；不在就画多列并排。 */
+const startPage = computed(() => startOpen.value || !columns.value.length)
+
+/** 多列里画哪些列：两栏页聚焦的那一条由右栏画，同一个会话不会出现两个 SessionView。 */
+const canvasColumns = computed(() =>
+  startPage.value
+    ? columns.value.filter(column => column.sessionId !== focusedId.value)
+    : columns.value,
+)
+
+/** 右栏那一条；null 表示右栏显示选 Agent。 */
+const focusedColumn = computed(
+  () => columns.value.find(column => column.sessionId === focusedId.value) ?? null,
+)
+
+const choices = computed(() => engineChoices(props.health))
+
+const pickerHint = computed(() =>
+  creatingSession.value ? '正在创建空白会话…' : '创建后右栏直接就是聊天框，可以发第一条消息',
+)
+
+/** 多项目时左栏可切换工作目录。 */
+const projectOptions = computed(() => [
+  ...(activeProject.value ? [] : [{ value: '', label: '选择项目', disabled: true }]),
+  ...props.projects.map(item => ({
+    value: item.id,
+    label: item.name || basename(item.worktree),
+  })),
+])
 
 watch(
   () => props.projects.map(project => project.id).join('\n'),
@@ -140,13 +179,13 @@ async function fetchSummaryWithRetry(sessionId: string): Promise<SessionSummary 
   return null
 }
 
-// ---- 打开 / 关闭列 ----
+// ---- 列的开合 ----
 
-function openColumn(sessionId: string, session?: SessionSummary) {
+/** 加一列（已存在则只刷新概要），不改变当前看到的是哪一屏。 */
+function addColumn(sessionId: string, session?: SessionSummary) {
   const existing = columns.value.find(column => column.sessionId === sessionId)
   if (existing) {
     if (session) existing.session = session
-    focusColumn(sessionId)
     return
   }
   columns.value.push({
@@ -156,7 +195,6 @@ function openColumn(sessionId: string, session?: SessionSummary) {
     status: { running: false, waiting: 0 },
   })
   saveLayout()
-  focusColumn(sessionId)
   if (!session) {
     void fetchSummary(sessionId).then(summary => {
       const column = columns.value.find(item => item.sessionId === sessionId)
@@ -167,6 +205,7 @@ function openColumn(sessionId: string, session?: SessionSummary) {
 
 function closeColumn(sessionId: string) {
   columns.value = columns.value.filter(column => column.sessionId !== sessionId)
+  if (focusedId.value === sessionId) focusedId.value = null
   saveLayout()
 }
 
@@ -182,7 +221,35 @@ function focusColumn(sessionId: string) {
   })
 }
 
-// ---- 新建会话：先选 Agent，再建空白会话 ----
+/** 归档「⇥ 工作台」调用：开一列并直接看多列并排。 */
+function openColumn(sessionId: string, session?: SessionSummary) {
+  addColumn(sessionId, session)
+  startOpen.value = false
+  focusedId.value = null
+  focusColumn(sessionId)
+}
+
+// ---- 两栏「新建会话」页 ----
+
+/** 切到两栏页；focus 为 null 时右栏是选 Agent。 */
+function showStartPage(focus: string | null) {
+  startOpen.value = true
+  focusedId.value = focus
+  sessionError.value = null
+}
+
+/** 回到多列并排。 */
+function showColumns() {
+  startOpen.value = false
+  focusedId.value = null
+  sessionError.value = null
+}
+
+/** 左栏点一条会话：右栏换成它的聊天框。 */
+function focusSession(sessionId: string) {
+  focusedId.value = sessionId
+  sessionError.value = null
+}
 
 function chooseProject(projectId: string) {
   activeProjectId.value = projectId
@@ -193,18 +260,20 @@ async function onEngineSelected(engine: string) {
   const project = activeProject.value
   if (!project || creatingSession.value) return
   creatingSession.value = true
+  choosingEngine.value = engine
   sessionError.value = null
   try {
     const created = await api.sessionCreate(project.worktree, engine)
     const summary = await fetchSummaryWithRetry(created.sessionId)
-    if (summary) openColumn(created.sessionId, summary)
-    else openColumn(created.sessionId)
-    pickerOpen.value = false
+    addColumn(created.sessionId, summary ?? undefined)
+    // 右栏原地变成新会话的聊天框，两栏布局保持不变。
+    focusedId.value = created.sessionId
     emit('settled')
   } catch (cause) {
     sessionError.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     creatingSession.value = false
+    choosingEngine.value = null
   }
 }
 
@@ -265,6 +334,17 @@ function dotTitle(column: WorkbenchColumn) {
   return '空闲'
 }
 
+/** 左栏列表里的状态文案。 */
+function statusText(column: WorkbenchColumn) {
+  if (column.status.waiting > 0) return `等审批 ${column.status.waiting}`
+  if (column.status.running) return '执行中'
+  return '空闲'
+}
+
+function columnTitle(column: WorkbenchColumn) {
+  return column.session?.title || '未命名会话'
+}
+
 // ---- 恢复布局 ----
 
 onMounted(() => {
@@ -299,9 +379,10 @@ defineExpose({ openColumn })
 
 <template>
   <section class="workbench">
-    <div v-if="columns.length && !pickerOpen" ref="scroller" class="wb-scroll">
+    <!-- 多列并排：一直挂载，两栏页里也继续收引擎事件，左栏的状态才是活的。 -->
+    <div v-show="!startPage" ref="scroller" class="wb-scroll">
       <div
-        v-for="column in columns"
+        v-for="column in canvasColumns"
         :key="column.sessionId"
         class="wb-column"
         :class="{ flash: flashId === column.sessionId }"
@@ -310,9 +391,7 @@ defineExpose({ openColumn })
       >
         <header class="wb-head">
           <span class="wb-dot" :class="dotClass(column)" :title="dotTitle(column)" />
-          <span class="wb-title" :title="column.session?.title || '未命名会话'">
-            {{ column.session?.title || '未命名会话' }}
-          </span>
+          <span class="wb-title" :title="columnTitle(column)">{{ columnTitle(column) }}</span>
           <span
             v-if="column.status.waiting"
             class="wb-waiting"
@@ -341,25 +420,103 @@ defineExpose({ openColumn })
       </div>
     </div>
 
-    <div v-else class="wb-picker">
-      <NewSessionPanel
-        :project="activeProject"
-        :projects="projects"
-        :engines="health"
-        :busy="creatingSession"
-        :error="sessionError"
-        :cancelable="columns.length > 0"
-        @select="onEngineSelected"
-        @project="chooseProject"
-        @cancel="pickerOpen = false"
-      />
+    <!-- 两栏「新建会话」页：左＝目录 + 当前进行的会话，右＝选 Agent → 聊天框。 -->
+    <div v-if="startPage" class="wb-start">
+      <aside class="wb-start-left" aria-label="目录与当前进行的会话">
+        <div class="wb-start-field">
+          <span class="wb-start-label">目录</span>
+          <SelectMenu
+            v-if="projects.length > 1"
+            :model-value="activeProject?.id ?? ''"
+            :options="projectOptions"
+            size="sm"
+            inline
+            title="选择工作目录"
+            max-width="100%"
+            @update:model-value="chooseProject"
+          />
+          <span v-else-if="activeProject" class="wb-start-project" :title="activeProject.worktree">
+            <span class="wb-dot tone-idle" />
+            {{ activeProject.name || basename(activeProject.worktree) }}
+          </span>
+        </div>
+
+        <button
+          class="wb-start-new"
+          :class="{ on: !focusedId }"
+          title="选一个 Agent 新建会话"
+          @click="showStartPage(null)"
+        >
+          ＋ 新建会话
+        </button>
+
+        <div class="wb-start-head">
+          <span>当前进行的会话</span>
+          <span v-if="columns.length" class="wb-start-count">{{ columns.length }}</span>
+        </div>
+
+        <div class="wb-start-list">
+          <p v-if="!columns.length" class="wb-start-empty">
+            还没有打开的会话——选一个 Agent 建一个，或在归档里点「工作台」
+          </p>
+          <button
+            v-for="column in columns"
+            :key="column.sessionId"
+            class="wb-start-item"
+            :class="{ active: column.sessionId === focusedId }"
+            :title="columnTitle(column)"
+            @click="focusSession(column.sessionId)"
+          >
+            <span class="wb-dot" :class="dotClass(column)" :title="dotTitle(column)" />
+            <span class="wb-start-item-main">
+              <span class="wb-start-item-title">{{ columnTitle(column) }}</span>
+              <span class="wb-start-item-sub" :class="dotClass(column)">
+                {{ statusText(column) }}
+              </span>
+            </span>
+          </button>
+        </div>
+
+        <button
+          v-if="columns.length"
+          class="wb-start-back"
+          title="回到多列并排视图"
+          @click="showColumns"
+        >
+          ⊞ 并排看
+        </button>
+      </aside>
+
+      <div class="wb-start-right">
+        <template v-if="focusedColumn">
+          <SessionView
+            v-if="focusedColumn.session"
+            embedded
+            :session="focusedColumn.session"
+            :has-project="true"
+            @error="report"
+            @settled="onColumnSettled(focusedColumn.sessionId)"
+            @status="onColumnStatus(focusedColumn.sessionId, $event)"
+          />
+          <div v-else class="wb-missing">会话加载中或已不存在</div>
+        </template>
+
+        <EngineChoicePanel
+          v-else
+          :choices="choices"
+          :selecting="choosingEngine"
+          :hint="pickerHint"
+          :error="sessionError"
+          @select="onEngineSelected"
+        />
+      </div>
     </div>
 
     <button
-      v-if="columns.length && !pickerOpen"
+      v-if="!startPage"
       class="wb-add"
       title="新建会话并开一列"
-      @click="pickerOpen = true"
+      @click="showStartPage(null)"
     >
       ＋ 新建会话
     </button>
