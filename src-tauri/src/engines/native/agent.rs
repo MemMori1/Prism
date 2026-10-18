@@ -488,7 +488,9 @@ fn run_turns(
                 }),
             );
 
-            let result = tools::execute(directory, &call.name, &call.arguments);
+            let result = tools::execute_with_stop(directory, &call.name, &call.arguments, &|| {
+                slot.stopped()
+            });
             emit(
                 app,
                 "session.tool.success",

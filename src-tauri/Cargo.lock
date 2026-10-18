@@ -2884,6 +2884,7 @@ version = "0.2.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "libc",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

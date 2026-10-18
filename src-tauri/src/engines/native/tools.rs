@@ -4,7 +4,9 @@
 //! 所有路径先做词法归一 + 前缀校验，禁止越出会话工作目录；命令有超时和输出上限。
 
 use serde_json::{json, Value};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// 单次工具输出的字符上限（超出截断，避免一轮就把上下文撑爆）。
@@ -17,6 +19,11 @@ const LIST_ENTRIES: usize = 300;
 const GREP_HITS: usize = 120;
 /// 搜索时跳过的大文件（字节）。
 const GREP_MAX_BYTES: u64 = 1_500_000;
+/// 跑命令时的轮询间隔：停止和超时都按这个粒度看。
+const RUN_POLL: Duration = Duration::from_millis(40);
+/// 单路管道最多留多少字节：读的人不能停手，但也不必无限往内存里攒
+/// （展示时本来就要截断，这里只要留得比 MAX_OUTPUT_CHARS 富余即可）。
+const PIPE_KEEP_BYTES: usize = 512 * 1024;
 /// 遍历时永远跳过的目录。
 const SKIP_DIRS: &[&str] = &[
     ".git", "node_modules", "target", "dist", "build", ".next", ".nuxt", ".venv", "__pycache__",
@@ -148,6 +155,17 @@ pub fn specs() -> Vec<Value> {
 
 /// 执行一次工具调用。`arguments` 是模型给的 JSON 字符串。
 pub fn execute(directory: &str, name: &str, arguments: &str) -> ToolOutcome {
+    execute_with_stop(directory, name, arguments, &|| false)
+}
+
+/// 同上，但带一个「该停手了吗」的探针：跑命令时每轮都问一次，
+/// 命中就连同命令拉起的子进程一起收掉（停止按钮不该等命令自己跑完）。
+pub fn execute_with_stop(
+    directory: &str,
+    name: &str,
+    arguments: &str,
+    should_stop: &dyn Fn() -> bool,
+) -> ToolOutcome {
     let args: Value = if arguments.trim().is_empty() {
         json!({})
     } else {
@@ -163,7 +181,7 @@ pub fn execute(directory: &str, name: &str, arguments: &str) -> ToolOutcome {
         "grep" => grep(root, &args),
         "write_file" => write_file(root, &args),
         "edit_file" => edit_file(root, &args),
-        "run_command" => run_command(root, &args),
+        "run_command" => run_command(root, &args, should_stop),
         other => ToolOutcome::fail(format!("没有这个工具：{other}")),
     }
 }
@@ -405,7 +423,7 @@ fn edit_file(root: &Path, args: &Value) -> ToolOutcome {
     }
 }
 
-fn run_command(root: &Path, args: &Value) -> ToolOutcome {
+fn run_command(root: &Path, args: &Value, should_stop: &dyn Fn() -> bool) -> ToolOutcome {
     let Some(command) = str_arg(args, "command") else {
         return ToolOutcome::fail("缺少 command");
     };
@@ -415,49 +433,76 @@ fn run_command(root: &Path, args: &Value) -> ToolOutcome {
             .clamp(1_000, 600_000),
     );
     let mut process = if cfg!(windows) {
-        let mut cmd = std::process::Command::new("cmd");
+        let mut cmd = Command::new("cmd");
         cmd.arg("/C").arg(command);
         cmd
     } else {
-        let mut cmd = std::process::Command::new("sh");
+        let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
         cmd
     };
     process
         .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // 子进程自己领一个进程组：`sh -c` 拉起的孙子进程（cargo / rustc / npm …）
+    // 只杀 sh 是带不走的，成组才能一起收掉。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
     let mut child = match process.spawn() {
         Ok(child) => child,
         Err(error) => return ToolOutcome::fail(format!("启动命令失败：{error}")),
     };
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if started.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return ToolOutcome::fail(format!(
-                        "命令超时（{} ms）已终止：{command}",
-                        timeout.as_millis()
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(40));
-            }
-            Err(error) => return ToolOutcome::fail(format!("等待命令失败：{error}")),
-        }
+    // 两路管道都要有人同时读：写满一管（macOS 64KB）之后子进程会永远卡在 write 上，
+    // 于是「命令话多」被误判成「命令超时」——cargo build 就是常客。
+    let stdout_reader = child.stdout.take().map(spawn_pipe_reader);
+    let stderr_reader = child.stderr.take().map(spawn_pipe_reader);
+
+    enum Ending {
+        Done,
+        Stopped,
+        TimedOut,
     }
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(error) => return ToolOutcome::fail(format!("读取命令输出失败：{error}")),
+    let started = Instant::now();
+    let ending = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break Ending::Done,
+            Ok(None) => {}
+            Err(error) => {
+                kill_tree(&mut child);
+                return ToolOutcome::fail(format!("等待命令失败：{error}"));
+            }
+        }
+        if should_stop() {
+            kill_tree(&mut child);
+            break Ending::Stopped;
+        }
+        if started.elapsed() > timeout {
+            kill_tree(&mut child);
+            break Ending::TimedOut;
+        }
+        std::thread::sleep(RUN_POLL);
     };
-    let code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut text = format!("exit={code}\n");
+    // 杀过也要 wait：收掉僵尸，也让两个读线程读干净后退出。
+    let status = child.wait().ok();
+    let stdout = stdout_reader.map(join_pipe_reader).unwrap_or_default();
+    let stderr = stderr_reader.map(join_pipe_reader).unwrap_or_default();
+
+    let code = status.and_then(|value| value.code()).unwrap_or(-1);
+    let mut text = match ending {
+        Ending::Done => format!("exit={code}\n"),
+        Ending::Stopped => format!("已被用户停止，命令已终止：{command}\nexit={code}\n"),
+        Ending::TimedOut => format!(
+            "命令超时（{} ms）已终止：{command}\nexit={code}\n",
+            timeout.as_millis()
+        ),
+    };
+    let stdout = String::from_utf8_lossy(&stdout);
+    let stderr = String::from_utf8_lossy(&stderr);
     if !stdout.trim().is_empty() {
         text.push_str("--- stdout ---\n");
         text.push_str(stdout.trim_end());
@@ -469,11 +514,66 @@ fn run_command(root: &Path, args: &Value) -> ToolOutcome {
         text.push('\n');
     }
     let text = clamp(&text);
-    if output.status.success() {
+    let ok = matches!(ending, Ending::Done) && status.map(|value| value.success()).unwrap_or(false);
+    if ok {
         ToolOutcome::ok(text)
     } else {
         ToolOutcome::fail(text)
     }
+}
+
+/// 一路管道交给一个线程读到结束：读的人不读，子进程就会卡在 write 上。
+fn spawn_pipe_reader(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || drain_pipe(pipe))
+}
+
+fn join_pipe_reader(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    handle.join().unwrap_or_default()
+}
+
+/// 读到结束；最多留 PIPE_KEEP_BYTES——展示时本来就要截断，多余的只是占内存。
+fn drain_pipe(mut pipe: impl Read) -> Vec<u8> {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                let room = PIPE_KEEP_BYTES.saturating_sub(kept.len());
+                if room == 0 {
+                    continue;
+                }
+                let take = count.min(room);
+                kept.extend_from_slice(&buffer[..take]);
+            }
+            Err(_) => break,
+        }
+    }
+    kept
+}
+
+/// 收掉整组子进程：先 SIGTERM 给个收尾机会，赖着不走再 SIGKILL。
+fn kill_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // spawn 时设了 process_group(0)：组号＝子进程 pid，负数表示「整组」。
+        let group = child.id() as libc::pid_t;
+        unsafe {
+            libc::kill(-group, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            // 已经退出就不再发信号：僵尸被收掉后 pid 可能被系统复用。
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
 }
 
 /// 递归收集文件（有深度与跳过规则，不跟符号链接）。
@@ -544,6 +644,8 @@ fn clamp(text: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("prism-native-{tag}-{}", std::process::id()));
@@ -625,6 +727,97 @@ mod tests {
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert!(outcome.text.contains("exit=0"), "{}", outcome.text);
         assert!(outcome.text.contains("hi"), "{}", outcome.text);
+    }
+
+    /// 输出超过管道缓冲（macOS 64KB）不能假性超时：读的人必须同时在读。
+    #[test]
+    fn run_command_large_output_is_not_a_timeout() {
+        let dir = temp_dir("cmdout");
+        let root = dir.to_string_lossy().to_string();
+        let outcome = execute(
+            &root,
+            "run_command",
+            r#"{"command":"yes x | head -c 300000","timeout_ms":10000}"#,
+        );
+        assert!(outcome.error.is_none(), "{}", outcome.text);
+        assert!(outcome.text.contains("exit=0"), "{}", outcome.text);
+    }
+
+    /// 超大输出也不能把内存吃干：展示本来就要截断，读的时候留前一段就够。
+    #[test]
+    fn run_command_huge_output_is_capped() {
+        let dir = temp_dir("cmdhuge");
+        let root = dir.to_string_lossy().to_string();
+        let started = Instant::now();
+        let outcome = execute(
+            &root,
+            "run_command",
+            r#"{"command":"yes x | head -c 4000000","timeout_ms":20000}"#,
+        );
+        assert!(outcome.error.is_none(), "{}", outcome.text);
+        assert!(outcome.text.contains("已截断"), "{}", outcome.text.len());
+        assert!(started.elapsed() < Duration::from_secs(20), "不该等到超时");
+    }
+
+    #[test]
+    fn run_command_timeout_kills_slow_command() {
+        let dir = temp_dir("cmdtimeout");
+        let root = dir.to_string_lossy().to_string();
+        let started = Instant::now();
+        let outcome = execute(
+            &root,
+            "run_command",
+            r#"{"command":"sleep 30","timeout_ms":1000}"#,
+        );
+        assert!(outcome.error.is_some());
+        assert!(outcome.text.contains("命令超时"), "{}", outcome.text);
+        assert!(started.elapsed() < Duration::from_secs(10), "超时要及时收手");
+    }
+
+    /// 停止按钮要能打断正在跑的命令（不是等命令自己跑完）。
+    #[test]
+    fn run_command_stop_kills_running_command() {
+        let dir = temp_dir("cmdstop");
+        let root = dir.to_string_lossy().to_string();
+        let flag = Arc::new(AtomicBool::new(false));
+        let flip = Arc::clone(&flag);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            flip.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let outcome = execute_with_stop(
+            &root,
+            "run_command",
+            r#"{"command":"sleep 30","timeout_ms":60000}"#,
+            &|| flag.load(Ordering::SeqCst),
+        );
+        assert!(outcome.error.is_some());
+        assert!(outcome.text.contains("已被用户停止"), "{}", outcome.text);
+        assert!(started.elapsed() < Duration::from_secs(5), "停止要立刻生效");
+    }
+
+    /// 命令拉起的孙子进程要一起收掉：只杀 sh 的话后台的活还会继续干。
+    #[test]
+    fn run_command_stop_takes_down_child_processes() {
+        let dir = temp_dir("cmdtree");
+        let root = dir.to_string_lossy().to_string();
+        let flag = Arc::new(AtomicBool::new(false));
+        let flip = Arc::clone(&flag);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            flip.store(true, Ordering::SeqCst);
+        });
+        // 后台那支 1.5 秒后会写下 marker；它要是活着，说明只杀了 sh。
+        let outcome = execute_with_stop(
+            &root,
+            "run_command",
+            r#"{"command":"(sleep 1.5; touch marker) & sleep 30","timeout_ms":60000}"#,
+            &|| flag.load(Ordering::SeqCst),
+        );
+        assert!(outcome.text.contains("已被用户停止"), "{}", outcome.text);
+        std::thread::sleep(Duration::from_millis(1800));
+        assert!(!dir.join("marker").exists(), "孙子进程没被收掉");
     }
 
     #[test]

@@ -34,3 +34,7 @@ tauri-plugin-process = "2"
 # 工作台「新增目录」挑本机文件夹。
 tauri-plugin-dialog = "2"
 chrono = "0.4.45"
+
+# run_command 结束时要连同命令拉起的子进程一起收掉：按进程组发信号要用到它。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
