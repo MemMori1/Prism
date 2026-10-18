@@ -7,6 +7,7 @@ import type { ProjectItem, TimelineRecord } from '../types'
 import { basename, formatCost, formatTokens } from '../format'
 import LiveTurnView from './LiveTurn.vue'
 import TimelineItem from './TimelineItem.vue'
+import MetaIcon from './MetaIcon.vue'
 import SelectMenu from './SelectMenu.vue'
 
 const props = defineProps<{
@@ -438,7 +439,10 @@ const engineOptions = computed(() =>
             <span class="lane-status" :class="`st-${column.status}`">
               {{ STATUS_LABELS[column.status] }}
             </span>
-            <span class="lane-elapsed">⏱ {{ elapsedLabel(column.elapsedMs) }}</span>
+            <span class="lane-elapsed">
+              <MetaIcon name="clock" :size="12" />
+              {{ elapsedLabel(column.elapsedMs) }}
+            </span>
             <button
               v-if="column.status === 'running'"
               class="lane-btn"
@@ -458,14 +462,20 @@ const engineOptions = computed(() =>
           </header>
           <div v-if="column.record?.tokens" class="lane-hud">
             <span class="hud-item" title="未缓存输入">
-              ↑ {{ formatTokens(column.record.tokens.input) }}
+              <MetaIcon name="input" :size="12" />
+              {{ formatTokens(column.record.tokens.input) }}
             </span>
             <span v-if="column.record.tokens.cacheRead" class="hud-item" title="缓存读">
-              ⚡ {{ formatTokens(column.record.tokens.cacheRead) }}
+              <MetaIcon name="cache" :size="12" />
+              {{ formatTokens(column.record.tokens.cacheRead) }}
             </span>
-            <span class="hud-item" title="输出">↓ {{ formatTokens(column.record.tokens.output) }}</span>
+            <span class="hud-item" title="输出">
+              <MetaIcon name="output" :size="12" />
+              {{ formatTokens(column.record.tokens.output) }}
+            </span>
             <span v-if="column.record.tokens.reasoning" class="hud-item" title="思考">
-              ✦ {{ formatTokens(column.record.tokens.reasoning) }}
+              <MetaIcon name="reasoning" :size="12" />
+              {{ formatTokens(column.record.tokens.reasoning) }}
             </span>
             <span v-if="column.record.tokens.cost" class="hud-item hud-cost" title="该轮成本">
               {{ formatCost(column.record.tokens.cost) }}
@@ -479,6 +489,7 @@ const engineOptions = computed(() =>
               :record="column.record"
               :session-id="column.sessionId"
               :highlighted="false"
+              :show-meta="false"
             />
             <LiveTurnView v-else-if="column.live.parts.length || column.live.running" :turn="column.live" />
             <div v-else class="lane-hint">

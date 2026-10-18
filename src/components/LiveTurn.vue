@@ -1,10 +1,27 @@
 <script setup lang="ts">
-import type { LiveToolPart, LiveTurn } from '../liveTurn'
+import { computed } from 'vue'
+import type { LivePart, LiveToolPart, LiveTurn } from '../liveTurn'
 import type { ToolDetail } from '../types'
 import { renderMarkdown } from '../markdown'
 import ToolCard from './ToolCard.vue'
+import TurnMeta from './TurnMeta.vue'
 
-defineProps<{ turn: LiveTurn }>()
+const props = defineProps<{
+  turn: LiveTurn
+  /** 当前轮次的模型（live 还没有归档记录，由父组件给）。 */
+  model?: string | null
+  /** 开跑时刻：跑着的时候实时计时。 */
+  runningSince?: number | null
+}>()
+
+/** 正在生成的正文也能先复制走。 */
+const copyText = computed(() =>
+  props.turn.parts
+    .filter((part): part is Extract<LivePart, { kind: 'text' }> => part.kind === 'text')
+    .map(part => part.text.trim())
+    .filter(Boolean)
+    .join('\n\n'),
+)
 
 function liveDetail(part: LiveToolPart): ToolDetail {
   return {
@@ -45,6 +62,12 @@ function liveDetail(part: LiveToolPart): ToolDetail {
       </div>
 
       <div v-if="turn.error" class="live-error">{{ turn.error }}</div>
+
+      <TurnMeta
+        :model="model ?? null"
+        :running-since="turn.running ? (runningSince ?? null) : null"
+        :copy-text="copyText"
+      />
     </div>
   </div>
 </template>

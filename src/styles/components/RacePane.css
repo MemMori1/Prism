@@ -370,9 +370,18 @@
 }
 
 .lane-elapsed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: var(--faint);
   font-size: 10.5px;
   font-family: var(--font-mono);
+}
+
+.hud-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .lane-btn {

@@ -1,0 +1,87 @@
+/* 每轮对话脚下那行 meta：统一字号、图标、间距与数字宽度。 */
+.turn-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--faint);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-meta.align-end {
+  justify-content: flex-end;
+}
+
+.tm-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  line-height: 1.45;
+}
+
+.tm-model {
+  color: var(--muted);
+  min-width: 0;
+}
+
+.tm-ellipsis {
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tm-cost {
+  color: var(--muted);
+}
+
+.tm-ctx {
+  gap: 5px;
+}
+
+.tm-ctx-bar {
+  display: inline-block;
+  width: 44px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.tm-ctx-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.tm-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin: -3px 0 -3px 1px;
+  border-radius: 5px;
+  color: var(--faint);
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.tm-copy:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.tm-copy:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.tm-copy.copied {
+  color: var(--accent);
+}

@@ -2,43 +2,27 @@
 import { computed } from 'vue'
 import type { TimelineRecord } from '../types'
 import { renderMarkdown } from '../markdown'
-import { formatCost, formatTokens } from '../format'
+import { recordText } from '../timeline'
 import ToolCard from './ToolCard.vue'
+import TurnMeta from './TurnMeta.vue'
 
-const props = defineProps<{
-  record: TimelineRecord
-  sessionId: string
-  /** 搜索定位命中的消息：短暂高亮。 */
-  highlighted?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    record: TimelineRecord
+    sessionId: string
+    /** 搜索定位命中的消息：短暂高亮。 */
+    highlighted?: boolean
+    /** 这一轮的用时（turnDurations 算好传进来；没有就不显示）。 */
+    durationMs?: number | null
+    /** 赛马栏自带 HUD，那边传 false 不重复画这行。 */
+    showMeta?: boolean
+  }>(),
+  // 必须显式给默认值：Boolean 类型的 prop 没传时 Vue 会当 false。
+  { highlighted: false, durationMs: null, showMeta: true },
+)
 
-/** 该轮 token（引擎数据可得时）。 */
-const tokens = computed(() => props.record.tokens ?? null)
-
-const hasTokens = computed(() => {
-  const current = tokens.value
-  if (!current) return false
-  return Boolean(
-    current.input ||
-      current.cacheRead ||
-      current.cacheWrite ||
-      current.output ||
-      current.reasoning ||
-      current.cost,
-  )
-})
-
-/** 上下文用量（窗口已知且用量为正时显示）。 */
-const context = computed(() => {
-  const current = tokens.value
-  if (!current?.contextWindow || current.contextWindow <= 0) return null
-  const used = current.input + current.cacheRead + current.output
-  if (used <= 0) return null
-  return {
-    used,
-    percent: Math.min(100, Math.round((used / current.contextWindow) * 100)),
-  }
-})
+/** 复制按钮要复制的内容：这一轮的正文本体。 */
+const copyText = computed(() => recordText(props.record))
 </script>
 
 <template>
@@ -58,6 +42,7 @@ const context = computed(() => {
           />
         </template>
       </div>
+      <TurnMeta v-if="showMeta" align="end" :copy-text="copyText" />
     </template>
 
     <!-- 系统提示：居中弱化 -->
@@ -90,29 +75,12 @@ const context = computed(() => {
           />
         </div>
 
-        <div v-if="tokens && hasTokens" class="turn-tokens">
-          <span class="tt-item" title="未缓存输入">↑ {{ formatTokens(tokens.input) }}</span>
-          <span v-if="tokens.cacheRead" class="tt-item" title="缓存读">
-            ⚡ {{ formatTokens(tokens.cacheRead) }}
-          </span>
-          <span class="tt-item" title="输出">↓ {{ formatTokens(tokens.output) }}</span>
-          <span v-if="tokens.reasoning" class="tt-item" title="思考">
-            ✦ {{ formatTokens(tokens.reasoning) }}
-          </span>
-          <span v-if="tokens.cost" class="tt-item tt-cost" title="该轮成本">
-            {{ formatCost(tokens.cost) }}
-          </span>
-          <span
-            v-if="context"
-            class="tt-ctx"
-            :title="`上下文 ≈ ${formatTokens(context.used)} / 窗口 ${formatTokens(tokens.contextWindow ?? 0)} tokens`"
-          >
-            <span class="tt-ctx-bar">
-              <span class="tt-ctx-fill" :style="{ width: `${context.percent}%` }" />
-            </span>
-            {{ context.percent }}%
-          </span>
-        </div>
+        <TurnMeta
+          v-if="showMeta"
+          :record="record"
+          :duration-ms="durationMs"
+          :copy-text="copyText"
+        />
       </div>
     </template>
   </div>

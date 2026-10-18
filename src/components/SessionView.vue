@@ -37,6 +37,7 @@ import type {
   TimelineRecord,
 } from '../types'
 import { formatCost, formatTokens, fullTime } from '../format'
+import { turnDurations } from '../timeline'
 import TimelineItem from './TimelineItem.vue'
 import LiveTurnView from './LiveTurn.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
@@ -651,6 +652,10 @@ const waiting = computed(() => pendingPermissions.value.length)
 const showLive = computed(
   () => live.value.running || live.value.parts.length > 0 || !!live.value.error,
 )
+/** 每轮用时＝与上一条记录的时间差（没有时间戳的记录不给）。 */
+const durations = computed(() => turnDurations(records.value))
+/** live 轮次脚下那行的模型：优先当前选中的（这一轮就是用它跑的），退回会话记录里的。 */
+const liveModel = computed(() => selectedModel.value?.id ?? props.session?.model ?? null)
 /** 已接入运行轴的引擎（其余引擎只能浏览）。与新建会话的可用名单同源，避免两处漂移。 */
 const RUNTIME_ENGINES = new Set<string>(CREATABLE_ENGINE_IDS)
 const readOnly = computed(() => !!props.session && !RUNTIME_ENGINES.has(props.session.engine))
@@ -1404,8 +1409,14 @@ watch(
               :record="record"
               :session-id="session.id"
               :highlighted="record.id === highlightId"
+              :duration-ms="durations.get(record.id) ?? null"
             />
-            <LiveTurnView v-if="showLive" :turn="live" />
+            <LiveTurnView
+              v-if="showLive"
+              :turn="live"
+              :model="liveModel"
+              :running-since="liveStartedAt"
+            />
           </div>
         </template>
         </div>

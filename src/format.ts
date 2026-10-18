@@ -38,6 +38,18 @@ export function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(2)}M`
 }
 
+/** 用时：0.8s / 12s / 3m24s / 1h05m（0 或负数返回空串，调用方据此不显示）。 */
+export function formatDuration(ms: number): string {
+  if (!ms || ms <= 0) return ''
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`
+  const seconds = Math.round(ms / 1000)
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m${`${seconds % 60}`.padStart(2, '0')}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h${`${minutes % 60}`.padStart(2, '0')}m`
+}
+
 export function formatCost(cost: number): string {
   if (!cost) return ''
   if (cost < 0.01) return `$${cost.toFixed(4)}`
