@@ -46,6 +46,7 @@ import UsagePane from './components/UsagePane.vue'
 import RacePane from './components/RacePane.vue'
 import HomePane from './components/HomePane.vue'
 import AppRail from './components/AppRail.vue'
+import { toggleDevtools } from './devtools'
 import { VIEW_KEY, isAppView, type AppView } from './nav'
 
 const health = ref<EngineHealth[]>([])
@@ -573,6 +574,19 @@ onBeforeUnmount(() => {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M20 11a8 8 0 1 1-2.3-5.6" />
             <path d="M20 4v7h-7" />
+          </svg>
+        </button>
+
+        <button
+          class="devtools-btn"
+          aria-label="开发者工具（F12）"
+          title="开发者工具（F12）"
+          @click="toggleDevtools"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 8l-4 4 4 4" />
+            <path d="M16 8l4 4-4 4" />
+            <path d="M13 6l-2 12" />
           </svg>
         </button>
       </header>

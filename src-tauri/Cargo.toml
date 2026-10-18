@@ -13,7 +13,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# devtools：让 release 构建也能开合开发者工具（debug 构建默认就有）。
+# 不想让线上包暴露调试入口的话，去掉这个特性即可——F12/按钮在 release 下会静默失效。
+tauri = { version = "2", features = ["tray-icon", "image-png", "devtools"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

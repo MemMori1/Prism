@@ -84,6 +84,35 @@
   animation: refresh-spin 0.8s linear infinite;
 }
 
+/* 调试入口：F12 / 按钮开合开发者工具，视觉与刷新按钮一致。 */
+.devtools-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.devtools-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.devtools-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
 @keyframes refresh-spin {
   to {
     transform: rotate(360deg);
