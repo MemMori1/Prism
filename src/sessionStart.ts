@@ -1,15 +1,13 @@
 import type { EngineHealth, ProjectItem } from './types'
 
-/** 引擎选择页的图标样式（无第三方图标依赖，用内联 SVG / 文本绘制）。 */
+/** 引擎图标样式（无第三方图标依赖，用内联 SVG / 文本绘制）。 */
 export type EngineIcon = 'claude' | 'codex' | 'opencode' | 'prism'
-export type EngineAccent = 'claude' | 'codex' | 'primary'
 
 export interface EngineChoice {
   id: string
   label: string
   description: string
   icon: EngineIcon
-  accent: EngineAccent
   /** 本机引擎健康检查通过，且 Prism 运行轴支持新建会话。 */
   available: boolean
   /** 尚未拿到健康数据。 */
@@ -27,28 +25,24 @@ const PRESENTATION: ReadonlyArray<Omit<EngineChoice, 'available' | 'checking'>> 
     label: 'Prism 原生',
     description: '内置 agent：用自己的 API Key 直连模型，读写文件与跑命令',
     icon: 'prism',
-    accent: 'primary',
   },
   {
     id: 'claude',
     label: 'Claude Code',
     description: '使用 Claude Code 开始一个空白会话',
     icon: 'claude',
-    accent: 'claude',
   },
   {
     id: 'codex',
     label: 'Codex',
     description: '使用 Codex 开始一个空白会话',
     icon: 'codex',
-    accent: 'codex',
   },
   {
     id: 'opencode',
     label: 'OpenCode',
     description: '使用 OpenCode 开始一个空白会话',
     icon: 'opencode',
-    accent: 'primary',
   },
 ]
 
@@ -78,7 +72,7 @@ export function engineChoices(health: EngineHealth[]): EngineChoice[] {
   })
 }
 
-/** 工作台没有显式选项目时，默认用最近活跃的项目。 */
+/** 取最近活跃的项目（按 timeUpdated）。 */
 export function newestProject(projects: ProjectItem[]): ProjectItem | null {
   let newest: ProjectItem | null = null
   for (const project of projects) {

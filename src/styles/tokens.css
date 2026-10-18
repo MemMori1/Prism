@@ -32,7 +32,6 @@
   --red-soft: #fdeaea;
 
   --on-accent: #ffffff;
-  --on-engine: #f5fff8;
   --on-amber: #ffffff;
   --on-danger: #ffffff;
   --preview-bg: #ffffff;
@@ -44,7 +43,6 @@
   --engine-claude: #c15f3c;
   --engine-codex: #0f766e;
   --engine-opencode: #15803d;
-  --engine-opencode-strong: #1f6b43;
 
   --radius: 10px;
   --radius-sm: 7px;
@@ -88,7 +86,6 @@
   --red-soft: #2e1618;
 
   --on-accent: #ffffff;
-  --on-engine: #f5fff8;
   --on-amber: #2c2210;
   --on-danger: #2e1618;
   --preview-bg: #ffffff;
@@ -99,7 +96,6 @@
   --engine-claude: #e08a68;
   --engine-codex: #2dd4bf;
   --engine-opencode: #4ade80;
-  --engine-opencode-strong: #1f6b43;
 
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.35);
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.45);
@@ -137,7 +133,6 @@
     --red-soft: #2e1618;
 
     --on-accent: #ffffff;
-    --on-engine: #f5fff8;
     --on-amber: #2c2210;
     --on-danger: #2e1618;
     --preview-bg: #ffffff;
@@ -148,7 +143,6 @@
     --engine-claude: #e08a68;
     --engine-codex: #2dd4bf;
     --engine-opencode: #4ade80;
-    --engine-opencode-strong: #1f6b43;
 
     --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.35);
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.45);

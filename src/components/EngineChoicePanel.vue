@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { ENGINE_GLYPHS } from '../engineIcons'
 import type { EngineChoice } from '../sessionStart'
 
 const props = withDefaults(
@@ -9,6 +11,8 @@ const props = withDefaults(
     selecting?: string | null
     hint?: string | null
     error?: string | null
+    /** 整块锁住（工作台：还没选工作目录）：行点了没反应，视觉上也压暗。 */
+    locked?: boolean
   }>(),
   {
     title: '选择本次任务使用的 Agent',
@@ -16,6 +20,7 @@ const props = withDefaults(
     selecting: null,
     hint: null,
     error: null,
+    locked: false,
   },
 )
 
@@ -23,17 +28,40 @@ const emit = defineEmits<{
   (e: 'select', engine: string): void
 }>()
 
+/** 行内状态标签：只有需要提醒的才出现，能用的行不加噪。 */
+function chipOf(choice: EngineChoice): { text: string; tone: string } | null {
+  if (choice.checking) return { text: '检测中', tone: 'busy' }
+  if (choice.needsSetup) return { text: '未配置 API Key', tone: 'warn' }
+  if (!choice.available) return { text: '当前不可用', tone: 'off' }
+  return null
+}
+
+/** 行尾转圈：健康检查中 / 正在创建会话。 */
+function spinning(choice: EngineChoice): boolean {
+  return props.selecting === choice.id || choice.checking
+}
+
+const rows = computed(() =>
+  props.choices.map(choice => ({
+    choice,
+    chip: chipOf(choice),
+    spinning: spinning(choice),
+    /** 品牌 mark（没有就退回下面的首字母）。 */
+    glyph: ENGINE_GLYPHS[choice.icon] ?? null,
+  })),
+)
+
 function pick(choice: EngineChoice) {
-  if (!choice.available || choice.checking || props.selecting) return
+  if (props.locked || !choice.available || choice.checking || props.selecting) return
   emit('select', choice.id)
 }
 </script>
 
 <template>
-  <section class="engine-picker" aria-label="选择本次任务使用的 Agent">
+  <section class="engine-picker" :class="{ locked }" aria-label="选择本次任务使用的 Agent">
     <div class="engine-picker-inner">
       <div class="picker-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="18" height="18">
+        <svg viewBox="0 0 24 24" width="19" height="19">
           <path
             d="M13.4 3.2c.5 3.9 2.2 5.6 6.1 6.1-3.9.5-5.6 2.2-6.1 6.1-.5-3.9-2.2-5.6-6.1-6.1 3.9-.5 5.6-2.2 6.1-6.1Z"
             fill="none"
@@ -54,72 +82,103 @@ function pick(choice: EngineChoice) {
       <h2>{{ title }}</h2>
       <p class="picker-desc">{{ description }}</p>
 
-      <div class="engine-grid">
+      <!-- 一行一个 Agent：以后加引擎只是多一行，不会把版面挤爆（超出就在整块里滚）。 -->
+      <div class="engine-list">
         <button
-          v-for="choice in choices"
-          :key="choice.id"
-          class="engine-card"
-          :class="[
-            `accent-${choice.accent}`,
-            {
-              unavailable: !choice.available && !choice.checking,
-              choosing: selecting === choice.id,
-            },
-          ]"
-          :disabled="!choice.available || choice.checking || !!selecting"
-          :aria-label="choice.label"
-          @click="pick(choice)"
+          v-for="row in rows"
+          :key="row.choice.id"
+          class="engine-row"
+          :class="{
+            unavailable: !row.choice.available && !row.choice.checking,
+            choosing: selecting === row.choice.id,
+          }"
+          :disabled="locked || !row.choice.available || row.choice.checking || !!selecting"
+          :aria-label="row.choice.label"
+          @click="pick(row.choice)"
         >
-          <span class="engine-icon" :class="`icon-${choice.icon}`" aria-hidden="true">
-            <span v-if="choice.icon === 'claude'" class="ai-glyph">AI</span>
+          <span class="engine-tile" :class="`icon-${row.choice.icon}`" aria-hidden="true">
+            <!-- Prism 原生：自家 mark（棱镜 + 入射光，出射三束用品牌色）。 -->
             <svg
-              v-else-if="choice.icon === 'prism'"
+              v-if="row.choice.icon === 'prism'"
               viewBox="0 0 24 24"
-              width="19"
-              height="19"
+              width="21"
+              height="21"
             >
               <path
-                d="M12 3.4 20.6 12 12 20.6 3.4 12 12 3.4Z"
+                d="M9.8 4.4 18.9 19.2H0.7L9.8 4.4Z"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="1.5"
                 stroke-linejoin="round"
               />
               <path
-                d="M12 8.1 15.9 12 12 15.9 8.1 12 12 8.1Z"
-                fill="currentColor"
-                opacity="0.55"
-              />
-            </svg>
-            <svg v-else-if="choice.icon === 'codex'" viewBox="0 0 24 24" width="19" height="19">
-              <path
-                d="M8.1 4.9a4.1 4.1 0 0 1 6.5 1.3 4.1 4.1 0 0 1 3.1 6 4.1 4.1 0 0 1-5 5 4.1 4.1 0 0 1-6.5-1.3 4.1 4.1 0 0 1-3.1-6 4.1 4.1 0 0 1 5-5Z"
+                d="M0.9 11.9h6.4"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="1.5"
-                stroke-linejoin="round"
+                stroke-linecap="round"
               />
               <path
-                d="M9.2 9.2 12 7.7l2.8 1.5v3.1L12 13.8l-2.8-1.5V9.2Z"
+                d="M14.6 12.9 22.4 8.2"
                 fill="none"
-                stroke="currentColor"
-                stroke-width="1.1"
-                stroke-linejoin="round"
+                stroke="#8b5cf6"
+                stroke-width="1.5"
+                stroke-linecap="round"
+              />
+              <path
+                d="M15.6 12.9h7.6"
+                fill="none"
+                stroke="#22d3ee"
+                stroke-width="1.5"
+                stroke-linecap="round"
+              />
+              <path
+                d="M14.6 12.9l7.8 4.7"
+                fill="none"
+                stroke="#fb7185"
+                stroke-width="1.5"
+                stroke-linecap="round"
               />
             </svg>
-            <span v-else class="terminal-glyph"><span>&gt;</span><span>_</span></span>
+            <!-- 各家品牌 mark（见 engineIcons.ts），用引擎色填充。 -->
+            <svg v-else-if="row.glyph" viewBox="0 0 24 24" width="21" height="21">
+              <path v-for="(d, index) in row.glyph" :key="index" :d="d" fill="currentColor" />
+            </svg>
+            <!-- 没配图标的引擎：首字母兜底，不会开天窗。 -->
+            <span v-else class="letter-glyph">{{ row.choice.label.slice(0, 1) }}</span>
           </span>
 
           <span class="engine-main">
-            <span class="engine-name">{{ choice.label }}</span>
-            <span class="engine-desc">{{ choice.description }}</span>
-            <span v-if="choice.checking" class="engine-state">检测中…</span>
-            <span v-else-if="choice.needsSetup" class="engine-state">未配置 · 点开填 API Key</span>
-            <span v-else-if="!choice.available" class="engine-state">当前不可用</span>
-            <span v-else-if="selecting === choice.id" class="engine-state working">正在创建…</span>
+            <span class="engine-title">
+              <span class="engine-name">{{ row.choice.label }}</span>
+              <span v-if="row.chip" class="engine-chip" :class="row.chip.tone">
+                {{ row.chip.text }}
+              </span>
+            </span>
+            <span class="engine-desc">{{ row.choice.description }}</span>
           </span>
 
-          <span class="engine-arrow" aria-hidden="true">→</span>
+          <span class="engine-go" aria-hidden="true">
+            <svg v-if="row.spinning" class="spin" viewBox="0 0 24 24" width="15" height="15">
+              <path
+                d="M12 3.8a8.2 8.2 0 1 0 8.2 8.2"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+              />
+            </svg>
+            <svg v-else viewBox="0 0 24 24" width="16" height="16">
+              <path
+                d="m9.6 5.6 6.4 6.4-6.4 6.4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
         </button>
       </div>
 
