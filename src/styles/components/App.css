@@ -1,11 +1,18 @@
 .app {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
 }
 
-/* 图标栏贯穿整个窗口高度；顶栏与内容在右侧同列。 */
+/* 标题栏以下的一条：左边图标栏 + 右边内容区。 */
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 图标栏 + 内容区：顶栏在更上面，贯穿整窗宽度。 */
 .app-main {
   display: flex;
   flex: 1;
@@ -14,33 +21,17 @@
   min-height: 0;
 }
 
+/* 顶栏铺满整窗、压在 macOS 标题栏上（titleBarStyle=Overlay）：
+ * 左边 88px 让给红绿灯，右边留 14px；整条是拖拽区（见 App.vue 的 data-tauri-drag-region）。 */
 .topbar {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 46px;
-  padding: 0 14px;
+  flex: none;
+  height: 40px;
+  padding: 0 14px 0 88px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
-  flex: none;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.brand-mark {
-  width: 20px;
-  height: 20px;
-  color: var(--text);
-}
-
-.brand-name {
-  font-weight: 650;
-  font-size: 14px;
-  letter-spacing: 0.2px;
 }
 
 .topbar-spacer {

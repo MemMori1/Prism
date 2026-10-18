@@ -600,229 +600,223 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app">
-    <AppRail
-      :view="view"
-      :wb-status="wbStatus"
-      :engines="health"
-      @select="setView"
-      @settings="showSettings = true"
-    />
+    <!-- 顶栏铺满整窗、直接压在 macOS 标题栏上（tauri.conf 的 titleBarStyle=Overlay）：
+         左侧 78px 让给红绿灯，其余整条都是拖拽区——按钮 / 输入框自己会挡住拖拽，
+         所以 deep 只影响空白处。双击空白处也会照常最大化 / 还原。 -->
+    <header class="topbar" data-tauri-drag-region="deep">
+      <SessionNav
+        :agent="navAgent"
+        :recent="navItems"
+        :agents="navAgents"
+        :selected-id="navSelectedId"
+        :running-ids="navRunningIds"
+        :waiting-ids="navWaitingIds"
+        :loading="navLoading"
+        @select="openNavSession"
+        @open-in-workbench="openNavSessionInWorkbench"
+        @new-session="navNewSession"
+        @open="loadNavSessions(true)"
+      />
 
-    <div class="app-main">
-      <header class="topbar">
-        <div class="brand">
-          <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true">
-            <path d="M22 14 L42 50 L2 50 Z" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round" />
-            <path d="M0 33 H21" stroke="currentColor" stroke-width="4" stroke-linecap="round" />
-            <path d="M39 27 L62 16" stroke="#8b5cf6" stroke-width="3.6" stroke-linecap="round" />
-            <path d="M41 33 H62" stroke="#22d3ee" stroke-width="3.6" stroke-linecap="round" />
-            <path d="M39 39 L62 50" stroke="#f472b6" stroke-width="3.6" stroke-linecap="round" />
-          </svg>
-          <span class="brand-name">Prism</span>
-        </div>
+      <div class="topbar-spacer" />
 
-        <SessionNav
-          :agent="navAgent"
-          :recent="navItems"
-          :agents="navAgents"
-          :selected-id="navSelectedId"
-          :running-ids="navRunningIds"
-          :waiting-ids="navWaitingIds"
-          :loading="navLoading"
-          @select="openNavSession"
-          @open-in-workbench="openNavSessionInWorkbench"
-          @new-session="navNewSession"
-          @open="loadNavSessions(true)"
-        />
-
-        <div class="topbar-spacer" />
-
-        <div class="notify-wrap">
-          <button
-            class="notify-btn"
-            title="通知：回合完成 / 失败 / 待审批"
-            aria-label="通知"
-            :aria-expanded="notifyOpen"
-            @click="toggleNotify"
+      <div class="notify-wrap">
+        <button
+          class="notify-btn"
+          title="通知：回合完成 / 失败 / 待审批"
+          aria-label="通知"
+          :aria-expanded="notifyOpen"
+          @click="toggleNotify"
+        >
+          <svg
+            class="notify-bell"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
           >
-            <svg
-              class="notify-bell"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.7"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
-              <path d="M13.7 21a2 2 0 0 1-3.4 0" />
-            </svg>
-            <span v-if="unreadCount" class="notify-badge">
-              {{ unreadCount > 99 ? '99+' : unreadCount }}
-            </span>
-          </button>
-          <template v-if="notifyOpen">
-            <div class="notify-backdrop" @click="notifyOpen = false" />
-            <div class="notify-panel">
-              <div class="notify-head">
-                <span>通知</span>
-                <button
-                  class="notify-clear"
-                  :disabled="!notifications.length"
-                  @click="clearNotifications"
-                >
-                  清空
-                </button>
-              </div>
-              <div v-if="!notifications.length" class="notify-empty">
-                暂无通知——回合完成 / 失败 / 待审批会出现在这里
-              </div>
+            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+            <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+          </svg>
+          <span v-if="unreadCount" class="notify-badge">
+            {{ unreadCount > 99 ? '99+' : unreadCount }}
+          </span>
+        </button>
+        <template v-if="notifyOpen">
+          <div class="notify-backdrop" @click="notifyOpen = false" />
+          <div class="notify-panel">
+            <div class="notify-head">
+              <span>通知</span>
               <button
-                v-for="item in notifications"
-                :key="item.id"
-                class="notify-item"
-                @click="openNotification(item)"
+                class="notify-clear"
+                :disabled="!notifications.length"
+                @click="clearNotifications"
               >
-                <span class="notify-icon" :class="`kind-${item.kind}`">
-                  {{ KIND_ICONS[item.kind] }}
-                </span>
-                <span class="notify-main">
-                  <span class="notify-title">{{ item.title }}</span>
-                  <span class="notify-body">{{ item.body }}</span>
-                </span>
-                <span class="notify-time">{{ relativeTime(item.time) }}</span>
+                清空
               </button>
             </div>
-          </template>
-        </div>
+            <div v-if="!notifications.length" class="notify-empty">
+              暂无通知——回合完成 / 失败 / 待审批会出现在这里
+            </div>
+            <button
+              v-for="item in notifications"
+              :key="item.id"
+              class="notify-item"
+              @click="openNotification(item)"
+            >
+              <span class="notify-icon" :class="`kind-${item.kind}`">
+                {{ KIND_ICONS[item.kind] }}
+              </span>
+              <span class="notify-main">
+                <span class="notify-title">{{ item.title }}</span>
+                <span class="notify-body">{{ item.body }}</span>
+              </span>
+              <span class="notify-time">{{ relativeTime(item.time) }}</span>
+            </button>
+          </div>
+        </template>
+      </div>
 
-        <button
-          class="refresh-btn"
-          :class="{ 'is-busy': refreshing }"
-          :disabled="refreshing"
-          :aria-busy="refreshing"
-          aria-label="重新扫描引擎、项目与会话"
-          title="重新扫描引擎、项目与会话"
-          @click="reload"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M20 11a8 8 0 1 1-2.3-5.6" />
-            <path d="M20 4v7h-7" />
-          </svg>
-        </button>
+      <button
+        class="refresh-btn"
+        :class="{ 'is-busy': refreshing }"
+        :disabled="refreshing"
+        :aria-busy="refreshing"
+        aria-label="重新扫描引擎、项目与会话"
+        title="重新扫描引擎、项目与会话"
+        @click="reload"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 11a8 8 0 1 1-2.3-5.6" />
+          <path d="M20 4v7h-7" />
+        </svg>
+      </button>
 
-        <button
-          class="devtools-btn"
-          aria-label="开发者工具（F12）"
-          title="开发者工具（F12）"
-          @click="toggleDevtools"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M8 8l-4 4 4 4" />
-            <path d="M16 8l4 4-4 4" />
-            <path d="M13 6l-2 12" />
-          </svg>
-        </button>
-      </header>
+      <button
+        class="devtools-btn"
+        aria-label="开发者工具（F12）"
+        title="开发者工具（F12）"
+        @click="toggleDevtools"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M8 8l-4 4 4 4" />
+          <path d="M16 8l4 4-4 4" />
+          <path d="M13 6l-2 12" />
+        </svg>
+      </button>
+    </header>
 
-      <transition name="fade">
-        <div v-if="error" class="error-banner">{{ error }}</div>
-      </transition>
+    <div class="app-body">
+      <AppRail
+        :view="view"
+        :wb-status="wbStatus"
+        :engines="health"
+        @select="setView"
+        @settings="showSettings = true"
+      />
 
-      <div ref="panesEl" class="panes">
-        <HomePane
-          v-show="view === 'home'"
-          :projects="projects"
-          @error="reportError"
-          @open-project="openProjectFromHome"
-          @open-usage="setView('usage')"
-        />
-        <div v-show="view === 'archive'" class="archive-view">
-          <ProjectsPane
-            :style="{ width: `${paneWidths.projects}px` }"
+      <div class="app-main">
+        <transition name="fade">
+          <div v-if="error" class="error-banner">{{ error }}</div>
+        </transition>
+
+        <div ref="panesEl" class="panes">
+          <HomePane
+            v-show="view === 'home'"
             :projects="projects"
-            :selected-id="selectedProjectId"
-            :loading="projectsLoading"
-            @select="selectProject"
+            @error="reportError"
+            @open-project="openProjectFromHome"
+            @open-usage="setView('usage')"
           />
-          <SplitHandle
-            kind="projects"
-            :width="paneWidths.projects"
-            @start="beginResize"
-            @drag="applyResize('projects', $event)"
-            @commit="endResize"
-            @reset="resetResize('projects')"
-          />
-          <SessionsPane
-            :style="{ width: `${paneWidths.sessions}px` }"
-            :sessions="sessions"
-            :selected-id="selectedSessionId"
-            :loading="sessionsLoading"
-            :project="selectedProject"
-            :creating="creating"
-            @select="selectSession"
-            @create="startCreateSession"
-          />
-          <SplitHandle
-            kind="sessions"
-            :width="paneWidths.sessions"
-            @start="beginResize"
-            @drag="applyResize('sessions', $event)"
-            @commit="endResize"
-            @reset="resetResize('sessions')"
-          />
-          <NewSessionPanel
-            v-if="enginePickerOpen && selectedProject"
-            :project="selectedProject"
-            :engines="health"
-            :busy="creating"
-            :error="createError"
-            :recent="lastStartEngine"
-            @select="createSession"
-            @cancel="cancelCreateSession"
-          />
-          <SessionView
-            v-else
-            :session="selectedSession"
-            :has-project="!!selectedProject"
-            :jump-message-id="jumpTarget"
+          <div v-show="view === 'archive'" class="archive-view">
+            <ProjectsPane
+              :style="{ width: `${paneWidths.projects}px` }"
+              :projects="projects"
+              :selected-id="selectedProjectId"
+              :loading="projectsLoading"
+              @select="selectProject"
+            />
+            <SplitHandle
+              kind="projects"
+              :width="paneWidths.projects"
+              @start="beginResize"
+              @drag="applyResize('projects', $event)"
+              @commit="endResize"
+              @reset="resetResize('projects')"
+            />
+            <SessionsPane
+              :style="{ width: `${paneWidths.sessions}px` }"
+              :sessions="sessions"
+              :selected-id="selectedSessionId"
+              :loading="sessionsLoading"
+              :project="selectedProject"
+              :creating="creating"
+              @select="selectSession"
+              @create="startCreateSession"
+            />
+            <SplitHandle
+              kind="sessions"
+              :width="paneWidths.sessions"
+              @start="beginResize"
+              @drag="applyResize('sessions', $event)"
+              @commit="endResize"
+              @reset="resetResize('sessions')"
+            />
+            <NewSessionPanel
+              v-if="enginePickerOpen && selectedProject"
+              :project="selectedProject"
+              :engines="health"
+              :busy="creating"
+              :error="createError"
+              :recent="lastStartEngine"
+              @select="createSession"
+              @cancel="cancelCreateSession"
+            />
+            <SessionView
+              v-else
+              :session="selectedSession"
+              :has-project="!!selectedProject"
+              :jump-message-id="jumpTarget"
+              @error="reportError"
+              @settled="onSessionSettled"
+              @open-workbench="openInWorkbench"
+              @jump-consumed="pendingJump = null"
+              @status="archiveStatus = $event"
+              @branch-changed="onBranchChanged"
+            />
+          </div>
+          <WorkbenchPane
+            v-show="view === 'workbench'"
+            ref="workbenchRef"
+            :projects="projects"
+            :health="health"
             @error="reportError"
             @settled="onSessionSettled"
-            @open-workbench="openInWorkbench"
-            @jump-consumed="pendingJump = null"
-            @status="archiveStatus = $event"
-            @branch-changed="onBranchChanged"
+            @status="wbStatus = $event"
+          />
+          <SearchPane
+            v-show="view === 'search'"
+            :projects="projects"
+            @error="reportError"
+            @open-hit="openSearchHit"
+          />
+          <RacePane
+            v-show="view === 'race'"
+            :projects="projects"
+            @error="reportError"
+            @open-session="openSessionByLocation"
+          />
+          <UsagePane v-show="view === 'usage'" @error="reportError" />
+          <WorkshopPane v-show="view === 'workshop'" @error="reportError" />
+          <AutomationPane
+            v-show="view === 'automation'"
+            @error="reportError"
+            @open-session="openSessionByLocation"
           />
         </div>
-        <WorkbenchPane
-          v-show="view === 'workbench'"
-          ref="workbenchRef"
-          :projects="projects"
-          :health="health"
-          @error="reportError"
-          @settled="onSessionSettled"
-          @status="wbStatus = $event"
-        />
-        <SearchPane
-          v-show="view === 'search'"
-          :projects="projects"
-          @error="reportError"
-          @open-hit="openSearchHit"
-        />
-        <RacePane
-          v-show="view === 'race'"
-          :projects="projects"
-          @error="reportError"
-          @open-session="openSessionByLocation"
-        />
-        <UsagePane v-show="view === 'usage'" @error="reportError" />
-        <WorkshopPane v-show="view === 'workshop'" @error="reportError" />
-        <AutomationPane
-          v-show="view === 'automation'"
-          @error="reportError"
-          @open-session="openSessionByLocation"
-        />
       </div>
     </div>
 
