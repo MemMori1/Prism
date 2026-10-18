@@ -376,6 +376,26 @@ fn write_file(root: &Path, args: &Value) -> ToolOutcome {
     }
 }
 
+/// 文件与 old_string 的行尾对不上时，给出「照文件行尾换一遍」的版本。
+///
+/// 只处理两种明确的错配：文件 CRLF 而 old_string 只有 \n（read_file 之后
+/// 照着抄的常态），以及反过来文件 LF 而 old_string 带着 \r。换过之后 new_string
+/// 也一起换，免得改完一段就混出行尾来。
+fn line_ending_variant(text: &str, old: &str, new: &str) -> Option<(String, String)> {
+    let file_crlf = text.contains("\r\n");
+    if file_crlf && old.contains('\n') && !old.contains('\r') {
+        return Some((to_crlf(old), to_crlf(new)));
+    }
+    if !file_crlf && old.contains("\r\n") {
+        return Some((old.replace("\r\n", "\n"), new.replace("\r\n", "\n")));
+    }
+    None
+}
+
+fn to_crlf(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
 fn edit_file(root: &Path, args: &Value) -> ToolOutcome {
     let Some(path) = str_arg(args, "path") else {
         return ToolOutcome::fail("缺少 path");
@@ -396,11 +416,24 @@ fn edit_file(root: &Path, args: &Value) -> ToolOutcome {
     let Ok(text) = std::fs::read_to_string(&target) else {
         return ToolOutcome::fail(format!("读不到 {}", target.display()));
     };
+    // read_file 只给行内容（看不到 \r），模型照着抄回来的 old_string 在 CRLF
+    // 文件里就永远匹配不上——按文件行尾换一遍再试。
+    let variant = line_ending_variant(&text, old, new);
+    let (old, new) = match &variant {
+        Some((variant_old, variant_new)) => (variant_old.as_str(), variant_new.as_str()),
+        None => (old, new),
+    };
     let count = text.matches(old).count();
     if count == 0 {
-        return ToolOutcome::fail(
-            "没有找到与 old_string 完全一致的片段：请带上完整缩进与上下文行再试",
-        );
+        // 行尾对不上是常见坑，失败时把话说明白：别让模型反复试错。
+        let hint = if variant.is_some() {
+            "；这个文件是 CRLF 行尾（read_file 里看不到 \\r），已按 \\r\\n 试过一次仍不匹配"
+        } else {
+            ""
+        };
+        return ToolOutcome::fail(format!(
+            "没有找到与 old_string 完全一致的片段{hint}：请带上完整缩进与上下文行再试"
+        ));
     }
     let replace_all = bool_arg(args, "replace_all");
     if count > 1 && !replace_all {
@@ -708,6 +741,71 @@ mod tests {
         );
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "y\ny\n");
+    }
+
+    /// CRLF 文件：read_file 里看不到 \r，模型照抄回来的 old_string 也必须能改。
+    #[test]
+    fn edit_file_accepts_lf_old_string_in_crlf_file() {
+        let dir = temp_dir("crlf");
+        let root = dir.to_string_lossy().to_string();
+        write_file(
+            &dir,
+            &json!({ "path": "c.txt", "content": "alpha\r\nbeta\r\ngamma\r\n" }),
+        );
+        // 读出来是这个样子：看不到 \r，模型也只能照着这样子抄。
+        let read = execute(&root, "read_file", r#"{"path":"c.txt"}"#);
+        assert!(read.text.contains("1→alpha"), "{}", read.text);
+
+        let outcome = execute(
+            &root,
+            "edit_file",
+            r#"{"path":"c.txt","old_string":"alpha\nbeta","new_string":"one\ntwo"}"#,
+        );
+        assert!(outcome.error.is_none(), "{}", outcome.text);
+        // 改完还是 CRLF：不能改一段就混出行尾来。
+        assert_eq!(
+            fs::read_to_string(dir.join("c.txt")).unwrap(),
+            "one\r\ntwo\r\ngamma\r\n"
+        );
+    }
+
+    /// 反过来也要认：文件是 LF，old_string 却带着 \r。
+    #[test]
+    fn edit_file_accepts_crlf_old_string_in_lf_file() {
+        let dir = temp_dir("lf");
+        let root = dir.to_string_lossy().to_string();
+        write_file(
+            &dir,
+            &json!({ "path": "d.txt", "content": "alpha\nbeta\n" }),
+        );
+        let outcome = execute(
+            &root,
+            "edit_file",
+            r#"{"path":"d.txt","old_string":"alpha\r\nbeta","new_string":"one\r\ntwo"}"#,
+        );
+        assert!(outcome.error.is_none(), "{}", outcome.text);
+        assert_eq!(
+            fs::read_to_string(dir.join("d.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+    }
+
+    /// 真的找不到时要把行尾这件事说出来，别让模型反复试错。
+    #[test]
+    fn edit_file_failure_mentions_crlf() {
+        let dir = temp_dir("crlfmiss");
+        let root = dir.to_string_lossy().to_string();
+        write_file(
+            &dir,
+            &json!({ "path": "e.txt", "content": "alpha\r\nbeta\r\n" }),
+        );
+        let outcome = execute(
+            &root,
+            "edit_file",
+            r#"{"path":"e.txt","old_string":"alpha\ngamma","new_string":"x"}"#,
+        );
+        assert!(outcome.error.is_some());
+        assert!(outcome.text.contains("CRLF"), "{}", outcome.text);
     }
 
     #[test]
