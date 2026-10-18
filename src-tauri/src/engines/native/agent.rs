@@ -446,8 +446,8 @@ fn run_turns(
             &stop,
         ) {
             Ok(outcome) => outcome,
-            Err(error) if error == provider::CANCELLED => return Ok(Stop::Cancelled),
-            Err(error) => return Err(error),
+            Err(provider::ChatError::Cancelled) => return Ok(Stop::Cancelled),
+            Err(error) => return Err(error.to_string()),
         };
         // 第一轮就记下模型：即使后面撞上轮次上限，回显也是对的。
         let _ = store::set_model(raw, model, &provider.id);

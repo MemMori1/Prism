@@ -7,7 +7,7 @@
 use super::config::{ModelEntry, ProviderConfig};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Usage {
@@ -200,7 +200,11 @@ fn env_proxy() -> Option<String> {
 }
 
 fn client() -> Result<reqwest::blocking::Client, String> {
+    // 连不上就别耗着；普通请求（探活、拉模型清单）总超时 600s。
+    // 流式那一路（chat）会自己覆盖总超时并加空闲超时：长回复不该被
+    // 10 分钟从中间砍断，卡死的连接也不该被陪到 10 分钟。
     let mut builder = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(600));
     if let Some(url) = env_proxy() {
         let mut direct = DIRECT_HOSTS.to_string();
@@ -237,19 +241,59 @@ fn describe(error: &(dyn std::error::Error + 'static)) -> String {
     parts.join(" → ")
 }
 
-/// 被用户叫停时的返回值；上层靠它区分「出错」和「中断」。
-pub const CANCELLED: &str = "已停止本次回复";
+/// 被用户叫停时给用户看的说法（界面文案）。
+const CANCELLED: &str = "已停止本次回复";
 
-fn check_stop(should_stop: &dyn Fn() -> bool) -> Result<(), String> {
+/// 一轮对话的失败：用户叫停不算「出错」，上层要能分开处理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatError {
+    /// 用户按了停止：正常收工，界面上不标红。
+    Cancelled,
+    /// 真出错：网络、HTTP 状态、解析、空闲超时……
+    Failed(String),
+}
+
+impl std::fmt::Display for ChatError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChatError::Cancelled => formatter.write_str(CANCELLED),
+            ChatError::Failed(error) => formatter.write_str(error),
+        }
+    }
+}
+
+/// 内部那些 format! 出来的说明可以直接 `?` 上来。
+impl From<String> for ChatError {
+    fn from(error: String) -> Self {
+        ChatError::Failed(error)
+    }
+}
+
+fn failed(message: impl Into<String>) -> ChatError {
+    ChatError::Failed(message.into())
+}
+
+fn check_stop(should_stop: &dyn Fn() -> bool) -> Result<(), ChatError> {
     if should_stop() {
-        Err(CANCELLED.to_string())
+        Err(ChatError::Cancelled)
     } else {
         Ok(())
     }
 }
 
+/// 流式收包的轮询粒度：停止按钮的响应延迟就是它（不用等下一行）。
+const STREAM_POLL: Duration = Duration::from_millis(200);
+/// 空闲多久算「服务端卡住了」。给思考型模型留足首字延迟，但绝不再陪跑总超时。
+/// 测试里调短：不然这个用例得跑五分钟。
+#[cfg(not(test))]
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+#[cfg(test)]
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_millis(400);
+/// 单轮流式请求的兜底上限（正常写代码远用不到，防的是永远不结束的流）。
+const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(3600);
+
 /// 流式跑一轮。`on_text` / `on_reasoning` 会在收到增量时被调用；
-/// `should_stop` 在发请求前与每收到一行 SSE 时都会问一次，返回 true 就收工。
+/// `should_stop` 在发请求前与流中每 200ms 都会问一次，返回 true 就收工。
 pub fn chat(
     provider: &ProviderConfig,
     model: &str,
@@ -258,9 +302,9 @@ pub fn chat(
     on_text: &mut dyn FnMut(&str),
     on_reasoning: &mut dyn FnMut(&str),
     should_stop: &dyn Fn() -> bool,
-) -> Result<Outcome, String> {
+) -> Result<Outcome, ChatError> {
     if !provider.usable() {
-        return Err("这个模型服务还没填地址".to_string());
+        return Err(failed("这个模型服务还没填地址"));
     }
     check_stop(should_stop)?;
     let mut body = json!({
@@ -273,25 +317,28 @@ pub fn chat(
         body["tool_choice"] = json!("auto");
     }
 
+    // 流式请求单独给总超时：客户端那个 600s 是给普通请求的，
+    // 长时间吐字的一轮不该被它从中间砍断。
     let mut request = client()?
         .post(provider.endpoint())
         .header("Content-Type", "application/json")
+        .timeout(STREAM_TOTAL_TIMEOUT)
         .json(&body);
     if !provider.api_key.trim().is_empty() {
         request = request.bearer_auth(provider.api_key.trim());
     }
     let response = request
         .send()
-        .map_err(|error| format!("请求失败：{}", describe(&error)))?;
+        .map_err(|error| failed(format!("请求失败：{}", describe(&error))))?;
     check_stop(should_stop)?;
 
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().unwrap_or_default();
-        return Err(format!(
+        return Err(failed(format!(
             "模型返回 {status}：{}",
             truncate(detail.trim(), 400)
-        ));
+        )));
     }
 
     let is_json = response
@@ -305,7 +352,7 @@ pub fn chat(
     if is_json {
         let value: Value = response
             .json()
-            .map_err(|error| format!("解析响应失败：{error}"))?;
+            .map_err(|error| failed(format!("解析响应失败：{error}")))?;
         let delta = acc.apply(&value);
         if !delta.text.is_empty() {
             on_text(&delta.text);
@@ -316,32 +363,69 @@ pub fn chat(
         return Ok(acc.into_outcome());
     }
 
+    // 读流丢给一个线程，主循环按 200ms 的粒度收：既不用陪服务端卡到总超时，
+    // 停止按钮也不必等下一行才生效。主循环提前返回时这个线程会在下一次
+    // 投递失败后收工（最坏也就是等请求总超时把它从 read 里拽出来）。
     let reader = BufReader::new(response);
-    for line in reader.lines() {
-        // 每个分片都问一次：模型吐字很密，这样中断延迟基本就是一行的时间。
+    // 有界通道当作背压：本地服务端吐得比解析快时，读线程会自己等一下。
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<String, String>>(1024);
+    let worker = std::thread::spawn(move || {
+        for line in reader.lines() {
+            let item = match line {
+                Ok(line) => Ok(line),
+                Err(error) => Err(format!("读取流失败：{error}")),
+            };
+            let broken = item.is_err();
+            if sender.send(item).is_err() || broken {
+                break;
+            }
+        }
+    });
+
+    let mut last = Instant::now();
+    loop {
         check_stop(should_stop)?;
-        let line = line.map_err(|error| format!("读取流失败：{error}"))?;
-        let Some(payload) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let payload = payload.trim();
-        if payload.is_empty() || payload == "[DONE]" {
-            continue;
-        }
-        let Ok(chunk) = serde_json::from_str::<Value>(payload) else {
-            continue;
-        };
-        if let Some(error) = chunk.get("error") {
-            return Err(format!("模型返回错误：{}", error));
-        }
-        let delta = acc.apply(&chunk);
-        if !delta.text.is_empty() {
-            on_text(&delta.text);
-        }
-        if !delta.reasoning.is_empty() {
-            on_reasoning(&delta.reasoning);
+        match receiver.recv_timeout(STREAM_POLL) {
+            Ok(Ok(line)) => {
+                last = Instant::now();
+                let Some(payload) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let payload = payload.trim();
+                if payload.is_empty() || payload == "[DONE]" {
+                    continue;
+                }
+                let Ok(chunk) = serde_json::from_str::<Value>(payload) else {
+                    continue;
+                };
+                if let Some(error) = chunk.get("error") {
+                    return Err(failed(format!("模型返回错误：{error}")));
+                }
+                let delta = acc.apply(&chunk);
+                if !delta.text.is_empty() {
+                    on_text(&delta.text);
+                }
+                if !delta.reasoning.is_empty() {
+                    on_reasoning(&delta.reasoning);
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                return Err(failed(error));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if last.elapsed() > STREAM_IDLE_TIMEOUT {
+                    return Err(failed(format!(
+                        "模型 {} 秒没有任何响应，已放弃这一轮（网络或服务端卡住了）",
+                        STREAM_IDLE_TIMEOUT.as_secs()
+                    )));
+                }
+            }
+            // 发送端收工＝流正常读完。
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+    let _ = worker.join();
     Ok(acc.into_outcome())
 }
 
@@ -619,7 +703,56 @@ mod tests {
             &|| true,
         )
         .expect_err("应当直接返回中断");
-        assert_eq!(error, CANCELLED);
+        assert_eq!(error, ChatError::Cancelled);
+        // 界面上还是原来那句话。
+        assert_eq!(error.to_string(), "已停止本次回复");
+    }
+
+    /// 流卡住时按空闲超时收工（不再是陪着等总超时），而且算「出错」不算中断。
+    #[test]
+    fn chat_gives_up_on_idle_stream() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let port = listener.local_addr().expect("取端口").port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+                // 先给一个正常分片，然后卡住不再吐字。
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n";
+                let _ = stream.write_all(format!("{head}{chunk}").as_bytes());
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        });
+
+        let config = ProviderConfig {
+            id: "idle".to_string(),
+            label: "idle".to_string(),
+            protocol: "openai".to_string(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: String::new(),
+            models: vec![ModelEntry::new("m")],
+        };
+        let mut text = String::new();
+        let started = Instant::now();
+        let error = chat(
+            &config,
+            "m",
+            &[json!({ "role": "user", "content": "hi" })],
+            &[],
+            &mut |delta: &str| text.push_str(delta),
+            &mut |_delta: &str| {},
+            &|| false,
+        )
+        .expect_err("卡住的流应当被放弃");
+        assert!(matches!(error, ChatError::Failed(_)), "{error:?}");
+        assert!(error.to_string().contains("没有任何响应"), "{error}");
+        assert_eq!(text, "你", "已经收到的增量要留住");
+        assert!(started.elapsed() < Duration::from_secs(10), "别等总超时");
     }
 
     /// `GET /models` 的完整链路：拼路径 → 带 Bearer → 解析。
