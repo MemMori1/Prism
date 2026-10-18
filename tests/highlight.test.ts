@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { highlightCode, highlightJson } from '../src/highlight'
+import { highlightCode, highlightJson, highlightLines, languageOfPath } from '../src/highlight'
 
 describe('highlightJson', () => {
   it('键、字符串、数字、字面量分别上色', () => {
@@ -53,9 +53,64 @@ describe('highlightCode', () => {
     expect(highlightCode('{"a":1}', 'json')).toContain('tok-key')
   })
 
-  it('其他语言只转义、不上色', () => {
+  it('其他语言按关键字上色，且照旧转义', () => {
     const html = highlightCode('const a = "<b>"', 'ts')
-    expect(html).toBe('const a = "&lt;b&gt;"')
-    expect(html).not.toContain('tok-')
+    expect(html).toContain('tok-keyword')
+    expect(html).toContain('&lt;b&gt;')
+    expect(html).not.toContain('<b>')
+  })
+
+  it('不认识的语言只转义', () => {
+    expect(highlightCode('const a = "<b>"', 'brainfuck')).toBe('const a = "&lt;b&gt;"')
+  })
+})
+
+describe('highlightLines', () => {
+  it('ts：关键字 / 字符串 / 注释 / 数字', () => {
+    const [line] = highlightLines('const a = "hi" // 注释 42', 'js')
+    expect(line).toContain('tok-keyword">const')
+    expect(line).toContain('tok-string">"hi"')
+    expect(line).toContain('tok-comment">// 注释 42')
+  })
+
+  it('块注释跨行传递', () => {
+    const lines = highlightLines('/* 开头\n  中间\n*/\nconst y = 1', 'js')
+    expect(lines[0]).toContain('tok-comment')
+    expect(lines[1]).toContain('tok-comment')
+    expect(lines[2]).toContain('tok-comment')
+    expect(lines[3]).toContain('tok-keyword')
+  })
+
+  it('字符串里的关键字不上色', () => {
+    const [line] = highlightLines('"const"', 'js')
+    expect(line).toContain('tok-string')
+    expect(line).not.toContain('tok-keyword')
+  })
+
+  it('python 的 # 注释与 go 的 func', () => {
+    expect(highlightLines('# 说明', 'python')[0]).toContain('tok-comment')
+    expect(highlightLines('func main() {}', 'go')[0]).toContain('tok-keyword')
+  })
+
+  it('text 一律转义、不上色', () => {
+    expect(highlightLines('<div>', 'text')[0]).toBe('&lt;div&gt;')
+  })
+
+  it('行数与原文一致（含末尾空行）', () => {
+    expect(highlightLines('a\nb\n', 'text')).toHaveLength(3)
+  })
+})
+
+describe('languageOfPath', () => {
+  it('按扩展名归类', () => {
+    expect(languageOfPath('src/a.ts')).toBe('js')
+    expect(languageOfPath('src/a.vue')).toBe('js')
+    expect(languageOfPath('src/a.rs')).toBe('rust')
+    expect(languageOfPath('a.py')).toBe('python')
+    expect(languageOfPath('a.sh')).toBe('shell')
+    expect(languageOfPath('a.css')).toBe('css')
+    expect(languageOfPath('a.json')).toBe('json')
+    expect(languageOfPath('README.md')).toBe('text')
+    expect(languageOfPath(null)).toBe('text')
   })
 })

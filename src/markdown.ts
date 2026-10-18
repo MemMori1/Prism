@@ -1,4 +1,5 @@
 import katex from 'katex'
+import { looksLikePath } from './changes'
 import { highlightCode } from './highlight'
 import { marked, type TokenizerAndRendererExtension, type Tokens } from 'marked'
 import { basename } from './format'
@@ -160,6 +161,20 @@ marked.use({
   renderer: {
     html(token: Tokens.HTML | Tokens.Tag): string {
       return escapeHtml(token.text)
+    },
+    /**
+     * 行内代码：像文件路径的做成可点按钮（点开右侧文件面板）。
+     * 判定见 changes.ts 的 looksLikePath——拿不准就当普通代码，别乱加链接。
+     */
+    codespan(token: Tokens.Codespan): string {
+      const text = token.text
+      if (looksLikePath(text)) {
+        return (
+          `<button class="md-file" type="button" data-path="${escapeAttr(text)}"` +
+          ` title="打开文件：${escapeAttr(text)}"><code>${escapeHtml(text)}</code></button>`
+        )
+      }
+      return `<code>${escapeHtml(text)}</code>`
     },
     code(token: Tokens.Code): string {
       const lang = (token.lang ?? '').trim().split(/\s+/)[0]?.toLowerCase() ?? ''

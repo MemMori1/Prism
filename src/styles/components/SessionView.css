@@ -170,7 +170,8 @@
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
-.open-wb-btn {
+.open-wb-btn,
+.changes-btn {
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -190,12 +191,15 @@
     background 0.14s ease;
 }
 
-.open-wb-btn svg {
+.open-wb-btn svg,
+.changes-btn svg {
   width: 13.5px;
   height: 13.5px;
 }
 
-.open-wb-btn:hover {
+.open-wb-btn:hover,
+.changes-btn:hover,
+.changes-btn.on {
   color: var(--accent-text);
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
   background: var(--accent-soft);

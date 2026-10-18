@@ -4,10 +4,13 @@ import type {
   ArtifactData,
   AssetFile,
   AssetItem,
+  ChangeReport,
   CreatedSession,
   EngineCatalog,
   EngineHealth,
+  FileDiff,
   FileHit,
+  FileText,
   GitBranches,
   GitInfo,
   GitSnapshot,
@@ -81,6 +84,19 @@ export const api = {
   workshopRead: (path: string) => invoke<AssetFile>('workshop_read', { path }),
   openPath: (path: string) => invoke<void>('open_path', { path }),
   readArtifact: (path: string) => invoke<ArtifactData>('read_artifact', { path }),
+  /** 会话目录的未提交改动（文件变更追踪）。 */
+  changesList: (directory: string) =>
+    invoke<ChangeReport>('changes_list', { directory }),
+  /** 单个文件的统一 diff。 */
+  changesDiff: (directory: string, path: string) =>
+    invoke<FileDiff>('changes_diff', { directory, path }),
+  /** 文件预览（文本；二进制只回标记）。 */
+  fileText: (path: string) => invoke<FileText>('file_text', { path }),
+  /** 在系统文件管理器里定位这个文件。 */
+  revealPath: (path: string) => invoke<void>('reveal_path', { path }),
+  /** 保存文本文件（只允许会话目录 / 仓库根之内的已存在文件）。 */
+  writeText: (path: string, text: string, directory: string) =>
+    invoke<number>('write_text', { path, text, directory }),
   annotationsGet: () => invoke<AnnotationStore>('annotations_get'),
   annotationUpdate: (
     sessionId: string,

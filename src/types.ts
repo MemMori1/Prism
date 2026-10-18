@@ -77,6 +77,46 @@ export interface TurnTokens {
 }
 
 /** 本地交付物内容（HTML / SVG / 图片）。 */
+/** 会话目录里的一条未提交改动（git 工作树口径）。 */
+export interface ChangeFile {
+  /** 绝对路径。 */
+  path: string
+  /** 相对仓库根。 */
+  rel: string
+  status: 'added' | 'modified' | 'deleted' | 'renamed'
+  /** 新文件 / 未跟踪：diff 由内容拼。 */
+  untracked: boolean
+  additions: number
+  deletions: number
+  binary: boolean
+}
+
+export interface ChangeReport {
+  isRepo: boolean
+  root: string | null
+  branch: string | null
+  files: ChangeFile[]
+  additions: number
+  deletions: number
+  truncated: boolean
+}
+
+export interface FileDiff {
+  rel: string
+  patch: string
+  truncated: boolean
+  binary: boolean
+}
+
+/** 文件预览内容。 */
+export interface FileText {
+  path: string
+  text: string
+  size: number
+  truncated: boolean
+  binary: boolean
+}
+
 export interface ArtifactData {
   kind: string
   name: string

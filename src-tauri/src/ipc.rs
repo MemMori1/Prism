@@ -867,6 +867,33 @@ pub async fn git_snapshot(directory: String) -> Result<GitSnapshot, String> {
         .map_err(|cause| cause.to_string())?
 }
 
+/// 会话目录的未提交改动（文件变更追踪）。
+#[tauri::command]
+pub async fn changes_list(directory: String) -> Result<crate::changes::ChangeReport, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::changes::report(&directory))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 单个文件的统一 diff（新文件按内容拼）。
+#[tauri::command]
+pub async fn changes_diff(
+    directory: String,
+    path: String,
+) -> Result<crate::changes::FileDiff, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::changes::diff(&directory, &path))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 文件预览：返回文本（二进制只回标记，不解码）。
+#[tauri::command]
+pub async fn file_text(path: String) -> Result<crate::changes::FileText, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::changes::read_text(&path))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
 /// 本地分支列表（会话头部的分支切换弹层）。
 #[tauri::command]
 pub async fn git_branches(directory: String) -> Result<GitBranches, String> {
@@ -1128,6 +1155,49 @@ pub async fn open_path(path: String) -> Result<(), String> {
     let opener = "xdg-open";
     std::process::Command::new(opener)
         .arg(&target)
+        .spawn()
+        .map_err(|cause| format!("打开失败：{cause}"))?;
+    Ok(())
+}
+
+/// 保存文本文件（编辑器用；只允许会话目录 / 仓库根之内的已存在文件）。
+#[tauri::command]
+pub async fn write_text(
+    path: String,
+    text: String,
+    directory: String,
+) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::changes::write_text(&path, &text, &directory))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 在文件管理器里显示这个文件（Finder / 资源管理器 / xdg-open）。
+#[tauri::command]
+pub async fn reveal_path(path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(format!("路径不存在：{path}"));
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg("-R").arg(&path);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("explorer");
+        command.arg(format!("/select,{path}"));
+        command
+    };
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(target.parent().unwrap_or(&target));
+        command
+    };
+    command
         .spawn()
         .map_err(|cause| format!("打开失败：{cause}"))?;
     Ok(())

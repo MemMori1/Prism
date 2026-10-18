@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
+import { joinPath } from '../changes'
 import { copyPlainText } from '../clipboard'
+import ChangesPane from './ChangesPane.vue'
 import { annotationFor, ensureAnnotations, isStarred, setStar, setTitle, tagsOf, titleOf } from '../annotations'
 import {
   applyCompletion,
@@ -98,6 +100,11 @@ const stick = ref(true)
 const highlightId = ref<string | null>(null)
 /** 交付物就地预览：当前打开的本地文件路径。 */
 const artifactPath = ref<string | null>(null)
+
+/** 「文件」抽屉：看改动 / 全部文件，也能被聊天里的路径直接点开。 */
+const changesOpen = ref(false)
+/** 聊天里点了某个路径：抽屉打开后直接定位到它（绝对路径）。 */
+const fileTarget = ref<string | null>(null)
 /** 未吸附底部时累计的新消息数（回底浮标角标）。 */
 const unseen = ref(0)
 
@@ -1010,6 +1017,15 @@ async function copyCodeBlock(button: HTMLElement, text: string) {
   )
 }
 
+/** 聊天里点到文件路径：相对路径按会话目录补全，然后开抽屉定位。 */
+function openFileLink(raw: string) {
+  const path = raw.trim()
+  if (!path) return
+  const directory = props.session?.directory ?? ''
+  fileTarget.value = path.startsWith('/') ? path : joinPath(directory, path)
+  changesOpen.value = true
+}
+
 function onTimelineClick(event: MouseEvent) {
   const target = event.target
   if (!(target instanceof HTMLElement)) return
@@ -1018,6 +1034,13 @@ function onTimelineClick(event: MouseEvent) {
   if (copyBtn instanceof HTMLElement) {
     const code = copyBtn.closest('.md-code')?.querySelector('pre code')
     if (code) void copyCodeBlock(copyBtn, code.textContent ?? '')
+    return
+  }
+
+  const fileLink = target.closest('.md-file')
+  if (fileLink instanceof HTMLElement) {
+    event.preventDefault()
+    openFileLink(fileLink.dataset.path ?? '')
     return
   }
 
@@ -1346,6 +1369,27 @@ watch(
               </button>
             </div>
             <button
+              class="changes-btn"
+              :class="{ on: changesOpen }"
+              title="文件：改了什么 + 项目里的全部文件（可预览 / 外部打开）"
+              @click.stop="changesOpen = !changesOpen"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M6 3.5h8l5 5v12a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 20.5v-15A2 2 0 0 1 7 3.5Z" />
+                <path d="M14 3.5V9h5" />
+                <path d="M8.5 13.5h5M8.5 17h7" />
+              </svg>
+              文件
+            </button>
+            <button
               class="open-wb-btn"
               title="在工作台打开：多列并行盯着多个会话"
               @click="emit('openWorkbench', session.id)"
@@ -1424,6 +1468,7 @@ watch(
               :session-id="session.id"
               :highlighted="record.id === highlightId"
               :duration-ms="durations.get(record.id) ?? null"
+              @open-file="openFileLink"
             />
             <LiveTurnView
               v-if="showLive"
@@ -1744,6 +1789,14 @@ watch(
       </footer>
     </template>
     <ArtifactViewer :path="artifactPath" @close="artifactPath = null" />
+    <ChangesPane
+      v-if="changesOpen && session"
+      :key="fileTarget ?? 'changes'"
+      :directory="session.directory"
+      :running="running"
+      :initial-path="fileTarget"
+      @close="changesOpen = false; fileTarget = null"
+    />
   </main>
 </template>
 

@@ -249,3 +249,14 @@
   flex-direction: column;
   gap: 6px;
 }
+
+/* 头部摘要是文件路径：能点开右侧文件面板 */
+.tool-summary.tool-file {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.tool-summary.tool-file:hover {
+  color: var(--accent-text);
+}

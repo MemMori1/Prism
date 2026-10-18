@@ -1,6 +1,7 @@
 mod annotations;
 mod artifact;
 mod catalog;
+mod changes;
 mod engines;
 mod files;
 mod gitinfo;
@@ -37,6 +38,11 @@ pub fn run() {
             ipc::session_shell,
             ipc::session_command,
             ipc::project_files,
+            ipc::changes_list,
+            ipc::changes_diff,
+            ipc::file_text,
+            ipc::reveal_path,
+            ipc::write_text,
             ipc::git_snapshot,
             ipc::git_branches,
             ipc::git_switch_branch,

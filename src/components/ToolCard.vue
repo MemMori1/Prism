@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { api } from '../api'
 import type { TimelinePart, ToolDetail } from '../types'
+import { looksLikePath } from '../changes'
 import { parsePatch, patchStats, type DiffRow } from '../diff'
 import { highlightJson } from '../highlight'
 import { basename } from '../format'
@@ -12,6 +13,11 @@ const props = defineProps<{
   messageId: string
   /** 运行中（live）工具自带详情，跳过 DB 拉取。 */
   liveDetail?: ToolDetail | null
+}>()
+
+const emit = defineEmits<{
+  /** 头部摘要是个文件路径时，点它 = 打开文件抽屉。 */
+  (e: 'open-file', path: string): void
 }>()
 
 const expanded = ref(false)
@@ -184,6 +190,9 @@ const editFallback = computed(() => {
   return { before: before ?? '（空）', after: after ?? '（空）' }
 })
 
+/** 头部摘要是不是一个文件路径（是就做成可点的）。 */
+const summaryIsPath = computed(() => looksLikePath(props.part.summary ?? ''))
+
 /** 主块已完整覆盖的简单工具不再重复展示原始 JSON。 */
 const rawInput = computed(() => {
   const source = input.value
@@ -207,7 +216,15 @@ function signOf(type: DiffRow['type']): string {
     <button class="tool-head" @click="toggle">
       <span class="tool-glyph">{{ toolGlyph }}</span>
       <span class="tool-name">{{ part.name }}</span>
-      <span v-if="part.summary" class="tool-summary" :title="part.summary">{{ part.summary }}</span>
+      <span
+        v-if="part.summary && summaryIsPath"
+        class="tool-summary tool-file"
+        :title="`打开 ${part.summary}`"
+        @click.stop="emit('open-file', part.summary)"
+      >{{ part.summary }}</span>
+      <span v-else-if="part.summary" class="tool-summary" :title="part.summary">
+        {{ part.summary }}
+      </span>
       <span v-if="statusInfo" class="tool-status" :class="`tone-${statusInfo.tone}`">
         {{ statusInfo.label }}
       </span>

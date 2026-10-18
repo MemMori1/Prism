@@ -58,6 +58,33 @@
   border-radius: 4px;
 }
 
+/* 行内代码里的文件路径：看着还是代码，鼠标上去才知道能点。 */
+.md .md-file {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--code-bg);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+
+.md .md-file code {
+  background: none;
+  padding: 0;
+  font-size: 0.92em;
+}
+
+.md .md-file:hover {
+  border-color: var(--border-strong);
+  color: var(--accent-text);
+}
+
 .md pre {
   margin: 8px 0;
   padding: 10px 12px;
@@ -198,6 +225,15 @@
 .tok-literal {
   color: var(--muted);
   font-style: italic;
+}
+
+.tok-comment {
+  color: var(--faint);
+  font-style: italic;
+}
+
+.tok-keyword {
+  color: var(--accent-strong);
 }
 
 .md blockquote {

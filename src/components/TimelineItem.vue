@@ -21,6 +21,11 @@ const props = withDefaults(
   { highlighted: false, durationMs: null, showMeta: true },
 )
 
+const emit = defineEmits<{
+  /** 工具卡里点了文件路径：交给会话视图开文件抽屉。 */
+  (e: 'open-file', path: string): void
+}>()
+
 /** 复制按钮要复制的内容：这一轮的正文本体。 */
 const copyText = computed(() => recordText(props.record))
 </script>
@@ -67,6 +72,7 @@ const copyText = computed(() => recordText(props.record))
             :part="part"
             :session-id="sessionId"
             :message-id="record.id"
+            @open-file="emit('open-file', $event)"
           />
           <div
             v-else-if="part.kind === 'text' && part.text.trim()"
