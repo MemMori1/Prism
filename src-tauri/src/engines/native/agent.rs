@@ -146,6 +146,9 @@ fn owned_later(history: &[store::StoredMessage], index: usize, call_id: &str) ->
 /// OpenAI 兼容端判成孤立 tool 消息（400）。这里按 call_id 重新配对：先挂起
 /// 暂时没有归属的工具结果，等对应的 assistant 出现时补在它后面；到用户
 /// 消息还配不上的直接丢掉——宁可少一条工具结果，也别整轮请求失败。
+///
+/// 末尾还有一道 `drop_unanswered_tool_calls`：中断落库会留下「只有 tool_calls
+/// 没有结果」的 assistant，那同样会让整轮请求 400。
 fn provider_messages(directory: &str, history: &[store::StoredMessage]) -> Vec<Value> {
     let mut messages = vec![json!({ "role": "system", "content": system_prompt(directory) })];
     let mut orphans: Vec<&store::StoredMessage> = Vec::new();
@@ -187,7 +190,53 @@ fn provider_messages(directory: &str, history: &[store::StoredMessage]) -> Vec<V
             _ => {}
         }
     }
+    drop_unanswered_tool_calls(&mut messages);
     messages
+}
+
+/// 结尾兜底：带 tool_calls 的 assistant 后面必须紧跟着每个 call 的工具结果
+/// （OpenAI 兼容端硬要求）。缺哪个就从声明里摘掉哪个——摘掉只是少一段工具
+/// 上下文，留着就是整轮请求发不出去、会话从此卡死。
+///
+/// 产生这种半截数据的情形：回复中断、进程被杀、停止正好卡在工具落库前后。
+fn drop_unanswered_tool_calls(messages: &mut [Value]) {
+    let mut index = 0;
+    while index < messages.len() {
+        if messages[index]["role"] != "assistant" {
+            index += 1;
+            continue;
+        }
+        let Some(calls) = messages[index]["tool_calls"].as_array().cloned() else {
+            index += 1;
+            continue;
+        };
+        // 工具结果只能紧跟在 assistant 后面，所以只看后面这一串。
+        let mut cursor = index + 1;
+        let mut answered: Vec<String> = Vec::new();
+        while cursor < messages.len() && messages[cursor]["role"] == "tool" {
+            if let Some(id) = messages[cursor]["tool_call_id"].as_str() {
+                answered.push(id.to_string());
+            }
+            cursor += 1;
+        }
+        let kept: Vec<Value> = calls
+            .into_iter()
+            .filter(|call| {
+                call["id"]
+                    .as_str()
+                    .map(|id| answered.iter().any(|item| item == id))
+                    .unwrap_or(false)
+            })
+            .collect();
+        if kept.is_empty() {
+            if let Some(object) = messages[index].as_object_mut() {
+                object.remove("tool_calls");
+            }
+        } else {
+            messages[index]["tool_calls"] = Value::Array(kept);
+        }
+        index = cursor.max(index + 1);
+    }
 }
 
 /// 工具卡摘要（与前端 `summarizeToolInput` 的取值顺序保持一致）。
@@ -642,18 +691,68 @@ mod tests {
         assert_eq!(list.len(), 2, "只剩 system + user");
     }
 
+    /// 带结果的 tool_calls 要原样回放（工具上下文靠它接上）。
     #[test]
     fn assistant_tool_calls_are_replayed() {
-        let mut assistant = message("assistant", "查一下");
-        assistant.tool_calls = vec![store::StoredToolCall {
-            id: "c1".to_string(),
-            name: "grep".to_string(),
-            arguments: r#"{"pattern":"x"}"#.to_string(),
-        }];
-        let list = provider_messages("/tmp/demo", &[assistant]);
-        let calls = list[1]["tool_calls"].as_array().expect("应有 tool_calls");
+        let history = vec![
+            message("user", "查一下"),
+            assistant_with_call("c1"),
+            tool_result("c1"),
+        ];
+        let list = provider_messages("/tmp/demo", &history);
+        let calls = list[2]["tool_calls"].as_array().expect("应有 tool_calls");
         assert_eq!(calls[0]["function"]["name"], "grep");
         assert_eq!(calls[0]["id"], "c1");
+        assert_eq!(list[3]["tool_call_id"], "c1");
+    }
+
+    /// 只有 tool_calls、没有工具结果（回复中断 / 落库半截）时必须摘掉声明：
+    /// 留着它 OpenAI 兼容端会整轮 400，这个会话从此发不出消息。
+    #[test]
+    fn unanswered_tool_calls_are_dropped() {
+        let history = vec![message("user", "查一下"), assistant_with_call("c1")];
+        let list = provider_messages("/tmp/demo", &history);
+        assert_eq!(list.len(), 3);
+        assert!(
+            list[2]["tool_calls"].as_array().is_none(),
+            "没有工具结果的 tool_calls 必须摘掉：{}",
+            list[2]
+        );
+    }
+
+    /// 两个 call 只答了一个：有结果的那个照常回放，另一个摘掉。
+    #[test]
+    fn only_answered_tool_calls_survive() {
+        let mut assistant = assistant_with_call("c1");
+        assistant.tool_calls.push(store::StoredToolCall {
+            id: "c2".to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+        });
+        let history = vec![message("user", "查一下"), assistant, tool_result("c1")];
+        let list = provider_messages("/tmp/demo", &history);
+        let calls = list[2]["tool_calls"].as_array().expect("应保留 c1");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "c1");
+    }
+
+    /// 用户消息把配对切断后：前面那个 assistant 的 tool_calls 要摘掉，
+    /// 落单的工具结果也要丢掉——只丢结果、留下无应答的声明照样 400。
+    #[test]
+    fn tool_calls_split_by_user_message_are_dropped() {
+        let history = vec![
+            message("user", "第一步"),
+            assistant_with_call("c1"),
+            message("user", "算了"),
+            tool_result("c1"),
+        ];
+        let list = provider_messages("/tmp/demo", &history);
+        let roles: Vec<&str> = list[1..]
+            .iter()
+            .map(|item| item["role"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+        assert!(list[2]["tool_calls"].as_array().is_none(), "{}", list[2]);
     }
 
     #[test]
