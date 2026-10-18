@@ -400,12 +400,15 @@ fn run_turns(
     slot: &RunSlot,
 ) -> Result<Stop, String> {
     let specs = tools::specs();
+    // 历史只读一次：原来每轮都重读整份 messages.jsonl 再逐行解析，长会话
+    // 走一个工具循环就是平方级开销。本轮自己写进去的消息同步补进来，
+    // 下一轮看到的历史与磁盘一致。
+    let mut history = store::messages(raw);
 
     for ordinal in 0..max_turns {
         if slot.stopped() {
             return Ok(Stop::Cancelled);
         }
-        let history = store::messages(raw);
         let messages = provider_messages(directory, &history);
         let assistant_id = new_message_id();
 
@@ -579,30 +582,31 @@ fn run_turns(
         });
         // 顺序要紧：OpenAI 兼容协议要求带 tool_calls 的 assistant 排在它的
         // tool 结果之前，否则下一轮请求会被判成孤立 tool 消息（400）。
-        store::append(
-            raw,
-            &store::StoredMessage {
-                id: assistant_id,
-                role: "assistant".to_string(),
-                time: now_ms(),
-                text: outcome.text,
-                parts,
-                tool_calls: outcome
-                    .tool_calls
-                    .iter()
-                    .map(|call| store::StoredToolCall {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        arguments: call.arguments.clone(),
-                    })
-                    .collect(),
-                tool_call_id: None,
-                tokens,
-            },
-        )?;
+        let assistant = store::StoredMessage {
+            id: assistant_id,
+            role: "assistant".to_string(),
+            time: now_ms(),
+            text: outcome.text,
+            parts,
+            tool_calls: outcome
+                .tool_calls
+                .iter()
+                .map(|call| store::StoredToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                })
+                .collect(),
+            tool_call_id: None,
+            tokens,
+        };
+        store::append(raw, &assistant)?;
         for message in &tool_messages {
             store::append(raw, message)?;
         }
+        // 落库成功之后才更新本地视图：下一轮直接用，不再重读整份历史。
+        history.push(assistant);
+        history.extend(tool_messages);
     }
 
     Err(format!("超过 {max_turns} 轮仍未收敛，已停止"))
