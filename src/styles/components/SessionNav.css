@@ -1,0 +1,302 @@
+/*
+ * 顶部会话导航（logo 右侧）：收起＝当前会话，展开＝最近会话 + 新建入口。
+ * 视觉跟顶栏的通知按钮、面板同一套：同高的小按钮 + 绝对定位面板 + 全屏背板。
+ */
+
+.nav-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  max-width: 300px;
+  padding: 0 8px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.nav-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.nav-btn.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.nav-glyph {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--accent-text);
+}
+
+.nav-glyph svg {
+  display: block;
+}
+
+.nav-glyph.sm {
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+}
+
+.nav-glyph.xs {
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+.nav-btn.on .nav-glyph {
+  color: inherit;
+}
+
+.nav-title {
+  min-width: 0;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text);
+}
+
+.nav-caret {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+}
+
+/* 状态点：绿＝在跑、琥珀＝待审批，跟工作台列头同一套颜色与节奏。 */
+.nav-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.nav-dot.tone-running {
+  background: var(--green);
+  animation: nav-pulse 1.6s ease infinite;
+}
+
+.nav-dot.tone-waiting {
+  background: var(--amber);
+  animation: nav-pulse 1.1s ease infinite;
+}
+
+@keyframes nav-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* ---------- 展开面板 ---------- */
+
+.nav-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+
+.nav-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 31;
+  width: 360px;
+  max-width: calc(100vw - 28px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.nav-search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--faint);
+}
+
+.nav-search svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.nav-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.nav-search input:focus {
+  outline: none;
+}
+
+.nav-search input::placeholder {
+  color: var(--faint);
+}
+
+.nav-list {
+  flex: 1;
+  min-height: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.nav-empty {
+  margin: 10px 8px;
+  color: var(--faint);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.nav-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav-item.on {
+  background: var(--panel-2);
+}
+
+.nav-item.here .nav-item-title {
+  color: var(--accent-text);
+}
+
+.nav-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.nav-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.nav-item-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+/* ---------- 底部：用哪个 Agent 新建（点哪个用哪个，不限次数） ---------- */
+
+.nav-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 9px 9px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 70%, var(--panel-2));
+}
+
+.nav-foot-title {
+  margin: 0 0 0 2px;
+  color: var(--faint);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+
+.nav-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.nav-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.nav-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.nav-chip:hover:not(:disabled) .nav-glyph.xs {
+  color: inherit;
+}
+
+/* 上次用过的那个：描边淡一点强调，并挂个「上次」角标。 */
+.nav-chip.used {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.nav-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.nav-chip-used {
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 9.5px;
+  line-height: 14px;
+}

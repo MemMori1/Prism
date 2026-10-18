@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, computed, watch, nextTick } from 'vue'
 import { api } from './api'
-import { relativeTime } from './format'
+import { basename, relativeTime } from './format'
 import { refreshGitInfo } from './gitInfo'
 import { mergeTrayCounts, type ArchiveStatus, type WorkbenchStatus } from './trayStatus'
 import {
@@ -14,6 +14,7 @@ import {
 } from './notify'
 import { onRoutineEvent } from './routineEvents'
 import { engineLabel } from './workshop'
+import { engineChoices } from './sessionStart'
 import {
   fitWidths,
   paneWidths,
@@ -38,6 +39,7 @@ import SessionView from './components/SessionView.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import NativeSetup from './components/NativeSetup.vue'
 import WorkbenchPane from './components/WorkbenchPane.vue'
+import SessionNav from './components/SessionNav.vue'
 import NewSessionPanel from './components/NewSessionPanel.vue'
 import SearchPane from './components/SearchPane.vue'
 import WorkshopPane from './components/WorkshopPane.vue'
@@ -49,6 +51,7 @@ import AppRail from './components/AppRail.vue'
 import { toggleDevtools } from './devtools'
 import { VIEW_KEY, isAppView, type AppView } from './nav'
 import { lastStartEngine, rememberStart } from './startPrefs'
+import { mergeRecentSessions, type NavSessionItem } from './sessionNav'
 
 const health = ref<EngineHealth[]>([])
 const error = ref<string | null>(null)
@@ -79,10 +82,10 @@ async function openSearchHit(hit: SearchHit): Promise<void> {
     : null
 }
 
-function setView(next: AppView) {
+function setView(next: AppView, options: { freshStart?: boolean } = {}) {
   // 点工作台（侧栏、设置里的快捷入口）一律先落在两栏「新建会话」页。
   // 「⇥ 工作台」这类明确要开列的，在 setView 之后再切到多列画布。
-  if (next === 'workbench') {
+  if (next === 'workbench' && options.freshStart !== false) {
     workbenchRef.value?.showStartPage(null)
   }
   view.value = next
@@ -405,6 +408,92 @@ function selectSession(sessionId: string) {
 async function onSessionSettled() {
   const projectId = selectedProjectId.value
   if (projectId) await loadSessions(projectId)
+  // 顶部导航的最近会话也跟着更新（内部有节流，不会每次收口都全量拉）。
+  void loadNavSessions()
+}
+
+// ---- 顶部会话导航：最近会话 + 新建入口 ----
+
+/** 最近会话（跨项目、时间倒序）；打开面板或收口时按节流刷新。 */
+const navItems = ref<NavSessionItem[]>([])
+const navLoading = ref(false)
+let navFetchedAt = 0
+/** 工作台当前盯着的那条（它 emit 上来的，含概要，省得导航再查一次）。 */
+const navWorkbenchSession = ref<SessionSummary | null>(null)
+const NAV_REFRESH_MS = 10_000
+
+async function loadNavSessions(force = false) {
+  if (navLoading.value) return
+  if (!force && Date.now() - navFetchedAt < NAV_REFRESH_MS) return
+  navLoading.value = true
+  try {
+    // 项目列表现取：刚用别的引擎 / 别的目录建出来的会话要能立刻出现在这里
+    // （App 的 projects 只在启动、切引擎等时机刷新，可能落后一拍）。
+    const list = await api.listProjects()
+    const groups = await Promise.all(
+      list.map(async project => {
+        const projectName = project.name || basename(project.worktree)
+        try {
+          return { projectName, sessions: await api.listSessions(project.id) }
+        } catch {
+          // 单个项目读失败（引擎库被占等）不该拖垮整张列表：跳过它。
+          return { projectName, sessions: [] }
+        }
+      }),
+    )
+    navItems.value = mergeRecentSessions(groups)
+    navFetchedAt = Date.now()
+  } catch {
+    // 整体读不到就留着上一次的列表，不弹错。
+  } finally {
+    navLoading.value = false
+  }
+}
+
+/** 导航上显示的「当前会话」：工作台看盯着的那条，归档看选中的那条。 */
+const navCurrent = computed<SessionSummary | null>(() =>
+  view.value === 'workbench' ? navWorkbenchSession.value : selectedSession.value,
+)
+
+const navRunningIds = computed(() => {
+  if (view.value === 'workbench') return wbStatus.value.runningIds
+  const id = selectedSessionId.value
+  return archiveStatus.value.running && id ? [id] : []
+})
+
+const navWaitingIds = computed(() => {
+  if (view.value === 'workbench') return wbStatus.value.waitingIds
+  const id = selectedSessionId.value
+  return archiveStatus.value.waiting > 0 && id ? [id] : []
+})
+
+/** 导航底部「新建会话」那一排 Agent：和选择器同一份数据（含可用性）。 */
+const navChoices = computed(() => engineChoices(health.value))
+
+/** 点导航里的会话：已经开在列里就直接切过去，否则去归档定位到它。 */
+async function openNavSession(sessionId: string) {
+  if (workbenchRef.value?.focusIfOpen(sessionId)) {
+    setView('workbench', { freshStart: false })
+    return
+  }
+  const projectId =
+    navItems.value.find(item => item.session.id === sessionId)?.session.projectId ?? null
+  setView('archive')
+  if (projectId && selectedProjectId.value !== projectId) {
+    await selectProject(projectId)
+  }
+  selectSession(sessionId)
+}
+
+/** 「用某个 Agent 新建会话」：进工作台，直接开这个 Agent 的草稿输入框。 */
+function navNewSession(engineId: string) {
+  setView('workbench')
+  workbenchRef.value?.startDraft(engineId)
+}
+
+/** 工作台盯着的那条会话变了：记下来给导航当「当前会话」。 */
+function onWorkbenchFocus(payload: { sessionId: string | null; session: SessionSummary | null }) {
+  navWorkbenchSession.value = payload.session
 }
 
 async function reload() {
@@ -508,6 +597,19 @@ onBeforeUnmount(() => {
           </svg>
           <span class="brand-name">Prism</span>
         </div>
+
+        <SessionNav
+          :items="navItems"
+          :choices="navChoices"
+          :current="navCurrent"
+          :running-ids="navRunningIds"
+          :waiting-ids="navWaitingIds"
+          :recent-engine="lastStartEngine"
+          :loading="navLoading"
+          @select="openNavSession"
+          @new="navNewSession"
+          @open="loadNavSessions(true)"
+        />
 
         <div class="topbar-spacer" />
 
@@ -675,6 +777,7 @@ onBeforeUnmount(() => {
           :projects="projects"
           :health="health"
           @error="reportError"
+          @focus="onWorkbenchFocus"
           @settled="onSessionSettled"
           @status="wbStatus = $event"
         />

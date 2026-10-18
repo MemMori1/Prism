@@ -37,6 +37,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'error', message: string): void
   (e: 'settled'): void
+  /** 当前盯着哪条会话（顶部导航显示「当前会话」用）；带概要，省得 App 再查一次。 */
+  (e: 'focus', payload: { sessionId: string | null; session: SessionSummary | null }): void
   (e: 'status', status: {
     running: number
     waiting: number
@@ -74,6 +76,8 @@ const flashId = ref<string | null>(null)
 const startOpen = ref(true)
 /** 右栏显示的会话；null＝选 Agent。 */
 const focusedId = ref<string | null>(null)
+/** 多列画布里最近碰过的那一列（顶部导航显示「当前会话」用）。 */
+const touchedId = ref<string | null>(null)
 /** 选中的工作目录：项目 id 或手动新增目录的 id；null＝还没选（右侧 Agent 锁住）。 */
 const selectedDirId = ref<string | null>(null)
 /** 手动新增、还没被引擎收录成项目的目录。 */
@@ -119,17 +123,6 @@ const focusedColumn = computed(
 )
 
 const choices = computed(() => engineChoices(props.health))
-
-/** 上次用的 Agent：选择器里标「上次使用」，按钮上写出来新建会沿用它。 */
-const recentEngineLabel = computed(() => {
-  const id = lastStartEngine.value
-  return id ? engineLabel(id) : null
-})
-
-/** 「＋ 新建会话」按钮文案：把会沿用的 Agent 写出来，省得每次重新挑。 */
-const newSessionLabel = computed(() =>
-  recentEngineLabel.value ? `＋ 新建会话 · ${recentEngineLabel.value}` : '＋ 新建会话',
-)
 
 const pickerHint = computed(() => {
   if (!selectedDir.value) return '先在左边选一个工作目录，或用「＋ 新增」在本机挑一个文件夹'
@@ -202,6 +195,33 @@ watch(
 
 function report(cause: unknown) {
   emit('error', cause instanceof Error ? cause.message : String(cause))
+}
+
+/**
+ * 顶部导航的「当前会话」要显示哪一列：两栏页看聚焦的那条，多列画布看最近碰过的那一列。
+ * 多列里没有「唯一焦点」，用最后一次 pointerdown 当意图。
+ */
+const navColumn = computed(
+  () =>
+    focusedColumn.value ??
+    columns.value.find(item => item.sessionId === touchedId.value) ??
+    null,
+)
+
+// 两个源：换了哪一列、或那一列的概要换了（标题/用量刷新）都要把新概要推给顶栏。
+watch(
+  [() => navColumn.value?.sessionId ?? null, () => navColumn.value?.session ?? null],
+  () =>
+    emit('focus', {
+      sessionId: navColumn.value?.sessionId ?? null,
+      session: navColumn.value?.session ?? null,
+    }),
+  { immediate: true },
+)
+
+/** 点了某一列（选文字、点按钮都算）：记下来给顶部导航显示。 */
+function touchColumn(sessionId: string) {
+  touchedId.value = sessionId
 }
 
 /** 目录比路径：忽略结尾的斜杠。 */
@@ -318,6 +338,7 @@ function addColumn(sessionId: string, session?: SessionSummary) {
 function closeColumn(sessionId: string) {
   columns.value = columns.value.filter(column => column.sessionId !== sessionId)
   if (focusedId.value === sessionId) focusedId.value = null
+  if (touchedId.value === sessionId) touchedId.value = null
   saveLayout()
 }
 
@@ -357,6 +378,31 @@ function openColumn(sessionId: string, session?: SessionSummary) {
   focusColumn(sessionId)
 }
 
+/** 顶部导航点会话：这一条已经开在列里就直接切过去（返回 true），没开则交给调用方去归档。 */
+function focusIfOpen(sessionId: string): boolean {
+  if (!columns.value.some(column => column.sessionId === sessionId)) return false
+  startOpen.value = false
+  focusedId.value = null
+  sessionError.value = null
+  touchedId.value = sessionId
+  focusColumn(sessionId)
+  return true
+}
+
+/**
+ * 顶部导航的新建入口：进两栏页。给了 Agent（上次用的）就直接开草稿输入框，
+ * 没给、或这个 Agent 这会儿不可用，就回选择器——不弹窗拦人。
+ */
+function startDraft(engine: string | null) {
+  startOpen.value = true
+  focusedId.value = null
+  sessionError.value = null
+  const usable = engine
+    ? choices.value.some(choice => choice.id === engine && choice.available)
+    : false
+  draftEngine.value = usable ? engine : null
+}
+
 // ---- 两栏「新建会话」页 ----
 
 /** 切到两栏页；focus 为 null 时右栏是选 Agent。 */
@@ -364,6 +410,17 @@ function showStartPage(focus: string | null) {
   startOpen.value = true
   focusedId.value = focus
   sessionError.value = null
+}
+
+/**
+ * 「＋ 新建会话」：回两栏页**重新挑 Agent**。
+ *
+ * 这里必须把已选的草稿清掉：不清的话，选过一次 Agent 之后右栏永远是那个草稿框，
+ * 选择器再也回不去，看起来就是「选完一个工具就不让换了」。
+ */
+function startNewSession() {
+  draftEngine.value = null
+  showStartPage(null)
 }
 
 /** 回到多列并排。 */
@@ -588,7 +645,7 @@ onBeforeUnmount(() => {
   stopResize()
 })
 
-defineExpose({ openColumn, showStartPage })
+defineExpose({ openColumn, showStartPage, focusIfOpen, startDraft })
 </script>
 
 <template>
@@ -602,6 +659,7 @@ defineExpose({ openColumn, showStartPage })
         :class="{ flash: flashId === column.sessionId }"
         :data-session-id="column.sessionId"
         :style="{ width: `${column.width}px` }"
+        @pointerdown="touchColumn(column.sessionId)"
       >
         <header class="wb-head">
           <span class="wb-dot" :class="dotClass(column)" :title="dotTitle(column)" />
@@ -643,10 +701,10 @@ defineExpose({ openColumn, showStartPage })
         <button
           class="wb-start-new"
           :class="{ on: !focusedId }"
-          title="选一个 Agent 新建会话（默认沿用上次）"
-          @click="showStartPage(null)"
+          title="新建会话：选一个 Agent（上次用过的会标出来）"
+          @click="startNewSession"
         >
-          {{ newSessionLabel }}
+          ＋ 新建会话
         </button>
 
         <div class="wb-start-head">
@@ -762,10 +820,10 @@ defineExpose({ openColumn, showStartPage })
     <button
       v-if="!startPage"
       class="wb-add"
-      title="新建会话并开一列"
-      @click="showStartPage(null)"
+      title="新建会话：回两栏页挑 Agent"
+      @click="startNewSession"
     >
-      {{ newSessionLabel }}
+      ＋ 新建会话
     </button>
   </section>
 </template>
