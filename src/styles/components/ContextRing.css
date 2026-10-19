@@ -1,0 +1,60 @@
+/*
+ * 上下文占用：环 + 百分比。
+ *
+ * 环负责「还剩多少」的直觉，数字负责「到底多少」的事实——只有环的时候，
+ * 8% 只是一小段弧，看着像没在工作。常态低调，接近满才亮起来。
+ */
+
+.ctx-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  cursor: pointer;
+}
+
+.ctx-meter svg {
+  flex: none;
+}
+
+.ctx-track {
+  stroke: var(--border-strong);
+  opacity: 0.55;
+}
+
+.ctx-arc {
+  stroke: var(--accent);
+  transition:
+    stroke-dasharray 0.25s ease,
+    stroke 0.2s ease;
+}
+
+.ctx-label {
+  color: var(--faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  transition: color 0.2s ease;
+}
+
+/* 接近满：环和数字一起变色，扫一眼就知道该收尾了 */
+.ctx-meter.tone-warn .ctx-arc {
+  stroke: var(--amber);
+}
+
+.ctx-meter.tone-warn .ctx-label {
+  color: var(--amber);
+}
+
+.ctx-meter.tone-danger .ctx-arc {
+  stroke: var(--red);
+}
+
+.ctx-meter.tone-danger .ctx-label {
+  color: var(--red);
+}
+
+/* 窗口未知：轨道更淡，不画弧 */
+.ctx-meter.tone-unknown .ctx-track {
+  opacity: 0.32;
+}

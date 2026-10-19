@@ -63,6 +63,15 @@ export interface TimelineRecord {
   tokens?: TurnTokens | null
 }
 
+/** 上下文明细的字符统计（原生引擎才有；别的引擎拿不到系统提示与工具声明）。 */
+export interface ContextStats {
+  system: number
+  tools: number
+  user: number
+  assistant: number
+  tool: number
+}
+
 /** 单轮 token 用量（各引擎归一到同一口径：缓存读不与未缓存输入重叠）。 */
 export interface TurnTokens {
   input: number

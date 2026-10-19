@@ -38,6 +38,7 @@ import {
 import { engineLabel } from '../workshop'
 import { CREATABLE_ENGINE_IDS } from '../sessionStart'
 import type {
+  ContextStats,
   EngineCatalog,
   EngineCommand,
   FileHit,
@@ -56,6 +57,10 @@ import TagPicker from './TagPicker.vue'
 import ModelMenu from './ModelMenu.vue'
 import BranchPicker from './BranchPicker.vue'
 import PermissionPicker from './PermissionPicker.vue'
+import ContextRing from './ContextRing.vue'
+import ContextPanel from './ContextPanel.vue'
+import { contextWindowOf } from '../modelIcons'
+import { charsOfRecords, contextBreakdown, type ContextChars } from '../contextShare'
 import { DEFAULT_APPROVAL, loadApproval, saveApproval, type ApprovalMode } from '../approval'
 
 const props = defineProps<{
@@ -378,8 +383,91 @@ const canSend = computed(() => {
   return !!draft.value.trim() || attachments.value.length > 0
 })
 
+/**
+ * 上下文占用：取**最近一轮**的 token 用量当对话大小。
+ *
+ * 不用会话累计量——那是所有轮次的和，多聊几轮就会顶到 100%，看着像要爆了其实没有。
+ * 分母优先用引擎给的 `contextWindow`（codex 有），否则按模型名查常见值，都没有就不画弧。
+ */
+const contextUsage = computed(() => {
+  for (let index = records.value.length - 1; index >= 0; index -= 1) {
+    const tokens = records.value[index].tokens
+    if (!tokens) continue
+    const used = tokens.input + tokens.cacheRead + tokens.output
+    const fromEngine = tokens.contextWindow ?? null
+    const window = fromEngine ?? contextWindowOf(modelKey.value)
+    return { used, window, estimated: !fromEngine && !!window }
+  }
+  const fallback = contextWindowOf(modelKey.value)
+  return { used: 0, window: fallback, estimated: true }
+})
+
+/** 上下文明细面板是否展开。 */
+const ctxOpen = ref(false)
+/** 引擎给的字符统计（只有原生引擎给得出系统提示与工具声明）。 */
+const ctxStats = ref<ContextStats | null>(null)
+
+watch(
+  () => props.session?.id,
+  async id => {
+    ctxOpen.value = false
+    ctxStats.value = null
+    if (!id) return
+    try {
+      const stats = await api.contextStats(id)
+      if (props.session?.id === id) ctxStats.value = stats
+    } catch {
+      // 拿不到统计不影响总量：面板会退回按时间线文字估。
+    }
+  },
+  { immediate: true },
+)
+
+/** 四个分项的字符数：有引擎统计就用它，否则按时间线文字估。 */
+const ctxChars = computed<ContextChars>(() => {
+  const stats = ctxStats.value
+  if (stats) {
+    return {
+      system: stats.system,
+      tools: stats.tools,
+      tool: stats.tool,
+      dialog: stats.user + stats.assistant,
+    }
+  }
+  return charsOfRecords(records.value)
+})
+
+const ctxSlices = computed(() =>
+  contextBreakdown(contextUsage.value.used, contextUsage.value.window, ctxChars.value),
+)
+
+/** 点面板外面就收起（输入框里点字也算外面，但那时用户本来就在写字）。 */
+function onCtxOutside(event: PointerEvent) {
+  const target = event.target
+  if (!(target instanceof HTMLElement)) return
+  if (target.closest('.ctx-wrap')) return
+  ctxOpen.value = false
+}
+
+/** Esc 也收：它是个浮层，键盘用户不该只能靠鼠标关。 */
+function onCtxEscape(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return
+  ctxOpen.value = false
+}
+
+watch(ctxOpen, open => {
+  if (open) {
+    document.addEventListener('pointerdown', onCtxOutside, true)
+    document.addEventListener('keydown', onCtxEscape)
+  } else {
+    document.removeEventListener('pointerdown', onCtxOutside, true)
+    document.removeEventListener('keydown', onCtxEscape)
+  }
+})
+
 /** 工具条左侧的实时提示（发送中 / shell 模式 / 斜杠命令预览…）。 */
 const composerHint = computed(() => {
+  if (stopping.value) return '正在中断…'
   if (sending.value) return '发送中…'
   if (notice.value) return notice.value
   if (shellMode.value) return '! 开头 = 本机直跑 shell（不发给模型）'
@@ -752,6 +840,11 @@ const stopEvents = onEngineEvent(event => {
   const current = props.session?.id ?? null
   if (!sessionId || !current || sessionId !== current) return
 
+  // 中断：底部给一句。停止按钮自己会立刻提示，这里兜「从别处中断」的情况。
+  if (event.type === 'session.execution.interrupted') {
+    flashNotice('已中断')
+  }
+
   // 权限审批：进入 / 退出挂起列表（不参与 live 归约）。
   if (event.type === 'permission.asked') {
     const request = permissionFromEvent(event.data)
@@ -796,6 +889,8 @@ const stopEvents = onEngineEvent(event => {
 onBeforeUnmount(() => {
   stopEvents()
   if (settleTimer !== null) window.clearTimeout(settleTimer)
+  document.removeEventListener('pointerdown', onCtxOutside, true)
+  document.removeEventListener('keydown', onCtxEscape)
 })
 
 function scheduleSettle(sessionId: string) {
@@ -1236,6 +1331,8 @@ async function stop() {
   stopping.value = true
   try {
     await api.sessionInterrupt(sessionId)
+    // 引擎的 interrupted 事件可能晚一拍到，先给一句，别让人以为按钮没反应。
+    flashNotice('已中断')
   } catch (cause) {
     report(cause)
   } finally {
@@ -1675,9 +1772,28 @@ watch(
               :disabled="sending"
             />
 
-            <span class="composer-hint" role="status">{{ composerHint }}</span>
+            <span class="composer-hint" :class="{ notice: !!notice || stopping }" role="status">
+              {{ composerHint }}
+            </span>
 
             <div class="composer-right">
+              <!-- 还没有任何用量（新会话 / 引擎没给 usage）就不占位：
+                   一个空环加「—」比不显示更像坏了。 -->
+              <span v-if="contextUsage.used > 0" class="ctx-wrap">
+                <ContextRing
+                  :used="contextUsage.used"
+                  :window="contextUsage.window"
+                  :estimated="contextUsage.estimated"
+                  @click="ctxOpen = !ctxOpen"
+                />
+                <ContextPanel
+                  v-if="ctxOpen"
+                  :used="contextUsage.used"
+                  :window="contextUsage.window"
+                  :slices="ctxSlices"
+                  :estimated="!ctxStats"
+                />
+              </span>
               <ModelMenu
                 class="model-pick"
                 :model-value="modelKey"

@@ -690,6 +690,12 @@
   white-space: nowrap;
 }
 
+/* 一次性提示（已中断 / 已在本机执行…）：常态提示是 faint，这种要一眼看到 */
+.composer-hint.notice {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .composer-right {
   display: flex;
   align-items: center;
@@ -732,6 +738,13 @@
 .readonly-branch {
   flex: none;
   margin-left: auto;
+}
+
+/* 上下文指示 + 明细面板：面板要相对这颗圆环定位 */
+.ctx-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: none;
 }
 
 .composer-right .sel {

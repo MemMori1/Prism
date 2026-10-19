@@ -1166,6 +1166,19 @@ pub async fn open_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 上下文明细：系统提示 / 工具 / 对话各占多少字符（原生引擎才有）。
+#[tauri::command]
+pub async fn context_stats(
+    session_id: String,
+) -> Result<Option<crate::engines::native::context::ContextStats>, String> {
+    if !native::is_native_session(&session_id) {
+        return Ok(None);
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::engines::native::context::stats(&session_id))
+        .await
+        .map_err(|cause| cause.to_string())
+}
+
 /// 这个目录现在还在不在（历史会话可能指向已经删掉 / 移动的目录）。
 #[tauri::command]
 pub async fn dir_exists(path: String) -> Result<bool, String> {

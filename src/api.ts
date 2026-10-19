@@ -5,6 +5,7 @@ import type {
   AssetFile,
   AssetItem,
   ChangeReport,
+  ContextStats,
   CreatedSession,
   EngineCatalog,
   EngineHealth,
@@ -94,6 +95,8 @@ export const api = {
   fileText: (path: string) => invoke<FileText>('file_text', { path }),
   /** 在系统文件管理器里定位这个文件。 */
   revealPath: (path: string) => invoke<void>('reveal_path', { path }),
+  /** 上下文明细（系统提示 / 工具 / 对话各多少字符；原生引擎才有）。 */
+  contextStats: (sessionId: string) => invoke<ContextStats | null>('context_stats', { sessionId }),
   /** 这个目录现在还在不在（历史会话可能指向已删 / 已移动的目录）。 */
   dirExists: (path: string) => invoke<boolean>('dir_exists', { path }),
   /** 保存文本文件（只允许会话目录 / 仓库根之内的已存在文件）。 */

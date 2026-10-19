@@ -87,7 +87,7 @@ fn emit(app: &AppHandle, event_type: &str, data: Value) {
 }
 
 /// 系统提示：只讲规矩，不讲人格（省 token，也避免抢模型自己的行为习惯）。
-fn system_prompt(directory: &str) -> String {
+pub(crate) fn system_prompt(directory: &str) -> String {
     format!(
         "你是 Prism 内置的编码 agent，工作目录是 {directory}。\n\
          规则：\n\

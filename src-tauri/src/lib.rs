@@ -44,6 +44,7 @@ pub fn run() {
             ipc::reveal_path,
             ipc::write_text,
             ipc::dir_exists,
+            ipc::context_stats,
             ipc::git_snapshot,
             ipc::git_branches,
             ipc::git_switch_branch,

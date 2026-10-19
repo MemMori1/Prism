@@ -31,6 +31,12 @@
   --red: #b91c1c;
   --red-soft: #fdeaea;
 
+  /* 图表色（上下文明细等）：一律冷色系，四段拼在一起不打架 */
+  --chart-1: #64748b;
+  --chart-2: #0284c7;
+  --chart-3: #0d9488;
+  --chart-4: #7c5cf0;
+
   --on-accent: #ffffff;
   --on-amber: #ffffff;
   --on-danger: #ffffff;
@@ -85,6 +91,11 @@
   --red: #f87171;
   --red-soft: #2e1618;
 
+  --chart-1: #94a3b8;
+  --chart-2: #38bdf8;
+  --chart-3: #2dd4bf;
+  --chart-4: #a78bfa;
+
   --on-accent: #ffffff;
   --on-amber: #2c2210;
   --on-danger: #2e1618;
@@ -131,6 +142,11 @@
     --amber-soft: #2c2210;
     --red: #f87171;
     --red-soft: #2e1618;
+
+    --chart-1: #94a3b8;
+    --chart-2: #38bdf8;
+    --chart-3: #2dd4bf;
+    --chart-4: #a78bfa;
 
     --on-accent: #ffffff;
     --on-amber: #2c2210;
