@@ -110,7 +110,7 @@ const selectedDirId = computed(() => selectedDir.value?.id ?? '')
 const choices = computed(() => engineChoices(props.health))
 
 const pickerHint = computed(() => {
-  if (!selectedDir.value) return '先在左边选一个工作目录，或用「＋ 新增」在本机挑一个文件夹'
+  if (!selectedDir.value) return '先在左边选一个工作目录，或从下拉里的「＋ 新增目录…」在本机挑一个文件夹'
   return '挑一个 Agent 开始这一页——之后这一页只用它；要换就去顶栏面板底部「＋ 新建会话」'
 })
 
@@ -129,21 +129,39 @@ const newSessionHint = computed(() =>
 
 /** 目录下拉：手动新增的排在前面；同路径的项目优先，避免出现两份。 */
 const dirOptions = computed(() => {
-  const options = [
+  const raw = [
     ...extraDirs.value
       .filter(extra => !props.projects.some(item => samePath(item.worktree, extra.worktree)))
-      .map(extra => ({ value: extra.id, label: extra.label })),
+      .map(extra => ({ value: extra.id, label: extra.label, worktree: extra.worktree })),
     ...props.projects.map(item => ({
       value: item.id,
       label: item.name || basename(item.worktree),
+      worktree: item.worktree,
     })),
   ]
-  // 页面记着的目录这会儿不在列表里（项目被删掉之类）也要能显示出来。
-  const current = selectedDir.value
-  if (current && !options.some(option => option.value === current.id)) {
-    options.unshift({ value: current.id, label: current.label })
+  // 同一个目录可能被不同引擎各登记一次（native / opencode…）：只留一条。
+  // 页面记的是路径，不是项目 id，选哪条结果都一样。
+  const rows: typeof raw = []
+  for (const row of raw) {
+    if (!rows.some(kept => samePath(kept.worktree, row.worktree))) rows.push(row)
   }
-  return options
+  // 页面记着的目录这会儿不在列表里（项目被删掉之类）也要能显示出来；
+  // 路径相同但 id 不同的，就地换成当前这条，别让下拉显示成「未选择」。
+  const current = selectedDir.value
+  if (current) {
+    const same = rows.findIndex(row => samePath(row.worktree, current.worktree))
+    if (same >= 0) rows[same] = { value: current.id, label: rows[same].label, worktree: current.worktree }
+    else rows.unshift({ value: current.id, label: current.label, worktree: current.worktree })
+  }
+  // 目录名可以重名（两个 app 分处不同项目）：重名的才补一行父级路径来区分。
+  // 名字唯一时不加第二行，列表保持紧凑。
+  const counts = new Map<string, number>()
+  for (const row of rows) counts.set(row.label, (counts.get(row.label) ?? 0) + 1)
+  return rows.map(row =>
+    (counts.get(row.label) ?? 0) > 1
+      ? { value: row.value, label: row.label, hint: dirHint(row.worktree) }
+      : { value: row.value, label: row.label },
+  )
 })
 
 /** 本页的两栏「新建会话」页在前台吗；不在就画多列并排。 */
@@ -201,6 +219,13 @@ function samePath(a: string, b: string): boolean {
 function shortPath(path: string): string {
   const parts = path.replace(/\/+$/, '').split('/')
   return parts.length <= 4 ? path : `…/${parts.slice(-3).join('/')}`
+}
+
+/** 目录的父级路径：下拉里重名时用来看清是哪一个。 */
+function dirHint(worktree: string): string {
+  const clean = worktree.replace(/\/+$/, '')
+  const cut = clean.lastIndexOf('/')
+  return cut > 0 ? shortPath(clean.slice(0, cut)) : clean
 }
 
 function sleep(ms: number) {
@@ -767,21 +792,16 @@ defineExpose({
             <div class="wb-start-dir">
               <div class="wb-start-dir-head">
                 <span class="wb-start-label">目录</span>
-                <button
-                  class="wb-start-add"
-                  title="新增目录：在本机挑一个文件夹"
-                  @click="addDirectory"
-                >
-                  ＋ 新增
-                </button>
               </div>
               <SelectMenu
                 :model-value="selectedDirId"
                 :options="dirOptions"
                 placeholder="选择目录…"
                 size="sm"
-                title="选择工作目录"
+                :title="selectedDir?.worktree ?? '选择工作目录'"
+                action-label="新增目录…"
                 @update:model-value="chooseDir"
+                @action="addDirectory"
               />
               <p
                 class="wb-start-path"

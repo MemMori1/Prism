@@ -4,6 +4,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 interface SelectOption {
   value: string
   label: string
+  /** 次要说明（如路径）：重名项靠它区分，显示在标签下面一行。 */
+  hint?: string
   disabled?: boolean
 }
 
@@ -25,6 +27,11 @@ const props = withDefaults(
     title?: string
     /** 弹层最大高度 */
     maxHeight?: number
+    /**
+     * 列表底部的一条动作（如「新增目录…」）：跟选项一起列在弹层里，
+     * 省掉旁边再放一个按钮。留空＝不显示。
+     */
+    actionLabel?: string
   }>(),
   {
     placeholder: '请选择',
@@ -36,12 +43,14 @@ const props = withDefaults(
     maxWidth: '',
     title: '',
     maxHeight: 268,
+    actionLabel: '',
   },
 )
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
   (e: 'open'): void
+  (e: 'action'): void
 }>()
 
 const open = ref(false)
@@ -55,6 +64,17 @@ const pos = ref({ left: 0, top: 0, bottom: null as number | null, width: 240, ma
 const selectedIndex = computed(() => props.options.findIndex(item => item.value === props.modelValue))
 const selected = computed(() => props.options.find(item => item.value === props.modelValue) ?? null)
 const currentLabel = computed(() => selected.value?.label ?? props.placeholder)
+
+/** 底部动作也算一行：键盘能走到，`activeIndex === options.length` 就是它。 */
+const hasAction = computed(() => props.actionLabel.trim().length > 0)
+const rowCount = computed(() => props.options.length + (hasAction.value ? 1 : 0))
+const actionIndex = computed(() => (hasAction.value ? props.options.length : -1))
+
+/** 这一行能不能选（动作行永远可选）。 */
+function rowDisabled(index: number): boolean {
+  if (index === actionIndex.value) return false
+  return Boolean(props.options[index]?.disabled)
+}
 
 const popupStyle = computed(() => {
   const style: Record<string, string> = {
@@ -92,27 +112,32 @@ function measure(estimate: number): void {
 }
 
 function firstEnabled(from = 0, step = 1): number {
-  const total = props.options.length
+  const total = rowCount.value
   for (let i = 0; i < total; i += 1) {
     const index = ((from + i * step) % total + total) % total
-    if (!props.options[index]?.disabled) return index
+    if (!rowDisabled(index)) return index
   }
   return -1
 }
 
 function scrollActiveIntoView(): void {
+  // 动作行钉在下沿，不参与滚动——这里也不该调 scrollIntoView（会连带滚外层容器）。
+  if (activeIndex.value >= props.options.length) return
   const node = popup.value?.querySelectorAll<HTMLElement>('.sel-option')[activeIndex.value]
   node?.scrollIntoView({ block: 'nearest' })
 }
 
 async function openMenu(): Promise<void> {
   if (props.disabled || open.value) return
-  measure(Math.min(props.maxHeight, props.options.length * 30 + 10))
+  // 带说明的两行项高一些，估算差值只为决定往上弹还是往下弹。
+  const rows = props.options.reduce((sum, item) => sum + (item.hint ? 42 : 30), 0)
+  const estimate = rows + (hasAction.value ? 40 : 0) + 10
+  measure(Math.min(props.maxHeight, estimate))
   open.value = true
   activeIndex.value = selectedIndex.value >= 0 ? selectedIndex.value : firstEnabled()
   emit('open')
   await nextTick()
-  measure(Math.min(props.maxHeight, props.options.length * 30 + 10))
+  measure(Math.min(props.maxHeight, estimate))
   scrollActiveIntoView()
 }
 
@@ -128,6 +153,11 @@ function toggle(): void {
 }
 
 function pick(index: number): void {
+  if (index === actionIndex.value) {
+    closeMenu(true)
+    emit('action')
+    return
+  }
   const option = props.options[index]
   if (!option || option.disabled) return
   if (option.value !== props.modelValue) emit('update:modelValue', option.value)
@@ -135,12 +165,12 @@ function pick(index: number): void {
 }
 
 function move(step: number): void {
-  const total = props.options.length
+  const total = rowCount.value
   if (!total) return
   let next = activeIndex.value
   for (let i = 0; i < total; i += 1) {
     next = (next + step + total) % total
-    if (!props.options[next]?.disabled) break
+    if (!rowDisabled(next)) break
   }
   activeIndex.value = next
   scrollActiveIntoView()
@@ -189,7 +219,8 @@ function onKeydown(event: KeyboardEvent): void {
       break
     case 'End':
       event.preventDefault()
-      activeIndex.value = firstEnabled(props.options.length - 1, -1)
+      // 从最后一行往回找：底部动作行也算最后一行。
+      activeIndex.value = firstEnabled(rowCount.value - 1, -1)
       scrollActiveIntoView()
       break
     case 'Enter':
@@ -269,33 +300,63 @@ onBeforeUnmount(() => {
 
     <Teleport to="body">
       <div v-if="open" ref="popup" class="sel-popup" :style="popupStyle" role="listbox">
-        <button
-          v-for="(option, index) in options"
-          :key="option.value"
-          type="button"
-          class="sel-option"
-          :class="{ active: index === activeIndex, selected: option.value === modelValue }"
-          :disabled="option.disabled"
-          role="option"
-          :aria-selected="option.value === modelValue"
-          @pointerenter="activeIndex = index"
-          @click="pick(index)"
-        >
-          <span class="sel-option-label">{{ option.label }}</span>
-          <svg
-            v-if="option.value === modelValue"
-            class="sel-check"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.4"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
+        <!-- 选项区自己滚：底部的动作行固定住，长列表（几十个项目）也随时点得到。 -->
+        <div class="sel-list">
+          <button
+            v-for="(option, index) in options"
+            :key="option.value"
+            type="button"
+            class="sel-option"
+            :class="{ active: index === activeIndex, selected: option.value === modelValue }"
+            :disabled="option.disabled"
+            role="option"
+            :aria-selected="option.value === modelValue"
+            @pointerenter="activeIndex = index"
+            @click="pick(index)"
           >
-            <path d="m5 12.5 4.5 4.5L19 7" />
-          </svg>
-        </button>
+            <span class="sel-option-text">
+              <span class="sel-option-label">{{ option.label }}</span>
+              <span v-if="option.hint" class="sel-option-hint">{{ option.hint }}</span>
+            </span>
+            <svg
+              v-if="option.value === modelValue"
+              class="sel-check"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="m5 12.5 4.5 4.5L19 7" />
+            </svg>
+          </button>
+        </div>
+
+        <div v-if="hasAction" class="sel-foot">
+          <div class="sel-sep" role="separator" />
+          <button
+            type="button"
+            class="sel-option sel-action"
+            :class="{ active: activeIndex === actionIndex }"
+            @pointerenter="activeIndex = actionIndex"
+            @click="pick(actionIndex)"
+          >
+            <svg
+              class="sel-plus"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            <span class="sel-option-label">{{ actionLabel }}</span>
+          </button>
+        </div>
       </div>
     </Teleport>
   </div>
