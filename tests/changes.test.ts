@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildFileTree,
   emptyTextHint,
+  flattenFileTree,
+  parentDirs,
   fileKindOf,
   filterProjectFiles,
   isJsonPath,
@@ -150,5 +153,86 @@ describe('fileKindOf', () => {
     expect(fileKindOf('src/api.ts')).toBe('text')
     expect(fileKindOf('Dockerfile')).toBe('text')
     expect(fileKindOf(null)).toBe('text')
+  })
+})
+
+describe('buildFileTree', () => {
+  const files = [
+    { path: 'src/api.ts', name: 'api.ts' },
+    { path: 'src/components/Pane.vue', name: 'Pane.vue' },
+    { path: 'src/main.ts', name: 'main.ts' },
+    { path: 'README.md', name: 'README.md' },
+    { path: 'docs/a/b.md', name: 'b.md' },
+  ]
+
+  it('目录在前、文件在后，中间目录补齐', () => {
+    const tree = buildFileTree(files)
+    expect(tree.map(node => node.name)).toEqual(['docs', 'src', 'README.md'])
+    expect(tree[0].dir).toBe(true)
+    expect(tree[0].children.map(node => node.name)).toEqual(['a'])
+    expect(tree[1].children.map(node => node.name)).toEqual(['components', 'api.ts', 'main.ts'])
+  })
+
+  it('同名目录不会重复出现', () => {
+    const tree = buildFileTree(files)
+    const src = tree.find(node => node.path === 'src')
+    expect(src?.children.filter(node => node.dir)).toHaveLength(1)
+  })
+
+  it('同级按名字排（大小写不敏感）', () => {
+    const tree = buildFileTree([
+      { path: 'b.ts', name: 'b.ts' },
+      { path: 'A.ts', name: 'A.ts' },
+    ])
+    expect(tree.map(node => node.name)).toEqual(['A.ts', 'b.ts'])
+  })
+
+  it('空列表＝空树', () => {
+    expect(buildFileTree([])).toEqual([])
+  })
+})
+
+describe('flattenFileTree', () => {
+  const files = [
+    { path: 'src/api.ts', name: 'api.ts' },
+    { path: 'src/components/Pane.vue', name: 'Pane.vue' },
+    { path: 'README.md', name: 'README.md' },
+  ]
+
+  it('默认全展开，带正确缩进', () => {
+    const rows = flattenFileTree(buildFileTree(files), () => true)
+    expect(rows.map(row => `${row.depth}:${row.name}`)).toEqual([
+      '0:src',
+      '1:components',
+      '2:Pane.vue',
+      '1:api.ts',
+      '0:README.md',
+    ])
+  })
+
+  it('折叠的目录不出子节点，但目录自己还在', () => {
+    const rows = flattenFileTree(buildFileTree(files), path => path !== 'src')
+    expect(rows.map(row => row.name)).toEqual(['src', 'README.md'])
+  })
+
+  it('文件节点带着原始对象', () => {
+    const rows = flattenFileTree(buildFileTree(files), () => true)
+    const api = rows.find(row => row.name === 'api.ts')
+    expect(api?.dir).toBe(false)
+    expect(api?.file?.path).toBe('src/api.ts')
+  })
+})
+
+describe('parentDirs', () => {
+  it('列出所有祖先目录（不含文件名）', () => {
+    expect(parentDirs('src/components/ui/Pane.vue')).toEqual([
+      'src',
+      'src/components',
+      'src/components/ui',
+    ])
+  })
+
+  it('根下的文件没有祖先', () => {
+    expect(parentDirs('README.md')).toEqual([])
   })
 })

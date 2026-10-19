@@ -13,19 +13,23 @@
  * - 编辑：纯文本编辑，⌘S 保存（只允许会话目录 / 仓库根内的已存在文件）。
  * 「打开方式」还能交给系统：默认应用 / 在访达中显示 / 复制路径。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import {
+  buildFileTree,
   fileKindOf,
   filterProjectFiles,
+  flattenFileTree,
   joinPath,
   numberedLines,
+  parentDirs,
   splitPath,
   statusLabel,
   statusMark,
 } from '../changes'
 import { copyPlainText } from '../clipboard'
 import { parsePatch, patchStats } from '../diff'
+import { FILE_ICON_PATHS, fileIconKind } from '../fileIcons'
 import { basename, formatBytes } from '../format'
 import { highlightLines, languageOfPath } from '../highlight'
 import { renderMarkdown } from '../markdown'
@@ -57,6 +61,8 @@ const allFiles = ref<FileHit[]>([])
 const allLoading = ref(false)
 const allError = ref<string | null>(null)
 const allQuery = ref('')
+/** 全部文件里展开的目录：默认全折叠，点哪个展开哪个。 */
+const expandedDirs = ref<Set<string>>(new Set())
 
 /** 当前看的文件（两种列表统一成这一份）。 */
 const active = ref<{ rel: string; path: string } | null>(null)
@@ -89,6 +95,36 @@ const changedRels = computed(() => new Set(files.value.map(file => file.rel)))
 const allView = computed(() => filterProjectFiles(allFiles.value, allQuery.value))
 const dirty = computed(() => !!text.value && !text.value.binary && draft.value !== text.value.text)
 
+/** 「全部文件」是棵树：目录在前、文件在后，能折叠。 */
+const searching = computed(() => allQuery.value.trim().length > 0)
+const statusByRel = computed(() => {
+  const map = new Map<string, ChangeFile>()
+  for (const file of files.value) map.set(file.rel, file)
+  return map
+})
+/** 每个目录下有几个改过的文件（目录行右侧的小数字）。 */
+const changedCountByDir = computed(() => {
+  const map = new Map<string, number>()
+  for (const rel of changedRels.value) {
+    for (const dir of parentDirs(rel)) map.set(dir, (map.get(dir) ?? 0) + 1)
+  }
+  return map
+})
+const allRows = computed(() => {
+  const tree = buildFileTree(allView.value.items)
+  const counts = changedCountByDir.value
+  return flattenFileTree(tree, path => searching.value || expandedDirs.value.has(path)).map(row => {
+    const status = row.file ? statusByRel.value.get(row.path) ?? null : null
+    return {
+      ...row,
+      mark: status ? statusMark(status.status) : '',
+      markClass: status ? `st-${status.status}` : '',
+      statusText: status ? statusLabel(status.status) : '',
+      changedCount: row.dir ? counts.get(row.path) ?? 0 : 0,
+    }
+  })
+})
+
 /** 代码预览：一行一条，带行号与高亮（markdown / 图片不走这里）。 */
 const codeLines = computed(() => {
   const lines = numberedLines(text.value?.text ?? '')
@@ -96,6 +132,59 @@ const codeLines = computed(() => {
   const html = highlightLines(text.value?.text ?? '', languageOfPath(active.value?.rel))
   return lines.map((line, index) => ({ no: line.no, html: html[index] ?? '' }))
 })
+
+/**
+ * 编辑器的底稿高亮：透明 textarea 下面的那层 <pre>。
+ *
+ * 大文件不配色（只转义）——每敲一个字重跑一遍词法，几十万字符会卡手。
+ */
+const EDIT_HIGHLIGHT_LIMIT = 120_000
+const editorRef = ref<HTMLTextAreaElement | null>(null)
+const hlRef = ref<HTMLElement | null>(null)
+const gutterRef = ref<HTMLElement | null>(null)
+const editLineCount = computed(() => (draft.value.match(/\n/g)?.length ?? 0) + 1)
+const draftHtml = computed(() => {
+  const source = draft.value
+  const lang = source.length > EDIT_HIGHLIGHT_LIMIT ? 'text' : languageOfPath(active.value?.rel)
+  const html = highlightLines(source, lang).join('\n')
+  // 末尾正好换行时补个空格：否则 <pre> 把最后一行吃掉，行高与 textarea 差一行。
+  return source.endsWith('\n') ? `${html} ` : html
+})
+
+/** textarea 自己滚，把行号栏和高亮层按同样的位移跟上去。 */
+function syncEditorScroll() {
+  const editor = editorRef.value
+  if (!editor) return
+  const hl = hlRef.value
+  if (hl) {
+    hl.scrollTop = editor.scrollTop
+    hl.scrollLeft = editor.scrollLeft
+  }
+  const gutter = gutterRef.value
+  if (gutter) gutter.style.transform = `translateY(${-editor.scrollTop}px)`
+}
+
+/** Tab 键插两个空格（在文本框里 Tab 默认是切焦点，编辑代码时很碍事）。 */
+function insertTab() {
+  const editor = editorRef.value
+  if (!editor || saving.value) return
+  const start = editor.selectionStart
+  const end = editor.selectionEnd
+  draft.value = `${draft.value.slice(0, start)}  ${draft.value.slice(end)}`
+  void nextTick(() => {
+    editor.selectionStart = start + 2
+    editor.selectionEnd = start + 2
+  })
+}
+
+/** 换文件时回到开头：不然还停在上一个文件滚到的位置。 */
+function resetEditorScroll() {
+  const editor = editorRef.value
+  if (!editor) return
+  editor.scrollTop = 0
+  editor.scrollLeft = 0
+  syncEditorScroll()
+}
 
 const markdownHtml = computed(() =>
   kind.value === 'markdown' && text.value && !text.value.binary
@@ -149,6 +238,8 @@ async function loadAllFiles() {
   allError.value = null
   try {
     allFiles.value = await api.projectFiles(directory, '', 4000)
+    // 列表晚于选中项到位时，补一次展开。
+    revealActive()
   } catch (cause) {
     allError.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
@@ -198,6 +289,7 @@ async function loadDetail() {
     const data = await api.fileText(file.path)
     text.value = data
     draft.value = data.binary ? '' : data.text
+    resetEditorScroll()
     if (data.binary && mode.value === 'edit') mode.value = 'preview'
   } catch (cause) {
     detailError.value = cause instanceof Error ? cause.message : String(cause)
@@ -232,9 +324,38 @@ function pickAny(hit: FileHit) {
   ensureMode()
 }
 
+/** 树的文件行：目录行不走这里。 */
+function pickRow(row: { file: FileHit | null }) {
+  if (row.file) pickAny(row.file)
+}
+
 function setList(next: 'changes' | 'all') {
   listMode.value = next
   if (next === 'all' && !allFiles.value.length) void loadAllFiles()
+  if (next === 'all') revealActive()
+}
+
+/** 这个目录现在展开着吗（搜索时一律展开，好让命中项露出来）。 */
+function isDirOpen(path: string): boolean {
+  return searching.value || expandedDirs.value.has(path)
+}
+
+function toggleDir(path: string): void {
+  const next = new Set(expandedDirs.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  expandedDirs.value = next
+}
+
+/** 把选中文件的祖先目录都展开——从聊天里点进来时，别让它埋在折叠的目录里。 */
+function revealActive(): void {
+  const rel = active.value?.rel
+  if (!rel) return
+  const dirs = parentDirs(rel)
+  if (dirs.every(dir => expandedDirs.value.has(dir))) return
+  const next = new Set(expandedDirs.value)
+  for (const dir of dirs) next.add(dir)
+  expandedDirs.value = next
 }
 
 function setMode(next: Mode) {
@@ -288,7 +409,13 @@ watch(
     if (path) openAbsolute(path)
   },
 )
-watch(() => active.value?.rel, () => void loadDetail())
+watch(
+  () => active.value?.rel,
+  () => {
+    revealActive()
+    void loadDetail()
+  },
+)
 watch(mode, () => void loadDetail())
 watch(
   () => props.directory,
@@ -421,23 +548,65 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <p v-else-if="!allView.items.length" class="ch-hint">
             {{ allQuery ? '没有匹配的文件' : '这个目录里没有可列的文件' }}
           </p>
-          <ul v-else class="ch-list">
-            <li v-for="hit in allView.items" :key="hit.path">
+          <ul v-else class="ch-list ch-tree">
+            <li v-for="row in allRows" :key="row.path">
               <button
-                class="ch-row"
-                :class="{ on: hit.path === active?.rel }"
-                :title="hit.path"
-                @click="pickAny(hit)"
+                v-if="row.dir"
+                class="ch-row ch-dir-row"
+                :style="{ paddingLeft: `${6 + row.depth * 13}px` }"
+                :title="row.path"
+                @click="toggleDir(row.path)"
               >
-                <span
-                  class="ch-mark"
-                  :class="changedRels.has(hit.path) ? `st-${files.find(file => file.rel === hit.path)?.status}` : 'st-plain'"
+                <svg
+                  class="ch-caret"
+                  :class="{ open: isDirOpen(row.path) }"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
                 >
-                  {{ changedRels.has(hit.path) ? statusMark(files.find(file => file.rel === hit.path)!.status) : '·' }}
+                  <path d="m9 6 6 6-6 6" />
+                </svg>
+                <span class="ch-dir-name">{{ row.name }}</span>
+                <span v-if="row.changedCount" class="ch-dir-count" title="这个目录下有改动的文件数">
+                  {{ row.changedCount }}
                 </span>
-                <span class="ch-path">
-                  <span class="ch-dir">{{ splitPath(hit.path).dir }}</span>
-                  <span class="ch-name">{{ hit.name }}</span>
+              </button>
+              <button
+                v-else
+                class="ch-row ch-file-row"
+                :class="{ on: row.path === active?.rel }"
+                :style="{ paddingLeft: `${6 + row.depth * 13 + 18}px` }"
+                :title="row.path"
+                @click="pickRow(row)"
+              >
+                <svg
+                  class="ch-file-icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path
+                    v-for="(segment, index) in FILE_ICON_PATHS[fileIconKind(row.name)]"
+                    :key="index"
+                    :d="segment"
+                  />
+                </svg>
+                <span class="ch-name">{{ row.name }}</span>
+                <span
+                  v-if="row.mark"
+                  class="ch-mark"
+                  :class="row.markClass"
+                  :title="row.statusText"
+                >
+                  {{ row.mark }}
                 </span>
               </button>
             </li>
@@ -537,16 +706,30 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               </template>
             </template>
 
-            <!-- 编辑 -->
+            <!-- 编辑：行号栏 + 高亮底稿 + 透明 textarea（三层对齐，滚动同步） -->
             <div v-else-if="mode === 'edit'" class="ch-edit">
-              <textarea
-                v-model="draft"
-                class="ch-editor"
-                spellcheck="false"
-                autocapitalize="off"
-                autocomplete="off"
-                :readonly="saving"
-              />
+              <div class="ch-edit-main">
+                <div class="ch-edit-gutter-box" aria-hidden="true">
+                  <div ref="gutterRef" class="ch-edit-gutter">
+                    <span v-for="no in editLineCount" :key="no">{{ no }}</span>
+                  </div>
+                </div>
+                <div class="ch-edit-scroll">
+                  <pre ref="hlRef" class="ch-edit-hl" aria-hidden="true"><code v-html="draftHtml" /></pre>
+                  <textarea
+                    ref="editorRef"
+                    v-model="draft"
+                    class="ch-editor"
+                    wrap="off"
+                    spellcheck="false"
+                    autocapitalize="off"
+                    autocomplete="off"
+                    :readonly="saving"
+                    @scroll="syncEditorScroll"
+                    @keydown.tab.prevent="insertTab"
+                  />
+                </div>
+              </div>
               <div class="ch-edit-bar">
                 <span class="ch-edit-note" :class="{ ok: saveNote === '已保存' }">
                   {{ saveNote ?? (dirty ? '有未保存的修改' : '与磁盘一致') }}

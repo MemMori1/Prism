@@ -137,3 +137,102 @@ export function fileKindOf(rel: string | null | undefined): FileKind {
   if (IMAGE_EXT.has(ext)) return 'image'
   return 'text'
 }
+
+// ---- 全部文件：扁平路径 → 树 ----
+
+/** 树里的一层节点：目录或文件。 */
+export interface FileTreeNode<T> {
+  /** 相对路径；目录不带结尾斜杠。 */
+  path: string
+  name: string
+  dir: boolean
+  children: FileTreeNode<T>[]
+  /** 目录节点为 null。 */
+  file: T | null
+}
+
+/** 摊平后的一行：渲染时按 depth 缩进。 */
+export interface FileTreeRow<T> {
+  path: string
+  name: string
+  dir: boolean
+  depth: number
+  file: T | null
+}
+
+function sortNodes<T>(nodes: FileTreeNode<T>[]): void {
+  // 目录在前、文件在后，同级按名字排（忽略大小写，大小写只作兜底）。
+  nodes.sort((a, b) => {
+    if (a.dir !== b.dir) return a.dir ? -1 : 1
+    const left = a.name.toLowerCase()
+    const right = b.name.toLowerCase()
+    if (left !== right) return left < right ? -1 : 1
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  })
+  for (const node of nodes) if (node.dir) sortNodes(node.children)
+}
+
+/**
+ * 一堆 `src/styles/a.css` 这样的相对路径 → 目录树。
+ *
+ * 中间目录靠路径前缀补出来（文件列表本来就只有文件），同一层目录合并不重复。
+ */
+export function buildFileTree<T extends { path: string; name: string }>(files: T[]): FileTreeNode<T>[] {
+  const root: FileTreeNode<T> = { path: '', name: '', dir: true, children: [], file: null }
+  const dirs = new Map<string, FileTreeNode<T>>()
+  for (const file of files) {
+    const parts = file.path.split('/').filter(Boolean)
+    if (!parts.length) continue
+    let parent = root
+    let acc = ''
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      acc = acc ? `${acc}/${parts[index]}` : parts[index]
+      let node = dirs.get(acc)
+      if (!node) {
+        node = { path: acc, name: parts[index], dir: true, children: [], file: null }
+        dirs.set(acc, node)
+        parent.children.push(node)
+      }
+      parent = node
+    }
+    parent.children.push({
+      path: file.path,
+      name: parts[parts.length - 1],
+      dir: false,
+      children: [],
+      file,
+    })
+  }
+  sortNodes(root.children)
+  return root.children
+}
+
+/**
+ * 树 → 可见的行（折叠的目录不展开子节点）。
+ *
+ * `isOpen` 决定某个目录是否展开；搜索时调用方一律返回 true，命中项就都露出来。
+ */
+export function flattenFileTree<T>(
+  nodes: FileTreeNode<T>[],
+  isOpen: (path: string) => boolean,
+  depth = 0,
+  out: FileTreeRow<T>[] = [],
+): FileTreeRow<T>[] {
+  for (const node of nodes) {
+    out.push({ path: node.path, name: node.name, dir: node.dir, depth, file: node.file })
+    if (node.dir && isOpen(node.path)) flattenFileTree(node.children, isOpen, depth + 1, out)
+  }
+  return out
+}
+
+/** 某个文件的所有祖先目录（展开它用得到）。 */
+export function parentDirs(rel: string): string[] {
+  const parts = rel.split('/').filter(Boolean)
+  const out: string[] = []
+  let acc = ''
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    acc = acc ? `${acc}/${parts[index]}` : parts[index]
+    out.push(acc)
+  }
+  return out
+}

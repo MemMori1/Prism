@@ -320,6 +320,77 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* ---------- 全部文件：目录树 ---------- */
+
+.ch-tree .ch-row {
+  gap: 6px;
+}
+
+.ch-dir-row {
+  color: var(--muted);
+}
+
+.ch-caret {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--faint);
+  transition: transform 0.12s ease;
+}
+
+.ch-caret.open {
+  transform: rotate(90deg);
+}
+
+.ch-dir-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 560;
+}
+
+.ch-file-row .ch-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 文件类型图标（形状见 fileIcons.ts），状态字母挪到行尾 */
+.ch-file-icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+}
+
+.ch-file-row.on .ch-file-icon {
+  color: var(--accent-text);
+}
+
+.ch-file-row .ch-mark {
+  width: auto;
+  min-width: 9px;
+}
+
+/* 目录名后面的小圆点：这个目录里有几个改过的文件 */
+.ch-dir-count {
+  flex: none;
+  min-width: 15px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .ch-added {
   color: var(--green);
 }
@@ -619,20 +690,83 @@
   min-height: 0;
 }
 
-.ch-editor {
+.ch-edit-main {
   flex: 1;
   min-height: 0;
-  width: 100%;
+  display: flex;
+}
+
+/* 行号栏：只有纵向位移，跟着 textarea 滚 */
+.ch-edit-gutter-box {
+  flex: none;
+  width: 46px;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
+.ch-edit-gutter {
+  padding: 10px 8px 10px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--faint);
+  text-align: right;
+  user-select: none;
+  will-change: transform;
+}
+
+.ch-edit-gutter span {
+  display: block;
+}
+
+.ch-edit-scroll {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 高亮层与输入层必须像素级同款（字体 / 行高 / 内边距 / tab），否则光标会歪 */
+.ch-edit-hl,
+.ch-editor {
+  position: absolute;
+  inset: 0;
+  margin: 0;
   padding: 10px 12px;
   border: 0;
-  background: var(--panel);
-  color: var(--text);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.65;
   tab-size: 2;
+}
+
+.ch-edit-hl {
+  overflow: hidden;
+  background: var(--panel);
+  color: var(--text);
+  white-space: pre;
+  pointer-events: none;
+}
+
+.ch-edit-hl code {
+  font: inherit;
+  color: inherit;
+  background: none;
+  padding: 0;
+}
+
+.ch-editor {
+  overflow: auto;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
   resize: none;
   outline: none;
+}
+
+/* 选中的是文字本身（透明），底色用半透明强调色，别把下面的高亮盖死 */
+.ch-editor::selection {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
 }
 
 .ch-edit-bar {
