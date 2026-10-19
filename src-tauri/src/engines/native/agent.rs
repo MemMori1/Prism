@@ -6,7 +6,7 @@
 
 use super::{approval, config, provider, store, tools};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
@@ -63,6 +63,80 @@ impl Drop for RunSlot {
         if let Ok(mut map) = running().lock() {
             map.remove(&self.session_id);
         }
+    }
+}
+
+/// 执行中投进来的消息：等这一轮的工具走完、下一次请求模型前接上（插话）。
+#[derive(Debug, Clone)]
+struct PendingInput {
+    id: String,
+    text: String,
+}
+
+fn pending() -> &'static Mutex<HashMap<String, VecDeque<PendingInput>>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, VecDeque<PendingInput>>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 这个会话当前有没有回合在跑。
+fn is_running(session_id: &str) -> bool {
+    running()
+        .lock()
+        .map(|map| map.contains_key(session_id))
+        .unwrap_or(false)
+}
+
+/// 最多排几条：排太多说明用户在刷屏，不如让他等一下。
+const MAX_PENDING: usize = 4;
+
+fn enqueue(session_id: &str, text: &str) -> Result<PendingInput, String> {
+    let mut map = pending().lock().expect("插话队列锁");
+    let queue = map.entry(session_id.to_string()).or_default();
+    if queue.len() >= MAX_PENDING {
+        return Err(format!("已经排了 {MAX_PENDING} 条，等这一轮跑完再发"));
+    }
+    let input = PendingInput {
+        id: new_message_id(),
+        text: text.to_string(),
+    };
+    queue.push_back(input.clone());
+    Ok(input)
+}
+
+fn take_inputs(session_id: &str) -> Vec<PendingInput> {
+    let mut map = pending().lock().expect("插话队列锁");
+    match map.get_mut(session_id) {
+        Some(queue) => queue.drain(..).collect(),
+        None => Vec::new(),
+    }
+}
+
+fn has_inputs(session_id: &str) -> bool {
+    pending()
+        .lock()
+        .map(|map| map.get(session_id).map(|queue| !queue.is_empty()).unwrap_or(false))
+        .unwrap_or(false)
+}
+
+/// 把没送出去的插话退回前端（用户点了停止 / 这一轮失败）。
+fn release_inputs(app: &AppHandle, session_id: &str) {
+    let dropped = drop_inputs(session_id);
+    if dropped.is_empty() {
+        return;
+    }
+    emit(
+        app,
+        "session.input.dropped",
+        json!({ "sessionID": session_id, "texts": dropped }),
+    );
+}
+
+/// 停手 / 失败时把还没送出去的还回去（前端会把它们放回输入框）。
+fn drop_inputs(session_id: &str) -> Vec<String> {
+    let mut map = pending().lock().expect("插话队列锁");
+    match map.remove(session_id) {
+        Some(queue) => queue.into_iter().map(|item| item.text).collect(),
+        None => Vec::new(),
     }
 }
 
@@ -321,12 +395,29 @@ pub fn send(
     let raw = super::raw_session_id(session_id)
         .ok_or_else(|| format!("不是原生会话：{session_id}"))?;
     let meta = store::load_meta(raw).ok_or_else(|| "原生会话不存在".to_string())?;
-    let cfg = config::load();
-    let (provider, model) = resolve_pick(&cfg, provider_id, model_id)?;
     let directory = meta.directory.clone();
     let session_id = session_id.to_string();
-    // 槽位先占住：同一会话不允许并发两轮。
-    let slot = RunSlot::take(&session_id)?;
+
+    // 槽位先占住：同一会话不允许并发两轮。占不到＝这一轮正在跑，
+    // 这条消息改成插话——排进队列，等下次请求模型前接上，立刻返回。
+    let slot = match RunSlot::take(&session_id) {
+        Ok(slot) => slot,
+        Err(error) => {
+            if !is_running(&session_id) {
+                return Err(error);
+            }
+            let queued = enqueue(&session_id, text)?;
+            emit(
+                app,
+                "session.input.queued",
+                json!({ "sessionID": session_id, "id": queued.id, "text": queued.text }),
+            );
+            return Ok(queued.id);
+        }
+    };
+
+    let cfg = config::load();
+    let (provider, model) = resolve_pick(&cfg, provider_id, model_id)?;
 
     let user_id = new_message_id();
     let user_message = store::StoredMessage {
@@ -347,43 +438,55 @@ pub fn send(
         json!({ "sessionID": session_id }),
     );
 
-    let outcome = run_turns(
-        app,
-        raw,
-        &session_id,
-        &directory,
-        &provider,
-        &model,
-        cfg.max_turns(),
-        approval::parse(approval_mode),
-        &slot,
-    );
-    match outcome {
-        Ok(Stop::Done) => {
-            emit(
-                app,
-                "session.execution.succeeded",
-                json!({ "sessionID": session_id }),
-            );
-            Ok(user_id)
+    // 回合丢到后台线程：原生引擎一轮可能跑几分钟，IPC 一直挂着的话，
+    // 前端「发送中」就整轮为 true——输入框被锁、按钮全灰，连"插话"都点不了。
+    // 投递完立刻返回；过程靠事件推，出错也走 session.execution.failed。
+    let worker_app = app.clone();
+    let worker_raw = raw.to_string();
+    let worker_session = session_id.clone();
+    let worker_directory = directory.clone();
+    let worker_permission = approval::parse(approval_mode);
+    let max_turns = cfg.max_turns();
+    std::thread::spawn(move || {
+        let outcome = run_turns(
+            &worker_app,
+            &worker_raw,
+            &worker_session,
+            &worker_directory,
+            &provider,
+            &model,
+            max_turns,
+            worker_permission,
+            &slot,
+        );
+        match outcome {
+            Ok(Stop::Done) => {
+                emit(
+                    &worker_app,
+                    "session.execution.succeeded",
+                    json!({ "sessionID": worker_session }),
+                );
+            }
+            Ok(Stop::Cancelled) => {
+                release_inputs(&worker_app, &worker_session);
+                emit(
+                    &worker_app,
+                    "session.execution.interrupted",
+                    json!({ "sessionID": worker_session }),
+                );
+            }
+            Err(error) => {
+                release_inputs(&worker_app, &worker_session);
+                emit(
+                    &worker_app,
+                    "session.execution.failed",
+                    json!({ "sessionID": worker_session, "error": error }),
+                );
+            }
         }
-        Ok(Stop::Cancelled) => {
-            emit(
-                app,
-                "session.execution.interrupted",
-                json!({ "sessionID": session_id }),
-            );
-            Ok(user_id)
-        }
-        Err(error) => {
-            emit(
-                app,
-                "session.execution.failed",
-                json!({ "sessionID": session_id, "error": error }),
-            );
-            Err(error)
-        }
-    }
+    });
+
+    Ok(user_id)
 }
 
 /// 一轮回合是怎么结束的：跑完 / 被叫停。
@@ -413,6 +516,28 @@ fn run_turns(
     for ordinal in 0..max_turns {
         if slot.stopped() {
             return Ok(Stop::Cancelled);
+        }
+        // 插话：上一次工具跑完、下一次请求模型前接上。落库顺序就是它被看到的顺序。
+        for input in take_inputs(session_id) {
+            let message = store::StoredMessage {
+                id: input.id.clone(),
+                role: "user".to_string(),
+                time: now_ms(),
+                text: input.text.clone(),
+                parts: vec![store::StoredPart::Text {
+                    text: input.text.clone(),
+                }],
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tokens: None,
+            };
+            store::append(raw, &message)?;
+            emit(
+                app,
+                "session.input.delivered",
+                json!({ "sessionID": session_id, "id": input.id }),
+            );
+            history.push(message);
         }
         let messages = provider_messages(directory, &history);
         let assistant_id = new_message_id();
@@ -501,6 +626,10 @@ fn run_turns(
                     tokens,
                 },
             )?;
+            // 刚好这时候有人插话：这一轮不算完，接上继续。
+            if has_inputs(session_id) {
+                continue;
+            }
             return Ok(Stop::Done);
         }
 
@@ -640,6 +769,42 @@ fn run_turns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_inputs_roundtrip() {
+        let sid = "native:test-pending-roundtrip";
+        assert!(!has_inputs(sid));
+        let first = enqueue(sid, "一").expect("入队");
+        let second = enqueue(sid, "二").expect("入队");
+        assert!(has_inputs(sid));
+        assert_ne!(first.id, second.id);
+
+        let taken = take_inputs(sid);
+        assert_eq!(taken.len(), 2);
+        assert_eq!(taken[0].text, "一");
+        assert_eq!(taken[1].text, "二");
+        // 取走就清空，别让下一轮重复注入
+        assert!(!has_inputs(sid));
+        assert!(take_inputs(sid).is_empty());
+    }
+
+    #[test]
+    fn pending_inputs_cap_and_drop() {
+        let sid = "native:test-pending-cap";
+        for index in 0..MAX_PENDING {
+            enqueue(sid, &format!("第 {index} 条")).expect("入队");
+        }
+        assert!(enqueue(sid, "超了").is_err(), "超过上限要拒绝");
+        let dropped = drop_inputs(sid);
+        assert_eq!(dropped.len(), MAX_PENDING);
+        assert_eq!(dropped[0], "第 0 条");
+        assert!(drop_inputs(sid).is_empty());
+    }
+
+    #[test]
+    fn idle_session_is_not_running() {
+        assert!(!is_running("native:definitely-not-running"));
+    }
 
     fn message(role: &str, text: &str) -> store::StoredMessage {
         store::StoredMessage {
