@@ -606,6 +606,9 @@ pub struct SendOptions {
     /// 推理档位（OpenCode variant / Codex effort）。
     #[serde(default)]
     pub variant: Option<String>,
+    /// 权限档位（仅原生引擎：read-only / ask / full）。
+    #[serde(default)]
+    pub approval: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -666,6 +669,7 @@ pub async fn session_send(
                 &text,
                 options.provider.as_deref(),
                 options.model.as_deref(),
+                options.approval.as_deref(),
             )
         })
         .await
@@ -953,8 +957,7 @@ pub async fn session_permissions(
     session_id: String,
 ) -> Result<Vec<PermissionRequest>, String> {
     if native::is_native_session(&session_id) {
-        // 原生引擎目前不做逐条审批：只有路径守卫和命令超时两道闸。
-        return Ok(Vec::new());
+        return Ok(native::approval::list(&session_id));
     }
     if is_codex_session(&session_id) {
         let codex_runtime = codex_runtime.inner().clone();
@@ -981,6 +984,9 @@ pub async fn session_permission_reply(
 ) -> Result<(), String> {
     #[cfg(debug_assertions)]
     println!("[prism] session_permission_reply -> {session_id} {request_id} {decision}");
+    if native::is_native_session(&session_id) {
+        return native::approval::reply(&request_id, &decision);
+    }
     if is_codex_session(&session_id) {
         let codex_runtime = codex_runtime.inner().clone();
         return tauri::async_runtime::spawn_blocking(move || {

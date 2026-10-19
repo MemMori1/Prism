@@ -55,6 +55,8 @@ import ArtifactViewer from './ArtifactViewer.vue'
 import TagPicker from './TagPicker.vue'
 import ModelMenu from './ModelMenu.vue'
 import BranchPicker from './BranchPicker.vue'
+import PermissionPicker from './PermissionPicker.vue'
+import { DEFAULT_APPROVAL, loadApproval, saveApproval, type ApprovalMode } from '../approval'
 
 const props = defineProps<{
   session: SessionSummary | null
@@ -100,6 +102,22 @@ const stick = ref(true)
 const highlightId = ref<string | null>(null)
 /** 交付物就地预览：当前打开的本地文件路径。 */
 const artifactPath = ref<string | null>(null)
+
+/** 权限档位：只对原生引擎有意义（别的引擎在各自应用里管权限）。 */
+const approvalMode = ref<ApprovalMode>(DEFAULT_APPROVAL)
+
+watch(
+  () => props.session?.id,
+  () => {
+    approvalMode.value = loadApproval(props.session?.id)
+  },
+  { immediate: true },
+)
+
+watch(approvalMode, mode => saveApproval(props.session?.id, mode))
+
+/** 这个会话是不是 Prism 内置引擎（只有它吃这里的权限档位）。 */
+const nativeSession = computed(() => props.session?.engine === 'native')
 
 /** 「文件」抽屉：看改动 / 全部文件，也能被聊天里的路径直接点开。 */
 const changesOpen = ref(false)
@@ -1147,6 +1165,7 @@ async function send() {
       await api.sessionCommand(sessionId, invocation.name, invocation.text)
     } else {
       const options: SendOptions = { files }
+      if (nativeSession.value) options.approval = approvalMode.value
       const picked = resolveModel()
       if (picked) {
         options.model = picked.model
@@ -1648,6 +1667,12 @@ watch(
               class="composer-branch"
               :directory="session.directory"
               @changed="onBranchChanged"
+            />
+
+            <PermissionPicker
+              v-if="nativeSession"
+              v-model="approvalMode"
+              :disabled="sending"
             />
 
             <span class="composer-hint" role="status">{{ composerHint }}</span>

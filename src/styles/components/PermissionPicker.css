@@ -1,0 +1,170 @@
+/*
+ * 权限档位 chip + 弹层。
+ * 和分支 chip 同一套尺寸：输入框工具行里两个小胶囊并排，视觉上是同级的东西。
+ */
+
+.perm-pick {
+  display: inline-flex;
+  min-width: 0;
+}
+
+.perm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.perm-chip svg {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  opacity: 0.9;
+}
+
+.perm-label {
+  white-space: nowrap;
+}
+
+.perm-chip:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.perm-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 只读：锁着；完全访问：放开但有风险感（琥珀） */
+.perm-chip.mode-read-only {
+  color: var(--muted);
+}
+
+.perm-chip.mode-full {
+  border-color: color-mix(in srgb, var(--amber) 40%, var(--border));
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.perm-chip.on {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* ---------- 弹层 ---------- */
+
+.perm-pop {
+  position: fixed;
+  z-index: 90;
+  width: 300px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+  animation: perm-pop 0.12s ease-out;
+}
+
+@keyframes perm-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.perm-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 8px 6px;
+}
+
+.perm-title {
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.perm-sub {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.perm-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  text-align: left;
+  color: var(--text);
+}
+
+.perm-item:hover {
+  background: var(--hover);
+}
+
+.perm-item.current {
+  background: var(--accent-soft);
+}
+
+.perm-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.perm-item-label {
+  font-size: 11.5px;
+  font-weight: 560;
+}
+
+.perm-item-hint {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.perm-check {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 2px;
+  color: var(--accent-text);
+}
+
+.perm-foot {
+  margin: 4px 0 0;
+  padding: 6px 8px 2px;
+  border-top: 1px solid var(--border);
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .perm-pop {
+    animation: none;
+  }
+}

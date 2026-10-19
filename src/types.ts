@@ -465,6 +465,8 @@ export interface SendOptions {
   model?: string | null
   provider?: string | null
   variant?: string | null
+  /** 权限档位（原生引擎的闸门：read-only / ask / full）。 */
+  approval?: string | null
 }
 
 /** 一个模型服务里的模型（`active` = 当前选中的那个）。 */

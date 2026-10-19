@@ -11,10 +11,22 @@
 //! - `agent`    turn 循环：模型 → 工具 → 模型，事件原样喂给前端 liveTurn
 
 pub mod agent;
+pub mod approval;
 pub mod config;
 pub mod provider;
 pub mod store;
 pub mod tools;
+
+/// 往引擎事件通道推一条事件。
+///
+/// 权限请求（`permission.asked`）不是 turn 循环内部的事，这里对外开一个口。
+pub fn emit_event(app: &tauri::AppHandle, event_type: &str, data: serde_json::Value) {
+    use tauri::Emitter;
+    let _ = app.emit(
+        agent::EVENT_NAME,
+        serde_json::json!({ "type": event_type, "data": data }),
+    );
+}
 
 /// 引擎 id（与前端的 engine 字段一致）。
 pub const ENGINE_ID: &str = "native";

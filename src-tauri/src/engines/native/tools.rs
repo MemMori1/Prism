@@ -81,7 +81,7 @@ impl ToolOutcome {
         }
     }
 
-    fn fail(text: impl Into<String>) -> Self {
+    pub fn fail(text: impl Into<String>) -> Self {
         let text = text.into();
         ToolOutcome {
             error: Some(text.clone()),

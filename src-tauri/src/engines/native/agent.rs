@@ -4,7 +4,7 @@
 //! `session.tool.called` …），这样前端不需要为原生引擎加任何适配逻辑：
 //! 流式过程走事件，落定后走 `read_timeline`。
 
-use super::{config, provider, store, tools};
+use super::{approval, config, provider, store, tools};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +25,8 @@ pub fn cancel(session_id: &str) -> bool {
     match map.get(session_id) {
         Some(flag) => {
             flag.store(true, Ordering::SeqCst);
+            // 正卡在审批上的线程要靠这个醒过来（否则得等下一次 200ms 轮询）。
+            approval::release_session(session_id);
             true
         }
         None => false,
@@ -314,6 +316,7 @@ pub fn send(
     text: &str,
     provider_id: Option<&str>,
     model_id: Option<&str>,
+    approval_mode: Option<&str>,
 ) -> Result<String, String> {
     let raw = super::raw_session_id(session_id)
         .ok_or_else(|| format!("不是原生会话：{session_id}"))?;
@@ -352,6 +355,7 @@ pub fn send(
         &provider,
         &model,
         cfg.max_turns(),
+        approval::parse(approval_mode),
         &slot,
     );
     match outcome {
@@ -397,6 +401,7 @@ fn run_turns(
     provider: &config::ProviderConfig,
     model: &str,
     max_turns: u32,
+    permission: approval::Mode,
     slot: &RunSlot,
 ) -> Result<Stop, String> {
     let specs = tools::specs();
@@ -540,9 +545,29 @@ fn run_turns(
                 }),
             );
 
-            let result = tools::execute_with_stop(directory, &call.name, &call.arguments, &|| {
-                slot.stopped()
+            // 权限闸门：只读直接拒；询问档在这里发事件并等用户回复。
+            let gate = approval::action_of(&call.name).and_then(|action| {
+                let verdict = approval::gate(
+                    app,
+                    session_id,
+                    permission,
+                    action,
+                    approval::resources_of(&call.name, &input),
+                    approval::message_of(&call.name),
+                    &call.id,
+                    &|| slot.stopped(),
+                );
+                match verdict {
+                    approval::Verdict::Allow => None,
+                    approval::Verdict::Deny(reason) => Some(reason),
+                }
             });
+            let result = match gate {
+                Some(reason) => tools::ToolOutcome::fail(reason),
+                None => tools::execute_with_stop(directory, &call.name, &call.arguments, &|| {
+                    slot.stopped()
+                }),
+            };
             emit(
                 app,
                 "session.tool.success",
