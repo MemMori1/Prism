@@ -92,3 +92,21 @@
     transition: none;
   }
 }
+
+/* ---------- 服务图标（触发器 + 列表行共用） ---------- */
+
+/* 品牌标志细节多：13px 以下会糊成一团，所以最小 14（尺寸由组件的 size 给） */
+.mm-icon {
+  flex: none;
+  color: var(--muted);
+}
+
+.mm-icon-sm {
+  /* 列表里用 muted 而不是 faint：faint 在浅色下几乎看不见形状 */
+  color: var(--muted);
+}
+
+.sel-option.selected .mm-icon-sm,
+.sel-option.active .mm-icon-sm {
+  color: var(--accent-text);
+}

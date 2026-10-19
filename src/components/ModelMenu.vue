@@ -6,6 +6,7 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { modelKeyLabel } from '../composer'
+import ModelIcon from './ModelIcon.vue'
 
 interface ModelOption {
   value: string
@@ -50,6 +51,7 @@ const pos = ref({ left: 0, top: 0, bottom: null as number | null, width: 280, ma
 const FOOT_HEIGHT = 66
 const MIN_WIDTH = 260
 
+/** 触发器上的小图标：按模型所属服务挑一个（没选具体模型就不画）。 */
 const selectedIndex = computed(() => props.options.findIndex(item => item.value === props.modelValue))
 const selectedLabel = computed(() => {
   const found = props.options.find(item => item.value === props.modelValue)
@@ -278,6 +280,7 @@ onBeforeUnmount(() => {
       @click="toggle"
       @keydown="onTriggerKeydown"
     >
+      <ModelIcon v-if="modelValue" :model="modelValue" :size="15" />
       <span class="sel-label">{{ currentLabel }}</span>
       <svg
         class="sel-chevron"
@@ -308,6 +311,7 @@ onBeforeUnmount(() => {
             @pointerenter="activeIndex = index"
             @click="pickModel(index)"
           >
+            <ModelIcon v-if="option.value" class="mm-icon-sm" :model="option.value" :size="14" />
             <span class="sel-option-label">{{ option.label }}</span>
             <svg
               v-if="option.value === modelValue"
