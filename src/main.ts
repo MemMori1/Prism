@@ -3,6 +3,7 @@ import App from './App.vue'
 import 'katex/dist/katex.min.css'
 import './styles.css'
 import { setSystemNotifier } from './notify'
+import { installRenderErrorHooks } from './renderErrors'
 import { systemNotify } from './systemNotify'
 import { initTheme } from './theme'
 import { initDevtoolsHotkey } from './devtools'
@@ -25,4 +26,7 @@ setSystemNotifier((title, body) => {
   void systemNotify(title, body)
 })
 
-createApp(App).mount('#app')
+// 组件渲染 / 计算属性抛异常时别只留一块白屏：收成一条顶栏消息，顺带进控制台。
+const app = createApp(App)
+installRenderErrorHooks(app)
+app.mount('#app')

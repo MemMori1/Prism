@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref, computed, watch, nextTick } from 'vue'
 import { api } from './api'
 import { basename, relativeTime } from './format'
 import { refreshGitInfo } from './gitInfo'
+import { clearRenderError, renderError } from './renderErrors'
 import { mergeTrayCounts, type ArchiveStatus, type WorkbenchStatus } from './trayStatus'
 import {
   notifications,
@@ -721,6 +722,14 @@ onBeforeUnmount(() => {
       <div class="app-main">
         <transition name="fade">
           <div v-if="error" class="error-banner">{{ error }}</div>
+        </transition>
+
+        <!-- 组件崩了才会出现：把原因摆出来，别只留一块白屏 -->
+        <transition name="fade">
+          <div v-if="renderError" class="error-banner render-error" role="alert">
+            <span class="render-error-text">界面出错：{{ renderError }}</span>
+            <button class="render-error-close" type="button" @click="clearRenderError()">知道了</button>
+          </div>
         </transition>
 
         <div ref="panesEl" class="panes">

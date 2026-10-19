@@ -300,6 +300,33 @@
   font-size: 12px;
 }
 
+/* 渲染级错误：原因 + 一个「知道了」，不用逼用户去开 DevTools */
+.error-banner.render-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, 80%);
+}
+
+.render-error-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.render-error-close {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+  border-radius: 5px;
+  color: var(--red);
+  font-size: 11px;
+}
+
+.render-error-close:hover {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+
 .panes {
   display: flex;
   flex: 1;

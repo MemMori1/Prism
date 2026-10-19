@@ -53,7 +53,7 @@
   color: var(--faint);
 }
 
-/* 左栏底部：回多列 + 目录（选了目录右侧 Agent 才解锁）。 */
+/* 左栏底部：目录（选了目录右侧 Agent 才解锁）。 */
 .wb-start-foot {
   flex: none;
   display: flex;
@@ -197,22 +197,6 @@
 
 .wb-start-item-sub.tone-wait {
   color: var(--amber);
-}
-
-.wb-start-back {
-  flex: none;
-  height: 28px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  color: var(--muted);
-  font-size: 11.5px;
-}
-
-.wb-start-back:hover {
-  background: var(--panel-2);
-  border-color: var(--border-strong);
-  color: var(--text);
 }
 
 .wb-start-right {

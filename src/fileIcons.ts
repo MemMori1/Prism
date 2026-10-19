@@ -50,8 +50,8 @@ const BY_NAME: Record<string, FileIconKind> = {
 }
 
 /** 文件名（或路径）→ 图标类型。 */
-export function fileIconKind(name: string): FileIconKind {
-  const clean = (name.split(/[?#]/)[0] ?? '').trim()
+export function fileIconKind(name: string | null | undefined): FileIconKind {
+  const clean = (name ?? '').split(/[?#]/)[0].trim()
   if (!clean) return 'file'
   const lowered = clean.toLowerCase()
   const base = lowered.split('/').pop() ?? lowered

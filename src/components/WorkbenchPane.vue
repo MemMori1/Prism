@@ -210,9 +210,9 @@ function report(cause: unknown) {
   emit('error', cause instanceof Error ? cause.message : String(cause))
 }
 
-/** 目录比路径：忽略结尾的斜杠。 */
-function samePath(a: string, b: string): boolean {
-  return a.replace(/\/+$/, '') === b.replace(/\/+$/, '')
+/** 目录比路径：忽略结尾的斜杠。（后端字段理论上一定在，但页面渲染经不起一个 undefined。） */
+function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
+  return (a ?? '').replace(/\/+$/, '') === (b ?? '').replace(/\/+$/, '')
 }
 
 /** 路径提示：太长就只留尾部三段，前面用 … 代替。 */
@@ -434,14 +434,6 @@ function startNewSession() {
 function showStartPage(focus: string | null) {
   page.value.startOpen = true
   page.value.focusedId = focus
-  sessionError.value = null
-  persistWorkspace()
-}
-
-/** 回到多列并排。 */
-function showColumns() {
-  page.value.startOpen = false
-  page.value.focusedId = null
   sessionError.value = null
   persistWorkspace()
 }
@@ -677,7 +669,6 @@ defineExpose({
   openColumn,
   openInStartPage,
   showStartPage,
-  showColumns,
   startNewSession,
   focusSession,
 })
@@ -780,15 +771,6 @@ defineExpose({
           </div>
 
           <div class="wb-start-foot">
-            <button
-              v-if="item.columns.length"
-              class="wb-start-back"
-              title="回到多列并排视图"
-              @click="showColumns"
-            >
-              ⊞ 并排看
-            </button>
-
             <div class="wb-start-dir">
               <div class="wb-start-dir-head">
                 <span class="wb-start-label">目录</span>
