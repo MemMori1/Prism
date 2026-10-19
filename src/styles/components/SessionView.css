@@ -485,6 +485,79 @@
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* 执行中按回车：消息先停在这张卡上，右侧三个按钮决定「立刻送 / 改 / 删」 */
+.queued-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 10px 0;
+  padding: 6px 6px 6px 10px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+
+.queued-tag {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.queued-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.6;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+
+.queued-actions {
+  flex: none;
+  display: flex;
+  gap: 2px;
+}
+
+.queued-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--accent-text);
+}
+
+.queued-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.queued-btn:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.queued-btn.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.queued-btn.primary:hover {
+  background: var(--accent-strong);
+}
+
 .composer-input-wrap {
   position: relative;
   display: flex;

@@ -124,6 +124,12 @@ watch(approvalMode, mode => saveApproval(props.session?.id, mode))
 /** 这个会话是不是 Prism 内置引擎（只有它吃这里的权限档位）。 */
 const nativeSession = computed(() => props.session?.engine === 'native')
 
+/**
+ * 执行中按回车不直接插话，先停在「待发送」——当前输出还在流，突然插一句
+ * 容易让人以为打断了；要不要立刻送进去由卡片上的按钮决定。
+ */
+const queued = ref('')
+
 /** 「文件」抽屉：看改动 / 全部文件，也能被聊天里的路径直接点开。 */
 const changesOpen = ref(false)
 /** 聊天里点了某个路径：抽屉打开后直接定位到它（绝对路径）。 */
@@ -843,6 +849,30 @@ const stopEvents = onEngineEvent(event => {
   // 中断：底部给一句。停止按钮自己会立刻提示，这里兜「从别处中断」的情况。
   if (event.type === 'session.execution.interrupted') {
     flashNotice('已中断')
+    recallQueued()
+  }
+  if (event.type === 'session.execution.failed') {
+    recallQueued()
+  }
+
+  // 插话：入队确认 → 提示一句；真正落库（下一步送达）→ 拉一次时间线。
+  if (event.type === 'session.input.queued') {
+    flashNotice('已插话 · 下一步送达')
+    return
+  }
+  if (event.type === 'session.input.delivered') {
+    void refreshTail()
+    return
+  }
+  if (event.type === 'session.input.dropped') {
+    // 停止 / 失败时还没送出去：原样退回输入框，别让它凭空消失。
+    const texts = Array.isArray(event.data?.texts) ? (event.data.texts as string[]) : []
+    const back = texts.join('\n')
+    if (back) {
+      draft.value = draft.value ? `${back}\n${draft.value}` : back
+      flashNotice('排队消息已退回输入框')
+    }
+    return
   }
 
   // 权限审批：进入 / 退出挂起列表（不参与 live 归约）。
@@ -938,11 +968,34 @@ function hasTurnResult(page: TimelinePage, coverage: LiveCoverage): boolean {
 
 // ---- 时间线分页 ----
 
+/**
+ * 滚到底。
+ *
+ * 只滚一次不够：代码块、图片、KaTeX 是分拍渲染的，第一帧量到的 `scrollHeight`
+ * 比最终矮，于是停在半路——进入会话时最明显（看到的是中间某条消息）。
+ * 这里连续跟几帧，直到高度不再变化；有更新的贴底请求就让它接管。
+ */
+let pinToken = 0
+
 function scrollToBottom() {
-  nextTick(() => {
+  const token = (pinToken += 1)
+  let lastHeight = -1
+  let frames = 0
+  const tick = () => {
+    if (token !== pinToken) return
     const el = scroller.value
-    if (el) el.scrollTop = el.scrollHeight
-  })
+    if (!el) return
+    // 用户自己往上滚了就别再把他拽回来
+    if (!stick.value) return
+    el.scrollTop = el.scrollHeight
+    const height = el.scrollHeight
+    frames += 1
+    if (height !== lastHeight && frames < 24) {
+      lastHeight = height
+      requestAnimationFrame(tick)
+    }
+  }
+  void nextTick(() => requestAnimationFrame(tick))
 }
 
 function maybeStick() {
@@ -1007,6 +1060,11 @@ async function loadInitial(sessionId: string) {
     report(cause)
   } finally {
     loading.value = false
+  }
+  // loading 期间只渲染「加载中」，内容这一刻才真正挂上——再贴一次底。
+  if (props.session?.id === sessionId) {
+    stick.value = true
+    scrollToBottom()
   }
 }
 
@@ -1205,6 +1263,8 @@ async function enhanceArtifacts() {
     thumbsInFlight += 1
     void loadThumb(card, resolveArtifactPath(raw)).finally(() => {
       thumbsInFlight -= 1
+      // 缩略图插进来会把内容顶高：还贴着底就再跟一次，别停在图上面。
+      maybeStick()
     })
   }
 }
@@ -1218,10 +1278,22 @@ watch(
 
 // ---- 输入与运行 ----
 
-async function send() {
+async function send(force = false) {
   if (readOnly.value) return
   const sessionId = props.session?.id
   if (!sessionId || sending.value) return
+
+  // 上一轮还在跑：先停在输入框上面的「待发送」，别直接打断。
+  if (running.value && !force && shellCommand(draft.value) === null) {
+    const pending = draft.value.trim()
+    if (!pending && !attachments.value.length) return
+    queued.value = pending
+    draft.value = ''
+    attachments.value = []
+    closePopup()
+    flashNotice('已排队 · 这一轮结束自动发出，或点「立即发送」插话')
+    return
+  }
 
   // ! 开头：本机 shell 直跑（不发给模型）
   const shell = shellCommand(draft.value)
@@ -1247,6 +1319,12 @@ async function send() {
 
   const content = draft.value.trim()
   if (!content && !attachments.value.length) return
+  // 先清空再投递：一次往返期间用户可能已经在写下一句，等回来再清会把它抹掉。
+  const sentDraft = draft.value
+  const sentFiles = attachments.value
+  draft.value = ''
+  attachments.value = []
+  closePopup()
   sending.value = true
   try {
     const directory = (props.session?.directory ?? '').replace(/\/+$/, '')
@@ -1271,9 +1349,6 @@ async function send() {
       await api.sessionSend(sessionId, content, options)
     }
     if (props.session?.id !== sessionId) return
-    draft.value = ''
-    attachments.value = []
-    closePopup()
     await refreshTail()
     stick.value = true
     scrollToBottom()
@@ -1282,11 +1357,53 @@ async function send() {
       if (props.session?.id === sessionId) void refreshTail()
     }, 600)
   } catch (cause) {
+    // 没发出去：放回输入框（用户没接着打字的前提下），别让内容凭空消失。
+    if (!draft.value) draft.value = sentDraft
+    if (!attachments.value.length) attachments.value = sentFiles
     report(cause)
   } finally {
     sending.value = false
   }
 }
+
+/** 「立即发送」：把排队内容现在就投进去（引擎会在下一步边界接上）。 */
+async function sendQueued() {
+  const content = queued.value
+  if (!content || sending.value) return
+  queued.value = ''
+  draft.value = content
+  await send(true)
+  if (draft.value === content) draft.value = ''
+  stick.value = true
+  scrollToBottom()
+}
+
+/**
+ * 回合被打断（或失败）：排队那条不要顺势发出去——用户刚点了停止，
+ * 再替他发一条等于没停。放回输入框，发不发由他决定。
+ */
+function recallQueued() {
+  if (!queued.value) return
+  draft.value = draft.value ? `${queued.value}\n${draft.value}` : queued.value
+  queued.value = ''
+}
+
+/** 「修改」：把排队内容搬回输入框接着编辑。 */
+function editQueued() {
+  if (!queued.value) return
+  draft.value = queued.value
+  queued.value = ''
+  void nextTick(() => composerInput.value?.focus())
+}
+
+/** 回合结束（running 由 true 变 false）：排队的那条自动发出去。 */
+watch(running, (now, before) => {
+  if (!before || now || !queued.value) return
+  // 后端释放回合槽位有一拍延迟，稍等一下再发，不然会被判成"上一轮还没结束"。
+  window.setTimeout(() => {
+    if (queued.value && !running.value && !sending.value) void sendQueued()
+  }, 400)
+})
 
 /**
  * 外面塞一条消息进来并发出去（工作台「新建会话」草稿的首条消息）。
@@ -1669,6 +1786,35 @@ watch(
           class="composer-box"
           :class="{ 'is-focused': composerFocused, 'is-menu': !!composerMenu }"
         >
+          <!-- 执行中按回车先停在这儿：要不要立刻送进去由这三个按钮决定 -->
+          <div v-if="queued" class="queued-card">
+            <span class="queued-tag">待发送</span>
+            <p class="queued-text">{{ queued }}</p>
+            <div class="queued-actions">
+              <button
+                class="queued-btn primary"
+                title="立即发送：插进这一轮，下一步送达"
+                aria-label="立即发送"
+                @click="sendQueued()"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" />
+                </svg>
+              </button>
+              <button class="queued-btn" title="修改" aria-label="修改" @click="editQueued()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M4 20h4l9.6-9.6a2.8 2.8 0 0 0-4-4L4 16v4Z" />
+                  <path d="m13.4 6.6 4 4" />
+                </svg>
+              </button>
+              <button class="queued-btn" title="删除" aria-label="删除" @click="queued = ''">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
           <div class="composer-input-wrap">
             <textarea
               ref="composerInput"
@@ -1678,10 +1824,9 @@ watch(
               spellcheck="false"
               :placeholder="
                 running
-                  ? '执行中：发送 = 插话引导（下一步送达），Shift+Enter 换行'
+                  ? '执行中：Enter 先排队，点「立即发送」立刻插进这一轮'
                   : '发一条指令…（Enter 发送，! 开头直接跑本机 shell）'
               "
-              :disabled="sending"
               @input="onComposerInput"
               @keydown="onComposerKeydown"
               @focus="onComposerFocus"
@@ -1831,7 +1976,7 @@ watch(
                       : '发送（Enter）'
                 "
                 :aria-label="shellMode ? '运行 shell' : running ? '插话' : '发送'"
-                @click="send"
+                @click="send()"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" />

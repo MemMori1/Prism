@@ -8,6 +8,8 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import type { TimelineRecord } from '../types'
 import { formatCost, formatDuration, formatTokens, fullTime } from '../format'
 import MetaIcon from './MetaIcon.vue'
+import ModelIcon from './ModelIcon.vue'
+import { recordModelKey } from '../composer'
 
 const props = withDefaults(
   defineProps<{
@@ -63,6 +65,10 @@ const context = computed(() => {
 })
 
 const modelLabel = computed(() => props.record?.model || props.model || '')
+/** 图标按模型服务走：归档记录能拼出 `provider::model`，实时轮次只有模型名也能认。 */
+const modelKey = computed(
+  () => (props.record ? recordModelKey(props.record) : null) ?? props.model ?? '',
+)
 const modelTitle = computed(() =>
   [props.record?.modelProvider, modelLabel.value, props.record?.variant]
     .filter(Boolean)
@@ -154,7 +160,8 @@ const visible = computed(() =>
 <template>
   <div v-if="visible" class="turn-meta" :class="`align-${align}`">
     <span v-if="modelLabel" class="tm-item tm-model" :title="modelTitle">
-      <MetaIcon name="model" />
+      <ModelIcon v-if="modelKey" :model="modelKey" :size="12" />
+      <MetaIcon v-else name="model" :size="12" />
       <span class="tm-ellipsis">{{ modelLabel }}</span>
     </span>
 
