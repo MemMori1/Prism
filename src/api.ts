@@ -94,6 +94,8 @@ export const api = {
   fileText: (path: string) => invoke<FileText>('file_text', { path }),
   /** 在系统文件管理器里定位这个文件。 */
   revealPath: (path: string) => invoke<void>('reveal_path', { path }),
+  /** 这个目录现在还在不在（历史会话可能指向已删 / 已移动的目录）。 */
+  dirExists: (path: string) => invoke<boolean>('dir_exists', { path }),
   /** 保存文本文件（只允许会话目录 / 仓库根之内的已存在文件）。 */
   writeText: (path: string, text: string, directory: string) =>
     invoke<number>('write_text', { path, text, directory }),

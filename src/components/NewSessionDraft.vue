@@ -19,9 +19,11 @@ const props = withDefaults(
     directory: string
     /** 正在建会话 / 正在发第一条消息。 */
     busy?: boolean
+    /** 这个目录已经不在磁盘上（历史会话的目录被删 / 改名）：不许发。 */
+    missing?: boolean
     error?: string | null
   }>(),
-  { busy: false, error: null },
+  { busy: false, missing: false, error: null },
 )
 
 const emit = defineEmits<{
@@ -32,7 +34,7 @@ const text = ref('')
 const box = ref<HTMLTextAreaElement | null>(null)
 const focused = ref(false)
 
-const canSend = computed(() => !!text.value.trim() && !props.busy)
+const canSend = computed(() => !!text.value.trim() && !props.busy && !props.missing)
 const dirName = computed(() => basename(props.directory) || props.directory)
 
 onMounted(() => box.value?.focus())
@@ -73,9 +75,15 @@ function onKeydown(event: KeyboardEvent) {
       </div>
 
       <h2>用 {{ engineLabel }} 开始</h2>
-      <p class="draft-desc">
-        目录<b :title="directory">{{ dirName }}</b
-        >· 发出第一条消息才真的建会话——不聊就不会留下空会话。
+      <p class="draft-desc" :class="{ missing }">
+        <template v-if="missing">
+          目录<b :title="directory">{{ dirName }}</b
+          >已经不存在了（被删除或移动）——先在左边换一个目录，再开始。
+        </template>
+        <template v-else>
+          目录<b :title="directory">{{ dirName }}</b
+          >· 发出第一条消息才真的建会话——不聊就不会留下空会话。
+        </template>
       </p>
 
       <div class="draft-box" :class="{ focused }">
@@ -84,8 +92,8 @@ function onKeydown(event: KeyboardEvent) {
           v-model="text"
           class="draft-input"
           rows="3"
-          :disabled="busy"
-          placeholder="写下第一条指令…"
+          :disabled="busy || missing"
+          :placeholder="missing ? '目录不存在，换一个再写' : '写下第一条指令…'"
           @focus="focused = true"
           @blur="focused = false"
           @keydown="onKeydown"

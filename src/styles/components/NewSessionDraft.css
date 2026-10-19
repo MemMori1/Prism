@@ -180,3 +180,9 @@
   font-size: 11.5px;
   line-height: 1.5;
 }
+
+/* 目录已经不存在：文案变红，输入框也锁住 */
+.draft-desc.missing,
+.draft-desc.missing b {
+  color: var(--red);
+}

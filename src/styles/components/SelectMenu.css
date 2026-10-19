@@ -95,6 +95,17 @@
   cursor: default;
 }
 
+/* 选中的项有问题（目录不存在）：触发器换成告警色，收起状态也看得出来 */
+.sel.is-warn .sel-trigger,
+.sel.is-warn .sel-chevron {
+  color: var(--red);
+}
+
+.sel.is-warn .sel-trigger {
+  border-color: color-mix(in srgb, var(--red) 40%, var(--border));
+  background: var(--red-soft);
+}
+
 /* ---------- 尺寸 ---------- */
 
 .sel-xs .sel-trigger {
@@ -245,6 +256,15 @@
   color: var(--faint);
   font-size: 10px;
   line-height: 1.3;
+}
+
+.sel-option-hint.warn {
+  color: var(--red);
+}
+
+/* 有问题的选项（目录不存在…）：不再强调成可选，但保留可点（切走 / 查看路径） */
+.sel-option.is-warn .sel-option-label {
+  color: var(--muted);
 }
 
 .sel-option.active {

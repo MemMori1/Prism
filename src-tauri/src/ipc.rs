@@ -1160,6 +1160,12 @@ pub async fn open_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 这个目录现在还在不在（历史会话可能指向已经删掉 / 移动的目录）。
+#[tauri::command]
+pub async fn dir_exists(path: String) -> Result<bool, String> {
+    Ok(crate::changes::dir_exists(&path))
+}
+
 /// 保存文本文件（编辑器用；只允许会话目录 / 仓库根之内的已存在文件）。
 #[tauri::command]
 pub async fn write_text(

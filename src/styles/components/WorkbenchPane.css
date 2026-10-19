@@ -91,6 +91,26 @@
   color: var(--faint);
 }
 
+/* 目录已经不在磁盘上：路径一行、提示一行，窄栏里也不会被省略号吃掉 */
+.wb-start-path.missing {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--red);
+  white-space: normal;
+}
+
+.wb-start-path.missing .missing-path,
+.wb-start-path.missing .missing-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-start-path.missing .missing-note {
+  font-size: 10px;
+}
+
 .wb-start-new {
   flex: none;
   height: 30px;

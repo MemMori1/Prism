@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   clampColumnWidth,
+  columnInDirectory,
   parseWorkbenchLayout,
   restoreColumnAction,
+  sameDirectory,
   serializeWorkbenchLayout,
   workbenchShowsStartPage,
   WORKBENCH_DEFAULT_WIDTH,
@@ -94,5 +96,32 @@ describe('workbenchShowsStartPage（进工作台默认落在两栏「新建会�
   it('一列都没有时永远是两栏页（没有列可看）', () => {
     expect(workbenchShowsStartPage(false, 0)).toBe(true)
     expect(workbenchShowsStartPage(true, 0)).toBe(true)
+  })
+})
+
+describe('sameDirectory', () => {
+  it('忽略结尾斜杠', () => {
+    expect(sameDirectory('/a/b', '/a/b/')).toBe(true)
+    expect(sameDirectory('/a/b', '/a/c')).toBe(false)
+  })
+
+  it('任一侧为空＝不同（还没选目录时不能当成相等）', () => {
+    expect(sameDirectory(null, '/a/b')).toBe(false)
+    expect(sameDirectory('', '')).toBe(false)
+  })
+})
+
+describe('columnInDirectory（页面只装当前目录的会话）', () => {
+  it('同目录留下，别的目录滤掉', () => {
+    expect(columnInDirectory({ session: { directory: '/a' } }, '/a')).toBe(true)
+    expect(columnInDirectory({ session: { directory: '/b' } }, '/a')).toBe(false)
+  })
+
+  it('还没选目录＝都留下', () => {
+    expect(columnInDirectory({ session: { directory: '/b' } }, null)).toBe(true)
+  })
+
+  it('会话还没到手＝先留下（别闪）', () => {
+    expect(columnInDirectory({ session: null }, '/a')).toBe(true)
   })
 })

@@ -65,3 +65,25 @@ export function serializeWorkbenchLayout(entries: WorkbenchLayoutEntry[]): strin
     entries.map(entry => ({ sessionId: entry.sessionId, width: clampColumnWidth(entry.width) })),
   )
 }
+
+/**
+ * 两个目录是不是同一个（忽略结尾斜杠；任一侧为空就按「不同」算）。
+ */
+export function sameDirectory(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false
+  return a.replace(/\/+$/, '') === b.replace(/\/+$/, '')
+}
+
+/**
+ * 这一列属不属于这个目录——页面只展示「当前目录 + 当前 Agent」的会话。
+ *
+ * 会话还没到手时先算「属于」：拿不到目录就没法判断，这时候藏起来只会让人以为会话丢了。
+ */
+export function columnInDirectory(
+  column: { session: { directory: string } | null },
+  directory: string | null | undefined,
+): boolean {
+  if (!directory) return true
+  if (!column.session) return true
+  return sameDirectory(column.session.directory, directory)
+}

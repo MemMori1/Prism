@@ -16,7 +16,13 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
-import { clampColumnWidth, restoreColumnAction, workbenchShowsStartPage } from '../workbench'
+import {
+  clampColumnWidth,
+  columnInDirectory,
+  restoreColumnAction,
+  sameDirectory,
+  workbenchShowsStartPage,
+} from '../workbench'
 import {
   allColumns,
   bindPageAgent,
@@ -92,7 +98,7 @@ const page = currentPage
 const selectedDir = computed<ExtraDir | null>(() => {
   const path = page.value.directory
   if (!path) return null
-  const project = props.projects.find(item => samePath(item.worktree, path))
+  const project = props.projects.find(item => sameDirectory(item.worktree, path))
   if (project) {
     return {
       id: project.id,
@@ -100,25 +106,51 @@ const selectedDir = computed<ExtraDir | null>(() => {
       worktree: project.worktree,
     }
   }
-  const extra = extraDirs.value.find(item => samePath(item.worktree, path))
+  const extra = extraDirs.value.find(item => sameDirectory(item.worktree, path))
   if (extra) return extra
   return { id: `${EXTRA_DIR_PREFIX}${path}`, label: basename(path) || path, worktree: path }
 })
 
 const selectedDirId = computed(() => selectedDir.value?.id ?? '')
 
+/**
+ * 页面记着的目录还在不在。
+ *
+ * 历史会话记的是绝对路径：目录被删 / 改名之后，下拉里那一项看着正常、其实用不了。
+ * 这里查一次（切页、换目录都重查），查不出来就当没问题——不拿网络之外的原因吓用户。
+ */
+const dirMissing = ref(false)
+let dirCheckToken = 0
+
+async function checkDirectory() {
+  const path = page.value.directory
+  const token = ++dirCheckToken
+  if (!path) {
+    dirMissing.value = false
+    return
+  }
+  try {
+    const ok = await api.dirExists(path)
+    if (token === dirCheckToken) dirMissing.value = !ok
+  } catch {
+    if (token === dirCheckToken) dirMissing.value = false
+  }
+}
+
 const choices = computed(() => engineChoices(props.health))
 
 const pickerHint = computed(() => {
+  if (dirMissing.value) return '这个页面记的工作目录已经不存在了——先在左边换一个目录，再挑 Agent'
   if (!selectedDir.value) return '先在左边选一个工作目录，或从下拉里的「＋ 新增目录…」在本机挑一个文件夹'
   return '挑一个 Agent 开始这一页——之后这一页只用它；要换就去顶栏面板底部「＋ 新建会话」'
 })
 
-const pickerDescription = computed(() =>
-  selectedDir.value
+const pickerDescription = computed(() => {
+  if (dirMissing.value) return '工作目录已被删除或移动。左边换一个目录，这一页才能继续。'
+  return selectedDir.value
     ? '工作目录已选好。挑一个 Agent，先写第一条指令再看要不要建会话。'
-    : '还没选工作目录。先在左边选一个，右边才会解锁。',
-)
+    : '还没选工作目录。先在左边选一个，右边才会解锁。'
+})
 
 /** 「＋ 新建会话」按钮的提示：本页已经绑了 Agent 就直说用谁。 */
 const newSessionHint = computed(() =>
@@ -131,7 +163,7 @@ const newSessionHint = computed(() =>
 const dirOptions = computed(() => {
   const raw = [
     ...extraDirs.value
-      .filter(extra => !props.projects.some(item => samePath(item.worktree, extra.worktree)))
+      .filter(extra => !props.projects.some(item => sameDirectory(item.worktree, extra.worktree)))
       .map(extra => ({ value: extra.id, label: extra.label, worktree: extra.worktree })),
     ...props.projects.map(item => ({
       value: item.id,
@@ -143,13 +175,13 @@ const dirOptions = computed(() => {
   // 页面记的是路径，不是项目 id，选哪条结果都一样。
   const rows: typeof raw = []
   for (const row of raw) {
-    if (!rows.some(kept => samePath(kept.worktree, row.worktree))) rows.push(row)
+    if (!rows.some(kept => sameDirectory(kept.worktree, row.worktree))) rows.push(row)
   }
   // 页面记着的目录这会儿不在列表里（项目被删掉之类）也要能显示出来；
   // 路径相同但 id 不同的，就地换成当前这条，别让下拉显示成「未选择」。
   const current = selectedDir.value
   if (current) {
-    const same = rows.findIndex(row => samePath(row.worktree, current.worktree))
+    const same = rows.findIndex(row => sameDirectory(row.worktree, current.worktree))
     if (same >= 0) rows[same] = { value: current.id, label: rows[same].label, worktree: current.worktree }
     else rows.unshift({ value: current.id, label: current.label, worktree: current.worktree })
   }
@@ -157,27 +189,48 @@ const dirOptions = computed(() => {
   // 名字唯一时不加第二行，列表保持紧凑。
   const counts = new Map<string, number>()
   for (const row of rows) counts.set(row.label, (counts.get(row.label) ?? 0) + 1)
-  return rows.map(row =>
-    (counts.get(row.label) ?? 0) > 1
+  // 页面记着的目录已经不在磁盘上：这一项要标出来，别让它看着和别的没两样。
+  const missingId = dirMissing.value ? current?.id : null
+  return rows.map(row => {
+    if (missingId && row.value === missingId) {
+      return { value: row.value, label: row.label, hint: '目录不存在', warn: true }
+    }
+    return (counts.get(row.label) ?? 0) > 1
       ? { value: row.value, label: row.label, hint: dirHint(row.worktree) }
-      : { value: row.value, label: row.label },
-  )
+      : { value: row.value, label: row.label }
+  })
 })
+
+/**
+ * 这一列属不属于本页当前的「目录 + Agent」组合。
+ *
+ * 会话还没到手（正在加载 / 恢复布局）时先留着——拿不到目录就没法判断，
+ * 这时候藏起来会让人以为会话丢了。
+ */
+function inPageScope(target: WorkspacePage, column: WorkspaceColumn): boolean {
+  return columnInDirectory(column, target.directory)
+}
+
+/** 本页当前目录下的列：换目录之后，别的目录的会话不再出现在这里。 */
+function pageColumns(target: WorkspacePage): WorkspaceColumn[] {
+  return target.columns.filter(column => inPageScope(target, column))
+}
 
 /** 本页的两栏「新建会话」页在前台吗；不在就画多列并排。 */
 function showsStartPage(target: WorkspacePage): boolean {
-  return workbenchShowsStartPage(target.startOpen, target.columns.length)
+  return workbenchShowsStartPage(target.startOpen, pageColumns(target).length)
 }
 
 /** 多列里画哪些列：两栏页聚焦的那一条由右栏画，同一个会话不会出现两个 SessionView。 */
 function canvasColumnsOf(target: WorkspacePage): WorkspaceColumn[] {
-  if (!showsStartPage(target)) return target.columns
-  return target.columns.filter(column => column.sessionId !== target.focusedId)
+  const visible = pageColumns(target)
+  if (!showsStartPage(target)) return visible
+  return visible.filter(column => column.sessionId !== target.focusedId)
 }
 
 /** 某一页右栏聚焦的那一条；null 表示右栏显示挑 Agent / 该页的草稿框。 */
 function focusedColumnOf(target: WorkspacePage): WorkspaceColumn | null {
-  return target.columns.find(column => column.sessionId === target.focusedId) ?? null
+  return pageColumns(target).find(column => column.sessionId === target.focusedId) ?? null
 }
 
 const focusedColumn = computed(() => focusedColumnOf(page.value))
@@ -208,11 +261,6 @@ watch(
 
 function report(cause: unknown) {
   emit('error', cause instanceof Error ? cause.message : String(cause))
-}
-
-/** 目录比路径：忽略结尾的斜杠。（后端字段理论上一定在，但页面渲染经不起一个 undefined。） */
-function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
-  return (a ?? '').replace(/\/+$/, '') === (b ?? '').replace(/\/+$/, '')
 }
 
 /** 路径提示：太长就只留尾部三段，前面用 … 代替。 */
@@ -293,8 +341,16 @@ function columnOf(sessionId: string): WorkspaceColumn | null {
 }
 
 /** 加一列（已存在则只刷新概要），不改变当前看到的是哪一屏。 */
+/** 本页只装「一个目录 + 一个 Agent」：打开的会话在别的目录，这一页就跟过去。 */
+function adoptDirectory(target: WorkspacePage, directory: string | null | undefined) {
+  if (!directory || sameDirectory(target.directory, directory)) return
+  target.directory = directory
+  persistWorkspace()
+}
+
 function addColumn(sessionId: string, session?: SessionSummary) {
   const target = page.value
+  if (session) adoptDirectory(target, session.directory)
   const existing = target.columns.find(column => column.sessionId === sessionId)
   if (existing) {
     if (session) existing.session = session
@@ -308,6 +364,8 @@ function addColumn(sessionId: string, session?: SessionSummary) {
     void fetchSummary(sessionId).then(summary => {
       const entry = target.columns.find(item => item.sessionId === sessionId)
       if (entry) entry.session = summary
+      // 概要到手才知道它在哪个目录：页面跟着走，不然这一列会被目录过滤藏起来。
+      adoptDirectory(target, summary?.directory)
     })
   }
 }
@@ -393,6 +451,8 @@ async function openColumn(sessionId: string, session?: SessionSummary) {
 async function openInStartPage(sessionId: string, session?: SessionSummary) {
   const owner = pageOfSession(sessionId)
   if (owner) {
+    // 这条会话在别的目录里：页面跟过去，不然它会被「当前目录」过滤掉。
+    adoptDirectory(owner, session?.directory ?? owner.columns.find(c => c.sessionId === sessionId)?.session?.directory)
     switchPage(owner.id)
     owner.startOpen = true
     owner.focusedId = sessionId
@@ -478,7 +538,7 @@ async function addDirectory() {
       title: '选择工作目录',
     })
     if (typeof picked !== 'string' || !picked) return
-    const known = props.projects.find(item => samePath(item.worktree, picked))
+    const known = props.projects.find(item => sameDirectory(item.worktree, picked))
     if (known) {
       bindPageDirectory(page.value, known.worktree)
       sessionError.value = null
@@ -661,6 +721,18 @@ onMounted(() => {
 // 新页 / 切页：目录还没选就沿用上次用过的；项目列表到位后也补一次（首屏可能还没加载出来）。
 watch([currentPageId, () => props.projects], () => restoreLastDirectory())
 
+// 页面目录变了（切页 / 换目录 / 恢复上次）就查一次还在不在。
+watch(() => page.value.directory, () => void checkDirectory(), { immediate: true })
+
+// 聚焦的会话不在本页当前目录里了（换了目录、或概要到手发现属于别的目录）：
+// 右栏回到草稿框，别继续挂着上一个目录的会话。
+watch(focusedColumn, column => {
+  if (!page.value.focusedId || column) return
+  page.value.focusedId = null
+  page.value.startOpen = true
+  persistWorkspace()
+})
+
 onBeforeUnmount(() => {
   stopResize()
 })
@@ -743,17 +815,17 @@ defineExpose({
 
           <div class="wb-start-head">
             <span>当前进行的会话</span>
-            <span v-if="item.columns.length" class="wb-start-count">{{ item.columns.length }}</span>
+            <span v-if="pageColumns(item).length" class="wb-start-count">{{ pageColumns(item).length }}</span>
           </div>
 
           <div class="wb-start-list">
-            <p v-if="!item.columns.length" class="wb-start-empty">
+            <p v-if="!pageColumns(item).length" class="wb-start-empty">
               这一页还没有会话——
               {{ item.agent ? `用 ${engineLabel(item.agent)} 建一个` : '先挑一个 Agent' }}；
               换 Agent 走顶栏面板底部的「＋ 新建会话」
             </p>
             <button
-              v-for="column in item.columns"
+              v-for="column in pageColumns(item)"
               :key="column.sessionId"
               class="wb-start-item"
               :class="{ active: column.sessionId === item.focusedId }"
@@ -787,10 +859,16 @@ defineExpose({
               />
               <p
                 class="wb-start-path"
-                :class="{ empty: !selectedDir }"
+                :class="{ empty: !selectedDir, missing: dirMissing }"
                 :title="selectedDir?.worktree ?? '还没选目录'"
               >
-                {{ selectedDir ? shortPath(selectedDir.worktree) : '还没选目录，右边 Agent 会锁住' }}
+                <template v-if="dirMissing">
+                  <span class="missing-path">⚠ {{ shortPath(selectedDir?.worktree ?? '') }}</span>
+                  <span class="missing-note">目录不存在，换一个</span>
+                </template>
+                <template v-else>
+                  {{ selectedDir ? shortPath(selectedDir.worktree) : '还没选目录，右边 Agent 会锁住' }}
+                </template>
               </p>
             </div>
           </div>
@@ -798,7 +876,7 @@ defineExpose({
 
         <div class="wb-start-right">
           <template
-            v-for="focused in item.columns.filter(column => column.sessionId === item.focusedId)"
+            v-for="focused in pageColumns(item).filter(column => column.sessionId === item.focusedId)"
             :key="focused.sessionId"
           >
             <SessionView
@@ -825,6 +903,7 @@ defineExpose({
               :engine-label="engineLabel(item.agent)"
               :directory="item.directory ?? ''"
               :busy="creatingSession"
+              :missing="dirMissing"
               :error="sessionError"
               @send="startFromDraft"
             />
@@ -832,7 +911,7 @@ defineExpose({
             <EngineChoicePanel
               v-else
               :choices="choices"
-              :locked="!item.directory"
+              :locked="!item.directory || dirMissing"
               :recent="lastStartEngine"
               :description="pickerDescription"
               :hint="pickerHint"

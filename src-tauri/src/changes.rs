@@ -396,6 +396,16 @@ fn clamp_bytes(text: &str, limit: usize) -> (String, bool) {
     (text[..end].to_string(), true)
 }
 
+// ---- 目录还在不在 ----
+
+/// 这个路径现在还在不在、且是个目录。
+///
+/// 历史会话记的是绝对路径；目录被删掉或改名之后，下拉里那个「目录」其实已经点不动了，
+/// 界面得知道这件事，才能在选之前提示用户换一个，而不是等建会话时才报错。
+pub fn dir_exists(path: &str) -> bool {
+    !path.is_empty() && Path::new(path).is_dir()
+}
+
 // ---- 文件预览 ----
 
 pub fn read_text(path: &str) -> Result<FileText, String> {
@@ -550,6 +560,24 @@ mod tests {
 
         // 越界路径要被挡掉
         assert!(diff(dir.to_str().unwrap(), "../etc/passwd").is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_exists_checks_directory() {
+        let dir = std::env::temp_dir().join(format!("prism-dirs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!dir_exists(dir.to_str().unwrap()));
+
+        fs::create_dir_all(&dir).expect("mkdir");
+        assert!(dir_exists(dir.to_str().unwrap()));
+
+        let file = dir.join("a.txt");
+        fs::write(&file, "x").expect("write");
+        // 文件不是目录；空串也不当目录
+        assert!(!dir_exists(file.to_str().unwrap()));
+        assert!(!dir_exists(""));
 
         let _ = fs::remove_dir_all(&dir);
     }

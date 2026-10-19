@@ -6,6 +6,8 @@ interface SelectOption {
   label: string
   /** 次要说明（如路径）：重名项靠它区分，显示在标签下面一行。 */
   hint?: string
+  /** 这项有问题（如目录已不存在）：说明用红色，选项跟着变淡。 */
+  warn?: boolean
   disabled?: boolean
 }
 
@@ -63,6 +65,8 @@ const pos = ref({ left: 0, top: 0, bottom: null as number | null, width: 240, ma
 
 const selectedIndex = computed(() => props.options.findIndex(item => item.value === props.modelValue))
 const selected = computed(() => props.options.find(item => item.value === props.modelValue) ?? null)
+/** 选中的这项本身有问题（如目录不存在）：触发器也要标出来。 */
+const selectedWarn = computed(() => Boolean(selected.value?.warn))
 const currentLabel = computed(() => selected.value?.label ?? props.placeholder)
 
 /** 底部动作也算一行：键盘能走到，`activeIndex === options.length` 就是它。 */
@@ -268,7 +272,7 @@ onBeforeUnmount(() => {
       `sel-${size}`,
       `sel-${shape}`,
       `sel-${tone}`,
-      { 'is-inline': inline, 'is-open': open, 'is-disabled': disabled },
+      { 'is-inline': inline, 'is-open': open, 'is-disabled': disabled, 'is-warn': selectedWarn },
     ]"
     :style="inline && maxWidth ? { maxWidth } : undefined"
   >
@@ -307,7 +311,11 @@ onBeforeUnmount(() => {
             :key="option.value"
             type="button"
             class="sel-option"
-            :class="{ active: index === activeIndex, selected: option.value === modelValue }"
+            :class="{
+              active: index === activeIndex,
+              selected: option.value === modelValue,
+              'is-warn': option.warn,
+            }"
             :disabled="option.disabled"
             role="option"
             :aria-selected="option.value === modelValue"
@@ -316,7 +324,9 @@ onBeforeUnmount(() => {
           >
             <span class="sel-option-text">
               <span class="sel-option-label">{{ option.label }}</span>
-              <span v-if="option.hint" class="sel-option-hint">{{ option.hint }}</span>
+              <span v-if="option.hint" class="sel-option-hint" :class="{ warn: option.warn }">
+                {{ option.hint }}
+              </span>
             </span>
             <svg
               v-if="option.value === modelValue"
