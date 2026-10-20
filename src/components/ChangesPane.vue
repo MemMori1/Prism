@@ -33,20 +33,48 @@ import { FILE_ICON_PATHS, fileIconKind } from '../fileIcons'
 import { basename, formatBytes } from '../format'
 import { highlightLines, languageOfPath } from '../highlight'
 import { renderMarkdown } from '../markdown'
+import { activeTaskCount } from '../tasks'
+import TerminalPane from './TerminalPane.vue'
 import type { ChangeFile, ChangeReport, FileDiff, FileHit, FileText } from '../types'
+
+/** 抽屉的两页：文件（改动 / 全部）与终端（后台任务的深水区）。 */
+type PaneTab = 'files' | 'term'
 
 const props = defineProps<{
   /** 会话的工作目录；null＝不显示。 */
   directory: string | null
+  /** 当前会话（终端页新建任务要记来源）。 */
+  sessionId?: string | null
   /** 现在有没有回合在跑：跑完自动刷一次（看新的改动）。 */
   running?: boolean
   /** 打开时直接定位到这个文件（聊天里点路径进来的）。绝对路径。 */
   initialPath?: string | null
+  /** 受控 tab：由父级决定打开时落在「文件」还是「终端」。 */
+  tab?: PaneTab
+  /** 终端页要选中的任务。 */
+  initialTaskId?: string | null
+  /** 外部要求打开「新建终端任务」表单：值变化即触发。 */
+  newTaskTick?: number
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
+  (e: 'update:tab', tab: PaneTab): void
 }>()
+
+const tab = computed<PaneTab>({
+  get: () => props.tab ?? 'files',
+  set: next => emit('update:tab', next),
+})
+
+/** 抽屉头「新建终端任务」：加一就够，终端页监听变化打开表单。 */
+const termTick = ref(0)
+const termNewTick = computed(() => (props.newTaskTick ?? 0) + termTick.value)
+
+function openNewTask(): void {
+  tab.value = 'term'
+  termTick.value += 1
+}
 
 type Mode = 'diff' | 'preview' | 'edit'
 
@@ -459,28 +487,63 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 <template>
   <div class="changes-backdrop" @click="emit('close')" />
-  <aside class="changes-drawer" aria-label="文件">
+  <aside class="changes-drawer" aria-label="文件与终端">
     <header class="ch-head">
       <div class="ch-head-main">
-        <span class="ch-title">文件</span>
-        <span v-if="listMode === 'changes' && report?.isRepo && files.length" class="ch-counts">
-          <span class="ch-added">+{{ report.additions }}</span>
-          <span class="ch-removed">−{{ report.deletions }}</span>
-          <span class="ch-files">{{ files.length }} 个文件</span>
-        </span>
-        <span v-else-if="listMode === 'all' && allFiles.length" class="ch-counts ch-files">
-          {{ allFiles.length }} 个文件
-        </span>
-        <span v-if="report?.branch" class="ch-branch" :title="report.branch">
-          {{ report.branch }}
+        <div class="ch-tabs" role="tablist" aria-label="文件与终端">
+          <button
+            class="ch-tab"
+            :class="{ on: tab === 'files' }"
+            role="tab"
+            :aria-selected="tab === 'files'"
+            @click="tab = 'files'"
+          >
+            文件
+          </button>
+          <button
+            class="ch-tab"
+            :class="{ on: tab === 'term' }"
+            role="tab"
+            :aria-selected="tab === 'term'"
+            @click="tab = 'term'"
+          >
+            终端
+            <span v-if="activeTaskCount" class="ch-tab-badge">{{ activeTaskCount }}</span>
+          </button>
+        </div>
+
+        <template v-if="tab === 'files'">
+          <span v-if="listMode === 'changes' && report?.isRepo && files.length" class="ch-counts">
+            <span class="ch-added">+{{ report.additions }}</span>
+            <span class="ch-removed">−{{ report.deletions }}</span>
+            <span class="ch-files">{{ files.length }} 个文件</span>
+          </span>
+          <span v-else-if="listMode === 'all' && allFiles.length" class="ch-counts ch-files">
+            {{ allFiles.length }} 个文件
+          </span>
+          <span v-if="report?.branch" class="ch-branch" :title="report.branch">
+            {{ report.branch }}
+          </span>
+        </template>
+        <span v-else class="ch-counts ch-files">
+          {{ activeTaskCount ? `${activeTaskCount} 个活动任务` : '没有在跑的任务' }}
         </span>
       </div>
       <div class="ch-head-acts">
-        <button class="ch-icon" title="刷新" :disabled="loading" @click="load">
+        <button
+          v-if="tab === 'files'"
+          class="ch-icon"
+          title="刷新"
+          :disabled="loading"
+          @click="load"
+        >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M20 11a8 8 0 1 1-2.3-5.6" />
             <path d="M20 4v7h-7" />
           </svg>
+        </button>
+        <button v-else class="ch-new-term" title="新建终端任务（⌘↵ 启动）" @click="openNewTask">
+          ＋ 新建终端任务
         </button>
         <button class="ch-icon" title="关闭（Esc）" @click="emit('close')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
@@ -490,7 +553,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       </div>
     </header>
 
-    <div class="ch-body">
+    <div v-show="tab === 'files'" class="ch-body">
       <div class="ch-side">
         <div class="ch-switch">
           <button class="ch-switch-btn" :class="{ on: listMode === 'changes' }" @click="setList('changes')">
@@ -775,6 +838,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         </div>
       </section>
     </div>
+
+    <TerminalPane
+      v-show="tab === 'term'"
+      :directory="directory"
+      :session-id="sessionId ?? null"
+      :initial-task-id="initialTaskId ?? null"
+      :new-task-tick="termNewTick"
+    />
   </aside>
 </template>
 

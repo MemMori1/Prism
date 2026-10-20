@@ -275,6 +275,17 @@
   border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
+.tool-bg {
+  flex: none;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--chart-2);
+  background: color-mix(in srgb, var(--chart-2) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--chart-2) 22%, transparent);
+}
+
 .agent-turns {
   font-weight: 400;
   color: var(--muted);

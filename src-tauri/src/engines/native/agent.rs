@@ -174,7 +174,7 @@ pub(crate) fn system_prompt(directory: &str) -> String {
          规则：\n\
          1. 改文件前先用 read_file 读原文，edit_file 的 old_string 必须与原文逐字一致（含缩进）。\n\
          2. 需要事实时用 grep / list_files 查，不要凭印象编造文件内容。\n\
-         3. 命令要短、可复现；不要执行需要交互输入的命令。\n\
+         3. 命令要短、可复现；不要执行需要交互输入的命令。预计超过 ~30 秒的（构建 / 全量测试 / dev server）用 run_command 的 background=true 转后台：它会进任务坞继续跑，别干等；之后用 task_status 看进度，stop=true 收掉。\n\
          4. 回答简洁：先说结论，再给必要的改动说明。\n\
          5. 大范围探索 / 调研（翻一堆文件、搜一堆关键词）交给 task 子代理：它有独立上下文，只把结论带回来。"
     )
@@ -751,9 +751,13 @@ fn run_turns(
                     (result, Some(extra_meta), extra_tokens)
                 }
                 None => (
-                    tools::execute_with_stop(directory, &call.name, &call.arguments, &|| {
-                        slot.stopped()
-                    }),
+                    tools::execute_with_runtime(
+                        tools::ToolRuntime { app, session_id },
+                        directory,
+                        &call.name,
+                        &call.arguments,
+                        &|| slot.stopped(),
+                    ),
                     None,
                     None,
                 ),

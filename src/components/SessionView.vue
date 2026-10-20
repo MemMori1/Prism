@@ -4,6 +4,7 @@ import { api } from '../api'
 import { joinPath } from '../changes'
 import { copyPlainText } from '../clipboard'
 import ChangesPane from './ChangesPane.vue'
+import BackgroundTasks from './BackgroundTasks.vue'
 import { annotationFor, ensureAnnotations, isStarred, setStar, setTitle, tagsOf, titleOf } from '../annotations'
 import {
   applyCompletion,
@@ -63,14 +64,20 @@ import { contextWindowOf } from '../modelIcons'
 import { charsOfRecords, contextBreakdown, type ContextChars } from '../contextShare'
 import { DEFAULT_APPROVAL, loadApproval, saveApproval, type ApprovalMode } from '../approval'
 
-const props = defineProps<{
-  session: SessionSummary | null
-  hasProject: boolean
-  /** 工作台列内嵌模式：隐藏会话头（由列头承担标题 / 状态）。 */
-  embedded?: boolean
-  /** 搜索结果定位：滚动到该消息并短暂高亮。 */
-  jumpMessageId?: string | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    session: SessionSummary | null
+    hasProject: boolean
+    /** 工作台列内嵌模式：隐藏会话头（由列头承担标题 / 状态）。 */
+    embedded?: boolean
+    /** 是否显示输入框上方的任务坞（工作台非聚焦列关掉，避免每列顶一条）。 */
+    showTasks?: boolean
+    /** 搜索结果定位：滚动到该消息并短暂高亮。 */
+    jumpMessageId?: string | null
+  }>(),
+  // Boolean 型 prop 没传时 Vue 会当 false，任务坞默认要开。
+  { showTasks: true },
+)
 
 const emit = defineEmits<{
   (e: 'error', message: string): void
@@ -132,6 +139,12 @@ const queued = ref('')
 
 /** 「文件」抽屉：看改动 / 全部文件，也能被聊天里的路径直接点开。 */
 const changesOpen = ref(false)
+/** 抽屉当前页：文件 / 终端（任务坞「在终端打开」会切到后者）。 */
+const changesTab = ref<'files' | 'term'>('files')
+/** 终端页要选中的任务。 */
+const terminalTaskId = ref<string | null>(null)
+/** 每次 +1：让终端页打开「新建任务」表单。 */
+const terminalNewTick = ref(0)
 /** 聊天里点了某个路径：抽屉打开后直接定位到它（绝对路径）。 */
 const fileTarget = ref<string | null>(null)
 /** 未吸附底部时累计的新消息数（回底浮标角标）。 */
@@ -1194,7 +1207,49 @@ function openFileLink(raw: string) {
   if (!path) return
   const directory = props.session?.directory ?? ''
   fileTarget.value = path.startsWith('/') ? path : joinPath(directory, path)
+  changesTab.value = 'files'
   changesOpen.value = true
+}
+
+// ---- 文件侧栏：文件 / 终端两页 ----
+
+/** 点会话头的「文件」：开着文件页就收起，否则切到文件页。 */
+function toggleFilesPane() {
+  if (changesOpen.value && changesTab.value === 'files') {
+    changesOpen.value = false
+    fileTarget.value = null
+    return
+  }
+  changesTab.value = 'files'
+  changesOpen.value = true
+}
+
+/** 任务坞「在终端打开」：切到终端页并选中那条任务。 */
+function openTerminalTab(taskId: string) {
+  changesTab.value = 'term'
+  terminalTaskId.value = taskId
+  changesOpen.value = true
+}
+
+/** 任务坞「在终端里看全部」。 */
+function openTerminalList() {
+  changesTab.value = 'term'
+  terminalTaskId.value = null
+  changesOpen.value = true
+}
+
+/** 任务坞「＋ 新任务」：终端页直接落在新建表单。 */
+function openNewTerminal() {
+  changesTab.value = 'term'
+  terminalTaskId.value = null
+  terminalNewTick.value += 1
+  changesOpen.value = true
+}
+
+function closeChangesPane() {
+  changesOpen.value = false
+  fileTarget.value = null
+  terminalTaskId.value = null
 }
 
 function onTimelineClick(event: MouseEvent) {
@@ -1604,8 +1659,8 @@ watch(
             <button
               class="changes-btn"
               :class="{ on: changesOpen }"
-              title="文件：改了什么 + 项目里的全部文件（可预览 / 外部打开）"
-              @click.stop="changesOpen = !changesOpen"
+              title="文件与终端：改动 / 全部文件 / 后台任务输出"
+              @click.stop="toggleFilesPane"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -1724,6 +1779,14 @@ watch(
       </button>
 
       <footer class="composer">
+        <BackgroundTasks
+          v-if="showTasks !== false"
+          :session-id="session.id"
+          @error="report"
+          @open-terminal="openTerminalTab"
+          @open-terminal-list="openTerminalList"
+          @new-terminal="openNewTerminal"
+        />
         <div v-if="readOnly" class="readonly-bar">
           <span aria-hidden="true">🔒</span>
           <span>
@@ -2079,9 +2142,14 @@ watch(
       v-if="changesOpen && session"
       :key="fileTarget ?? 'changes'"
       :directory="session.directory"
+      :session-id="session.id"
       :running="running"
       :initial-path="fileTarget"
-      @close="changesOpen = false; fileTarget = null"
+      :tab="changesTab"
+      :initial-task-id="terminalTaskId"
+      :new-task-tick="terminalNewTick"
+      @update:tab="changesTab = $event"
+      @close="closeChangesPane"
     />
   </main>
 </template>

@@ -76,6 +76,9 @@ interface ToolInput {
 
 const input = computed<ToolInput>(() => (resolved.value?.input as ToolInput | null) ?? {})
 
+/** run_command background=true：头部标一下「后台」，和任务坞里那条对上。 */
+const backgrounded = computed(() => input.value.background === true)
+
 const statusInfo = computed(() => {
   switch (props.part.status) {
     case 'completed':
@@ -266,6 +269,7 @@ function signOf(type: DiffRow['type']): string {
       <span class="tool-glyph">{{ toolGlyph }}</span>
       <span class="tool-name">{{ part.name }}</span>
       <span v-if="subagentLabel" class="tool-agent">{{ subagentLabel }}</span>
+      <span v-if="backgrounded" class="tool-bg" title="已转入后台任务坞">后台</span>
       <span
         v-if="part.summary && summaryIsPath"
         class="tool-summary tool-file"

@@ -7,6 +7,7 @@ mod files;
 mod gitinfo;
 mod ipc;
 mod routines;
+mod tasks;
 mod tray;
 
 use engines::codex::runtime::Runtime as CodexRuntime;
@@ -80,12 +81,17 @@ pub fn run() {
             ipc::native_provider_delete,
             ipc::native_model_select,
             ipc::native_models_fetch,
+            ipc::task_spawn,
+            ipc::task_list,
+            ipc::task_stop,
+            ipc::task_remove,
         ])
         .setup(|app| {
             app.manage(Runtime::new(app.handle().clone()));
             app.manage(CodexRuntime::new(app.handle().clone()));
             app.manage(engines::quota::QuotaState::new());
             app.manage(routines::scheduler::RoutinesState::new());
+            app.manage(tasks::TasksState::new());
             routines::scheduler::start(app.handle().clone());
             tray::setup(app.handle())?;
             Ok(())
@@ -116,6 +122,9 @@ pub fn run() {
                 }
                 if let Some(codex) = app_handle.try_state::<CodexRuntime>() {
                     codex.shutdown();
+                }
+                if let Some(tasks) = app_handle.try_state::<tasks::TasksState>() {
+                    tasks.shutdown();
                 }
             }
             _ => {}

@@ -61,9 +61,15 @@ impl AgentType {
     fn tool_names(self) -> &'static [&'static str] {
         match self {
             AgentType::Explore => &["read_file", "list_files", "grep"],
-            AgentType::General => {
-                &["read_file", "list_files", "grep", "write_file", "edit_file", "run_command"]
-            }
+            AgentType::General => &[
+                "read_file",
+                "list_files",
+                "grep",
+                "write_file",
+                "edit_file",
+                "run_command",
+                "task_status",
+            ],
         }
     }
 
@@ -82,7 +88,7 @@ impl AgentType {
                  职责：完成交办的子任务，最后输出一份简明报告。\n\
                  规则：\n\
                  1. 改文件前先 read_file 读原文，edit_file 的 old_string 必须与原文逐字一致（含缩进）。\n\
-                 2. 命令要短、可复现；不要执行需要交互输入的命令。\n\
+                 2. 命令要短、可复现；不要执行需要交互输入的命令。长命令用 run_command 的 background=true 转后台，再用 task_status 看结果。\n\
                  3. 报告格式：先说结论，再列改动（文件与要点），最后列遗留问题（如有）。"
             ),
         }
@@ -447,7 +453,16 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
             });
             let result = match denied {
                 Some(reason) => tools::ToolOutcome::fail(reason),
-                None => tools::execute_with_stop(ctx.directory, &call.name, &call.arguments, stop),
+                None => tools::execute_with_runtime(
+                    tools::ToolRuntime {
+                        app: ctx.app,
+                        session_id: ctx.session_id,
+                    },
+                    ctx.directory,
+                    &call.name,
+                    &call.arguments,
+                    stop,
+                ),
             };
             if steps.len() < MAX_STEPS {
                 steps.push(tool_step(

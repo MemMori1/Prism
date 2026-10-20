@@ -4,6 +4,7 @@ import type {
   ArtifactData,
   AssetFile,
   AssetItem,
+  BackgroundTask,
   ChangeReport,
   ContextStats,
   CreatedSession,
@@ -31,6 +32,7 @@ import type {
   SearchStats,
   SendOptions,
   SessionSummary,
+  TaskSpawnInput,
   TimelinePage,
   ToolDetail,
   UsageSummary,
@@ -186,4 +188,17 @@ export const api = {
   }) => invoke<NativeModel[]>('native_models_fetch', input),
   nativeProbe: (providerId?: string | null, model?: string | null) =>
     invoke<string>('native_probe', { providerId, model }),
+
+  /** 后台任务：起进程 / 列任务 / 停止 / 移出列表。 */
+  taskSpawn: (input: TaskSpawnInput) =>
+    invoke<BackgroundTask>('task_spawn', {
+      cmd: input.cmd,
+      cwd: input.cwd,
+      sessionId: input.sessionId ?? null,
+      title: input.title ?? null,
+      background: input.background ?? true,
+    }),
+  taskList: () => invoke<BackgroundTask[]>('task_list'),
+  taskStop: (id: string) => invoke<void>('task_stop', { id }),
+  taskRemove: (id: string) => invoke<void>('task_remove', { id }),
 }

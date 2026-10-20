@@ -528,3 +528,43 @@ export interface NativeProviderInput {
 export interface NativeLimitsInput {
   maxTurns?: number | null
 }
+
+/** 后台任务状态：运行中 / 已完成 / 失败 / 已停止。 */
+export type TaskState = 'running' | 'done' | 'failed' | 'stopped'
+
+/** 一条后台任务（Rust 注册表快照；tail 是最近若干行输出）。 */
+export interface BackgroundTask {
+  id: string
+  cmd: string
+  cwd: string
+  state: TaskState
+  startedAt: number
+  endedAt: number | null
+  exitCode: number | null
+  /** 从哪个会话起的；null = 不属于任何会话。 */
+  sessionId: string | null
+  title: string | null
+  /** false = 前台终端任务：只在终端页显示，不进任务坞。 */
+  background: boolean
+  /** user = 用户起的；agent = Agent 的 run_command 转的后台。 */
+  origin: 'user' | 'agent'
+  tail: string[]
+}
+
+/** `task-output` 事件：输出的一行。 */
+export interface TaskOutputPayload {
+  id: string
+  line: string
+  /** stdout | stderr */
+  stream: string
+}
+
+/** 起一个后台任务。 */
+export interface TaskSpawnInput {
+  cmd: string
+  cwd: string
+  sessionId?: string | null
+  title?: string | null
+  /** 默认 true；false = 只在终端页显示。 */
+  background?: boolean
+}

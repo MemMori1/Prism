@@ -7,7 +7,10 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::Manager;
+
+use crate::tasks::{SpawnRequest, TaskInfo, TasksState};
 
 /// 单次工具输出的字符上限（超出截断，避免一轮就把上下文撑爆）。
 const MAX_OUTPUT_CHARS: usize = 20_000;
@@ -175,28 +178,74 @@ pub fn specs() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "在工作目录里跑一条 shell 命令，返回退出码和输出。",
+                "description": "在工作目录里跑一条 shell 命令，返回退出码和输出。长命令（构建 / 全量测试 / dev server / 预计超过 ~30 秒）把 background 设成 true：立即返回任务 id，进程进「后台任务」坞继续跑，你不需要干等，之后用 task_status 看进度。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string" },
-                        "timeout_ms": { "type": "integer", "description": "超时毫秒，默认 120000" }
+                        "timeout_ms": { "type": "integer", "description": "前台执行的超时毫秒，默认 120000（background=true 时不生效）" },
+                        "background": { "type": "boolean", "description": "true = 转后台：立即返回，输出进任务坞 / 终端页，用 task_status 查" }
                     },
                     "required": ["command"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "task_status",
+                "description": "查看本会话的后台任务（run_command background=true 起的，以及用户新建的终端任务）。不传 id：列出全部；传 id：返回该任务最近输出；stop=true：停止它。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "任务 id；省略则列出全部" },
+                        "lines": { "type": "integer", "description": "看多少行尾部输出，默认 120，最多 400" },
+                        "stop": { "type": "boolean", "description": "true = 停止这个任务（需要 id）" }
+                    }
                 }
             }
         }),
     ]
 }
 
-/// 执行一次工具调用。`arguments` 是模型给的 JSON 字符串。
+/// 工具执行时的运行时上下文：后台任务要 AppHandle 才能进注册表 / 发事件。
+pub struct ToolRuntime<'a> {
+    pub app: &'a tauri::AppHandle,
+    /// 任务归属：任务坞里标「本会话」，task_status 只列这个会话的。
+    pub session_id: &'a str,
+}
+
+/// 执行一次工具调用（无运行时上下文：单测走这条，后台任务不可用）。
 /// 带一个「该停手了吗」的探针：跑命令时每轮都问一次，命中就连同命令拉起的
 /// 子进程一起收掉（停止按钮不该等命令自己跑完）。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn execute_with_stop(
     directory: &str,
     name: &str,
     arguments: &str,
     should_stop: &dyn Fn() -> bool,
+) -> ToolOutcome {
+    dispatch(directory, name, arguments, should_stop, None)
+}
+
+/// 带运行时上下文执行：`run_command` 的 background 模式与 `task_status`，
+/// 靠它接进 `TasksState`（和用户在终端页起的任务是同一条通道）。
+pub fn execute_with_runtime(
+    runtime: ToolRuntime<'_>,
+    directory: &str,
+    name: &str,
+    arguments: &str,
+    should_stop: &dyn Fn() -> bool,
+) -> ToolOutcome {
+    dispatch(directory, name, arguments, should_stop, Some(&runtime))
+}
+
+fn dispatch(
+    directory: &str,
+    name: &str,
+    arguments: &str,
+    should_stop: &dyn Fn() -> bool,
+    runtime: Option<&ToolRuntime<'_>>,
 ) -> ToolOutcome {
     let args: Value = if arguments.trim().is_empty() {
         json!({})
@@ -213,7 +262,8 @@ pub fn execute_with_stop(
         "grep" => grep(root, &args),
         "write_file" => write_file(root, &args),
         "edit_file" => edit_file(root, &args),
-        "run_command" => run_command(root, &args, should_stop),
+        "run_command" => run_command(root, &args, should_stop, runtime),
+        "task_status" => task_status(&args, runtime),
         other => ToolOutcome::fail(format!("没有这个工具：{other}")),
     }
 }
@@ -498,10 +548,20 @@ fn edit_file(root: &Path, args: &Value) -> ToolOutcome {
     }
 }
 
-fn run_command(root: &Path, args: &Value, should_stop: &dyn Fn() -> bool) -> ToolOutcome {
+fn run_command(
+    root: &Path,
+    args: &Value,
+    should_stop: &dyn Fn() -> bool,
+    runtime: Option<&ToolRuntime<'_>>,
+) -> ToolOutcome {
     let Some(command) = str_arg(args, "command") else {
         return ToolOutcome::fail("缺少 command");
     };
+    // 后台模式：进 TasksState（和用户在终端页起的任务是同一条通道），立即返回。
+    // 长命令不再占住这一轮，也不需要 120s 超时；进度由 task_status 查。
+    if bool_arg(args, "background") {
+        return spawn_background_task(runtime, root, command);
+    }
     let timeout = Duration::from_millis(
         int_arg(args, "timeout_ms")
             .unwrap_or(120_000)
@@ -595,6 +655,128 @@ fn run_command(root: &Path, args: &Value, should_stop: &dyn Fn() -> bool) -> Too
     } else {
         ToolOutcome::fail(text)
     }
+}
+
+/// `run_command background=true`：起一个 agent 任务，立刻把 id 交还给模型。
+fn spawn_background_task(
+    runtime: Option<&ToolRuntime<'_>>,
+    root: &Path,
+    command: &str,
+) -> ToolOutcome {
+    let Some(runtime) = runtime else {
+        return ToolOutcome::fail("当前上下文不支持后台任务（background 只能在本机会话里用）");
+    };
+    let tasks = runtime.app.state::<TasksState>();
+    match tasks.spawn(
+        runtime.app.clone(),
+        SpawnRequest {
+            cmd: command.to_string(),
+            cwd: root.to_string_lossy().into_owned(),
+            session_id: Some(runtime.session_id.to_string()),
+            title: None,
+            background: true,
+            origin: "agent".to_string(),
+        },
+    ) {
+        Ok(info) => ToolOutcome::ok(format!(
+            "已在后台启动：{command}\n任务 id：{id}\n输出会实时进「后台任务」坞 / 文件侧栏的「终端」页；用 task_status（id: {id}）看进度，stop=true 停止。",
+            id = info.id
+        )),
+        Err(error) => ToolOutcome::fail(format!("启动后台任务失败：{error}")),
+    }
+}
+
+/// `task_status`：列本会话的任务 / 看某条尾部输出 / 停止。
+fn task_status(args: &Value, runtime: Option<&ToolRuntime<'_>>) -> ToolOutcome {
+    let Some(runtime) = runtime else {
+        return ToolOutcome::fail("当前上下文不能查后台任务");
+    };
+    let tasks = runtime.app.state::<TasksState>();
+    // 只认这个会话起的任务：别的会话的命令不该从工具里漏出来。
+    let mine = |task: &TaskInfo| task.session_id.as_deref() == Some(runtime.session_id);
+
+    if bool_arg(args, "stop") {
+        let Some(id) = str_arg(args, "id") else {
+            return ToolOutcome::fail("stop=true 需要同时给 id");
+        };
+        return match tasks.stop(id) {
+            Ok(()) => ToolOutcome::ok(format!("已停止任务 {id}")),
+            Err(error) => ToolOutcome::fail(error),
+        };
+    }
+
+    if let Some(id) = str_arg(args, "id") {
+        let Some(info) = tasks.list().into_iter().find(|task| task.id == id && mine(task)) else {
+            return ToolOutcome::fail(format!("找不到任务 {id}（只能看本会话起的任务）"));
+        };
+        let lines = int_arg(args, "lines").unwrap_or(120).clamp(1, 400) as usize;
+        let start = info.tail.len().saturating_sub(lines);
+        let body = info.tail[start..].join("\n");
+        let body = if body.trim().is_empty() {
+            "（还没有输出）".to_string()
+        } else {
+            body
+        };
+        return ToolOutcome::ok(clamp(&format!(
+            "任务 {}\n命令：{}\n状态：{}{}\n目录：{}\n--- 最近 {lines} 行输出 ---\n{body}",
+            info.id,
+            info.cmd,
+            state_label(&info.state),
+            exit_suffix(&info),
+            info.cwd
+        )));
+    }
+
+    let list: Vec<TaskInfo> = tasks.list().into_iter().filter(mine).collect();
+    if list.is_empty() {
+        return ToolOutcome::ok("这个会话还没有后台任务。");
+    }
+    let mut text = String::from("本会话的后台任务：\n");
+    for task in list {
+        text.push_str(&format!(
+            "- {} · {} · {}{}\n  命令：{}\n",
+            task.id,
+            state_label(&task.state),
+            elapsed_label(&task),
+            exit_suffix(&task),
+            task.cmd
+        ));
+    }
+    ToolOutcome::ok(clamp(&text))
+}
+
+fn state_label(state: &str) -> &'static str {
+    match state {
+        "running" => "运行中",
+        "done" => "已完成",
+        "failed" => "失败",
+        "stopped" => "已停止",
+        _ => "未知",
+    }
+}
+
+fn elapsed_label(task: &TaskInfo) -> String {
+    let end = task.ended_at.unwrap_or_else(now_ms);
+    let seconds = ((end - task.started_at).max(0) / 1000) as u64;
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn exit_suffix(task: &TaskInfo) -> String {
+    match task.state.as_str() {
+        "running" => String::new(),
+        "stopped" => "（已停止）".to_string(),
+        _ => match task.exit_code {
+            Some(code) => format!("（exit {code}）"),
+            None => String::new(),
+        },
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// 一路管道交给一个线程读到结束：读的人不读，子进程就会卡在 write 上。
@@ -749,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn specs_cover_six_tools() {
+    fn specs_cover_builtin_tools() {
         let names: Vec<String> = specs()
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str().map(str::to_string))
@@ -762,7 +944,8 @@ mod tests {
                 "grep",
                 "write_file",
                 "edit_file",
-                "run_command"
+                "run_command",
+                "task_status"
             ]
         );
     }
@@ -876,6 +1059,71 @@ mod tests {
         let outcome = execute(&root, "read_file", r#"{"path":"../../etc/hosts"}"#);
         assert!(outcome.error.is_some());
         assert!(outcome.text.contains("越出"), "{}", outcome.text);
+    }
+
+    fn sample_task(state: &str, exit_code: Option<i32>) -> TaskInfo {
+        TaskInfo {
+            id: "t1".to_string(),
+            cmd: "pnpm build".to_string(),
+            cwd: "/tmp".to_string(),
+            state: state.to_string(),
+            started_at: 1_000,
+            ended_at: if state == "running" { None } else { Some(73_000) },
+            exit_code,
+            session_id: Some("s1".to_string()),
+            title: None,
+            background: true,
+            origin: "agent".to_string(),
+            tail: vec![],
+        }
+    }
+
+    #[test]
+    fn task_status_labels_are_readable() {
+        assert_eq!(state_label("running"), "运行中");
+        assert_eq!(state_label("done"), "已完成");
+        assert_eq!(state_label("failed"), "失败");
+        assert_eq!(state_label("stopped"), "已停止");
+
+        assert_eq!(exit_suffix(&sample_task("running", None)), "");
+        assert_eq!(exit_suffix(&sample_task("done", Some(0))), "（exit 0）");
+        assert_eq!(exit_suffix(&sample_task("failed", Some(128))), "（exit 128）");
+        assert_eq!(exit_suffix(&sample_task("stopped", None)), "（已停止）");
+
+        assert_eq!(elapsed_label(&sample_task("done", Some(0))), "01:12");
+        // 跑着的按 now 算，别把秒边界写死。
+        let mut running = sample_task("running", None);
+        running.started_at = now_ms() - 72_000;
+        let label = elapsed_label(&running);
+        assert!(label == "01:12" || label == "01:13", "{label}");
+    }
+
+    /// 后台模式必须在有运行时上下文时才能用：单测里没有，要明确报错而不是悄悄前台跑。
+    #[test]
+    fn background_command_needs_runtime() {
+        let outcome = execute(&std::env::temp_dir().to_string_lossy(), "run_command", r#"{"command":"echo hi","background":true}"#);
+        assert!(outcome.error.is_some());
+        assert!(outcome.error.unwrap().contains("不支持后台任务"));
+    }
+
+    #[test]
+    fn task_status_needs_runtime() {
+        let outcome = execute(&std::env::temp_dir().to_string_lossy(), "task_status", "{}");
+        assert!(outcome.error.is_some());
+    }
+
+    /// 声明里必须有 background 开关和 task_status，否则模型根本不知道这条通道。
+    #[test]
+    fn specs_expose_background_and_task_status() {
+        let specs = specs();
+        let run = specs
+            .iter()
+            .find(|spec| spec["function"]["name"] == "run_command")
+            .expect("run_command 声明");
+        assert!(run["function"]["parameters"]["properties"]["background"].is_object());
+        assert!(specs
+            .iter()
+            .any(|spec| spec["function"]["name"] == "task_status"));
     }
 
     #[test]

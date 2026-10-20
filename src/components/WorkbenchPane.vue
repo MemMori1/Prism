@@ -783,6 +783,7 @@ defineExpose({
             v-if="column.session"
             :ref="el => bindView(column.sessionId, el)"
             embedded
+            :show-tasks="false"
             :session="column.session"
             :has-project="true"
             @error="report"

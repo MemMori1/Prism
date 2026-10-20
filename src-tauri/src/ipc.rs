@@ -21,6 +21,7 @@ use crate::engines::{mcp, workshop};
 use crate::files::{self, FileHit, GitBranches, GitSnapshot};
 use crate::routines::{runner, scheduler::RoutinesState, store};
 use crate::routines::store::{RoutineDefinition, RoutineLogEntry, RoutineView};
+use crate::tasks::{SpawnRequest, TaskInfo, TasksState};
 
 fn opencode_db_path() -> Result<PathBuf, String> {
     opencode::locator::database_path().ok_or_else(|| {
@@ -1466,4 +1467,57 @@ pub async fn routine_logs(id: String, limit: Option<usize>) -> Result<Vec<Routin
 #[tauri::command]
 pub fn tray_status(app: tauri::AppHandle, running: u32, waiting: u32) {
     crate::tray::update_status(&app, running, waiting);
+}
+
+// ---- 后台任务（M23）----
+//
+// 会话之外独立跑的进程：构建 / 测试 / 脚本。注册表在 `tasks::TasksState`，
+// 输出与状态通过 `task-output` / `task-state` 事件推给前端。
+
+/// 起一个后台任务；`background = false` 表示只进终端页、不占任务坞。
+#[tauri::command]
+pub async fn task_spawn(
+    app: tauri::AppHandle,
+    tasks: tauri::State<'_, TasksState>,
+    cmd: String,
+    cwd: String,
+    session_id: Option<String>,
+    title: Option<String>,
+    background: Option<bool>,
+) -> Result<TaskInfo, String> {
+    #[cfg(debug_assertions)]
+    println!(
+        "[prism] task_spawn -> {}（{}）",
+        cmd.chars().take(60).collect::<String>(),
+        cwd
+    );
+    tasks.inner().spawn(
+        app,
+        SpawnRequest {
+            cmd,
+            cwd,
+            session_id,
+            title,
+            background: background.unwrap_or(true),
+            origin: "user".to_string(),
+        },
+    )
+}
+
+/// 全部任务（新起的在前）。
+#[tauri::command]
+pub fn task_list(tasks: tauri::State<'_, TasksState>) -> Vec<TaskInfo> {
+    tasks.list()
+}
+
+/// 停止一个任务（整组信号）。
+#[tauri::command]
+pub fn task_stop(tasks: tauri::State<'_, TasksState>, id: String) -> Result<(), String> {
+    tasks.stop(&id)
+}
+
+/// 把已结束的任务移出列表。
+#[tauri::command]
+pub fn task_remove(tasks: tauri::State<'_, TasksState>, id: String) -> Result<(), String> {
+    tasks.remove(&id)
 }
