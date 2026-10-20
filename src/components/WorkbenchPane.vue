@@ -768,7 +768,12 @@ defineExpose({
         >
           <header class="wb-head">
             <span class="wb-dot" :class="dotClass(column)" :title="dotTitle(column)" />
-            <span class="wb-title" :title="columnTitle(column)">{{ columnTitle(column) }}</span>
+            <!-- 会话头已经显示标题；列头只留状态与关闭，不再重复一遍。
+                 会话读不出来时才在这里兜个标题。 -->
+            <span v-if="!column.session" class="wb-title" :title="columnTitle(column)">
+              {{ columnTitle(column) }}
+            </span>
+            <span v-else class="wb-spacer" />
             <span
               v-if="column.status.waiting"
               class="wb-waiting"

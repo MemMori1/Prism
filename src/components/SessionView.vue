@@ -1593,7 +1593,7 @@ watch(
     </template>
 
     <template v-else>
-      <header v-if="!embedded" class="session-header">
+      <header class="session-header" :class="{ embedded }">
         <div class="session-heading">
           <input
             v-if="titleEditing"
@@ -1678,6 +1678,7 @@ watch(
               文件
             </button>
             <button
+              v-if="!embedded"
               class="open-wb-btn"
               title="在工作台打开：多列并行盯着多个会话"
               @click="emit('openWorkbench', session.id)"
