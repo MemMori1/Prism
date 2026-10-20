@@ -282,6 +282,17 @@
   letter-spacing: 0;
 }
 
+.agent-forced {
+  flex: none;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  margin-left: 6px;
+}
+
 .agent-steps {
   display: flex;
   flex-direction: column;

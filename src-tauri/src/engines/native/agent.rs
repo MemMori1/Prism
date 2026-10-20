@@ -366,7 +366,7 @@ fn fold_subagent_outcome(outcome: subagent::SubagentOutcome) -> (tools::ToolOutc
         )),
         None => tools::ToolOutcome::ok(outcome.report.clone()),
     };
-    (result, outcome.metadata.clone(), tokens)
+    (result, outcome.metadata(), tokens)
 }
 
 /// 会话里指定的模型与服务优先；没指定就用设置里的默认模型。
@@ -733,15 +733,19 @@ fn run_turns(
                 Some(reason) => (tools::ToolOutcome::fail(reason.clone()), None, None),
                 None if call.name == "task" => {
                     let outcome = subagent::run(
-                        app,
-                        session_id,
-                        &call.id,
-                        directory,
-                        provider,
-                        model,
-                        &input,
-                        permission,
-                        &|| slot.stopped(),
+                        subagent::SubagentContext {
+                            app,
+                            session_id,
+                            call_id: &call.id,
+                            directory,
+                        },
+                        subagent::SubagentRequest {
+                            provider,
+                            model,
+                            input: &input,
+                            permission,
+                            should_stop: &|| slot.stopped(),
+                        },
                     );
                     let (result, extra_meta, extra_tokens) = fold_subagent_outcome(outcome);
                     (result, Some(extra_meta), extra_tokens)
@@ -1045,13 +1049,19 @@ mod tests {
         drop(again);
     }
 
-    /// task 派发的回填路径：报告转正、token 折进消息、metadata 原样带回。
+    /// task 派发的回填路径：报告转正、token 折进消息、元数据原样带回。
     #[test]
     fn fold_subagent_outcome_returns_report_and_tokens() {
         let outcome = subagent::SubagentOutcome {
             report: "结论：入口在 login.ts".to_string(),
             error: None,
-            metadata: json!({ "subagent": { "agentType": "explore", "steps": [] } }),
+            trace: subagent::SubagentTrace {
+                agent_type: "explore",
+                label: "探索",
+                turns: 3,
+                forced: false,
+                steps: Vec::new(),
+            },
             tokens_input: 1200,
             tokens_output: 300,
         };
@@ -1072,7 +1082,7 @@ mod tests {
         let outcome = subagent::SubagentOutcome {
             report: "查到了入口".to_string(),
             error: Some("子代理跑满 16 轮仍未交出报告，已停止".to_string()),
-            metadata: json!({}),
+            trace: subagent::SubagentTrace::default(),
             tokens_input: 0,
             tokens_output: 0,
         };

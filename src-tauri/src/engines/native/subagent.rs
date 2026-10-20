@@ -8,6 +8,7 @@
 
 use super::{approval, config, provider, tools};
 use crate::engines::native::emit_event;
+use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
@@ -16,6 +17,9 @@ use tauri::AppHandle;
 /// 探索类任务「grep 定位 → 定点读几处 → 汇总」轻松就过 6 轮，上限给到 16；
 /// 真到顶也不会白跑：最后一轮不给工具，强收一份报告出来。
 const MAX_TURNS: u32 = 16;
+/// 子代理累计 token 的软预算：到顶就强收报告，防止一轮探索烧穿成本。
+/// 轮次上限管「跑多久」，这个管「花多少」——两个都到才是真的失控。
+const TOKEN_BUDGET: i64 = 200_000;
 /// 界面上保留的步骤上限（看个大概就够，报告才是交付物）。
 const MAX_STEPS: usize = 30;
 /// 步骤里文本片段的截断长度。
@@ -150,10 +154,63 @@ pub struct SubagentOutcome {
     /// 失败 / 被停止时的原因。
     pub error: Option<String>,
     /// 过程元数据（含步骤轨迹），挂到父级工具卡上展示。
-    pub metadata: Value,
+    pub trace: SubagentTrace,
     /// (input, output)：子代理自己烧掉的 token，计入会话总量。
     pub tokens_input: i64,
     pub tokens_output: i64,
+}
+
+impl SubagentOutcome {
+    /// 过程元数据序列化（挂进工具卡的 `metadata.subagent`）。
+    pub fn metadata(&self) -> Value {
+        json!({ "subagent": self.trace })
+    }
+}
+
+/// 一条过程步骤：文本片段或一次工具调用。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TraceStep {
+    /// 子代理的一段过程说明（截断过的正文片段）。
+    Text { text: String },
+    /// 一次工具调用（只留摘要，输出不算交付物）。
+    Tool {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        status: String,
+    },
+}
+
+/// 子代理的过程轨迹：类型 + 轮数 + 是否被预算/轮次强收 + 步骤列表。
+///
+/// 强类型替代裸 `Value`，前后端契约有约束可循；将来加耗时、加 diff 只需加字段。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentTrace {
+    pub agent_type: &'static str,
+    pub label: &'static str,
+    pub turns: u32,
+    /// 报告是「轮次用尽 / token 预算到顶」被强收出来的，而非自然收尾。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub forced: bool,
+    pub steps: Vec<TraceStep>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl Default for SubagentTrace {
+    fn default() -> Self {
+        SubagentTrace {
+            agent_type: "explore",
+            label: "探索",
+            turns: 0,
+            forced: false,
+            steps: Vec::new(),
+        }
+    }
 }
 
 fn truncate(text: &str, limit: usize) -> String {
@@ -165,29 +222,20 @@ fn truncate(text: &str, limit: usize) -> String {
     out
 }
 
-/// 一条过程步骤：文本片段或一次工具调用（只留摘要，输出不算交付物）。
-fn text_step(text: &str) -> Value {
-    json!({ "kind": "text", "text": truncate(text, STEP_TEXT_CHARS) })
+/// 一条文本步骤（截断过的过程说明）。
+fn text_step(text: &str) -> TraceStep {
+    TraceStep::Text {
+        text: truncate(text, STEP_TEXT_CHARS),
+    }
 }
 
-fn tool_step(name: &str, summary: Option<String>, status: &str) -> Value {
-    json!({
-        "kind": "tool",
-        "name": name,
-        "summary": summary,
-        "status": status,
-    })
-}
-
-fn metadata_of(agent: AgentType, steps: &[Value], turns: u32) -> Value {
-    json!({
-        "subagent": {
-            "agentType": agent.key(),
-            "label": agent.label(),
-            "turns": turns,
-            "steps": steps,
-        }
-    })
+/// 一条工具步骤（只留摘要）。
+fn tool_step(name: &str, summary: Option<String>, status: &str) -> TraceStep {
+    TraceStep::Tool {
+        name: name.to_string(),
+        summary,
+        status: status.to_string(),
+    }
 }
 
 /// 工具卡摘要（与 agent.rs 的 `summarize_input` 同一取值顺序）。
@@ -217,77 +265,102 @@ fn parse_request(input: &Value) -> Result<(AgentType, String), String> {
     Ok((agent, prompt))
 }
 
+/// 子代理运行所依附的父级上下文：事件通道、会话、工具卡定位。
+pub struct SubagentContext<'a> {
+    pub app: &'a AppHandle,
+    pub session_id: &'a str,
+    /// 父级工具调用的 id：进度事件与权限卡片都挂它名下。
+    pub call_id: &'a str,
+    pub directory: &'a str,
+}
+
+/// 一次子代理运行的全部输入。
+pub struct SubagentRequest<'a> {
+    pub provider: &'a config::ProviderConfig,
+    pub model: &'a str,
+    /// `task` 工具的原始入参（description / prompt / agent_type）。
+    pub input: &'a Value,
+    pub permission: approval::Mode,
+    /// 沿用父级回合的停止标记：用户点「停止」时父子一起收手。
+    pub should_stop: &'a dyn Fn() -> bool,
+}
+
 /// 跑一个子代理。
 ///
-/// `should_stop` 直接沿用父级回合的停止标记：用户点「停止」时父子一起收手。
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    app: &AppHandle,
-    session_id: &str,
-    call_id: &str,
-    directory: &str,
-    provider: &config::ProviderConfig,
-    model: &str,
-    input: &Value,
-    permission: approval::Mode,
-    should_stop: &dyn Fn() -> bool,
-) -> SubagentOutcome {
+/// `ctx.should_stop` 直接沿用父级回合的停止标记；子代理自己的写类工具
+/// 照样过权限闸门（explore 没有写工具，天然不触发）。
+pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
     let mut outcome = SubagentOutcome::default();
-    let (agent, prompt) = match parse_request(input) {
+    let (agent, prompt) = match parse_request(req.input) {
         Ok(parsed) => parsed,
         Err(error) => {
             outcome.error = Some(error);
-            outcome.metadata = metadata_of(AgentType::parse(None), &[], 0);
+            outcome.trace = SubagentTrace {
+                agent_type: agent_of(req.input).key(),
+                label: agent_of(req.input).label(),
+                ..Default::default()
+            };
             return outcome;
         }
     };
 
     let specs = specs_for(agent);
     let mut messages = vec![
-        json!({ "role": "system", "content": agent.system_prompt(directory) }),
+        json!({ "role": "system", "content": agent.system_prompt(ctx.directory) }),
         json!({ "role": "user", "content": prompt }),
     ];
-    let mut steps: Vec<Value> = Vec::new();
+    let mut steps: Vec<TraceStep> = Vec::new();
     let mut turns_used = 0u32;
 
     // 过程推进就把当前轨迹推给前端（挂在父级工具卡上，随跑随显）。
-    let push_progress = |steps: &Vec<Value>, turns: u32| {
+    let push_progress = |steps: &Vec<TraceStep>, turns: u32, forced: bool| {
+        let trace = SubagentTrace {
+            agent_type: agent.key(),
+            label: agent.label(),
+            turns,
+            forced,
+            steps: steps.clone(),
+        };
         emit_event(
-            app,
+            ctx.app,
             "session.tool.progress",
             json!({
-                "sessionID": session_id,
-                "id": call_id,
-                "metadata": metadata_of(agent, steps, turns),
+                "sessionID": ctx.session_id,
+                "id": ctx.call_id,
+                "metadata": { "subagent": trace },
             }),
         );
     };
 
+    let stop = req.should_stop;
     for turn in 0..MAX_TURNS {
-        if should_stop() {
+        if stop() {
             outcome.error = Some("已被用户停止，子代理没有跑完".to_string());
             break;
         }
-        // 最后一轮不给工具：轮次用尽时逼它把已有的信息写成报告，
-        // 否则整趟调查的结果会随 outcome.report 为空一起丢掉。
+        // 预算到顶也强收：轮次上限管「跑多久」，token 预算管「花多少」。
+        let over_budget = outcome.tokens_input + outcome.tokens_output >= TOKEN_BUDGET;
+        // 最后一轮 / 预算到顶都不给工具：逼它把已有的信息写成报告，
+        // 否则整趟调查的结果会随 report 为空一起丢掉。
         let final_turn = final_turn_is(turn);
-        if final_turn {
+        let force_report = final_turn || over_budget;
+        if force_report {
             messages.push(json!({
                 "role": "user",
                 "content": final_turn_prompt(),
             }));
         }
-        let turn_specs: &[Value] = turn_specs_for(&specs, final_turn);
+        let turn_specs: &[Value] = turn_specs_for(&specs, force_report);
         let mut on_text = |_delta: &str| {};
         let mut on_reasoning = |_delta: &str| {};
         let chat = match provider::chat(
-            provider,
-            model,
+            req.provider,
+            req.model,
             &messages,
             turn_specs,
             &mut on_text,
             &mut on_reasoning,
-            should_stop,
+            stop,
         ) {
             Ok(chat) => chat,
             Err(provider::ChatError::Cancelled) => {
@@ -306,11 +379,11 @@ pub fn run(
         turns_used = turn + 1;
 
         // 没有工具调用＝正文就是最终报告，收工。
-        // 最后一轮即使模型还硬发工具调用也不执行了：正文有什么就当报告交什么。
-        if chat.tool_calls.is_empty() || final_turn {
+        // 强收轮即使模型还硬发工具调用也不执行了：正文有什么就当报告交什么。
+        if chat.tool_calls.is_empty() || force_report {
             outcome.report = chat.text.trim().to_string();
             if outcome.report.is_empty() {
-                outcome.report = if final_turn {
+                outcome.report = if force_report {
                     "（轮次用尽，子代理没能给出报告）".to_string()
                 } else {
                     "（子代理没有给出报告）".to_string()
@@ -318,10 +391,14 @@ pub fn run(
                 // 兜底文案不是真报告：标记成降级，工具卡标红，别让用户以为查到了东西。
                 outcome.error = Some("子代理没能产出有效报告（模型未返回正文）".to_string());
             }
+            // 报告被强收（轮次 / 预算），打上标记：主代理与用户都能看出它没跑完。
+            if force_report && outcome.error.is_none() {
+                outcome.trace.forced = true;
+            }
             if !chat.text.trim().is_empty() {
                 steps.push(text_step(&chat.text));
             }
-            push_progress(&steps, turn + 1);
+            push_progress(&steps, turn + 1, outcome.trace.forced);
             break;
         }
 
@@ -345,7 +422,7 @@ pub fn run(
         messages.push(assistant);
 
         for call in &chat.tool_calls {
-            if should_stop() {
+            if stop() {
                 outcome.error = Some("已被用户停止，子代理没有跑完".to_string());
                 break;
             }
@@ -354,14 +431,14 @@ pub fn run(
             // 与主代理同一套权限闸门：explore 没有写工具，天然不触发。
             let denied = approval::action_of(&call.name).and_then(|action| {
                 let verdict = approval::gate(
-                    app,
-                    session_id,
-                    permission,
+                    ctx.app,
+                    ctx.session_id,
+                    req.permission,
                     action,
                     approval::resources_of(&call.name, &arguments),
                     approval::message_of(&call.name),
-                    call_id,
-                    should_stop,
+                    ctx.call_id,
+                    stop,
                 );
                 match verdict {
                     approval::Verdict::Allow => None,
@@ -370,7 +447,7 @@ pub fn run(
             });
             let result = match denied {
                 Some(reason) => tools::ToolOutcome::fail(reason),
-                None => tools::execute_with_stop(directory, &call.name, &call.arguments, should_stop),
+                None => tools::execute_with_stop(ctx.directory, &call.name, &call.arguments, stop),
             };
             if steps.len() < MAX_STEPS {
                 steps.push(tool_step(
@@ -385,14 +462,25 @@ pub fn run(
                 "content": result.text,
             }));
         }
-        push_progress(&steps, turn + 1);
+        push_progress(&steps, turn + 1, false);
         if outcome.error.is_some() {
             break;
         }
     }
 
-    outcome.metadata = metadata_of(agent, &steps, turns_used);
+    outcome.trace = SubagentTrace {
+        agent_type: agent.key(),
+        label: agent.label(),
+        turns: turns_used,
+        forced: outcome.trace.forced,
+        steps,
+    };
     outcome
+}
+
+/// 入参里认不出的类型按「探索」返回（错误路径兜底用）。
+fn agent_of(input: &Value) -> AgentType {
+    AgentType::parse(input.get("agent_type").and_then(Value::as_str))
 }
 
 #[cfg(test)]
@@ -444,27 +532,73 @@ mod tests {
     fn steps_are_truncated_not_dumped() {
         let long = "字".repeat(STEP_TEXT_CHARS + 50);
         let step = text_step(&long);
-        let text = step["text"].as_str().unwrap();
-        assert!(text.chars().count() <= STEP_TEXT_CHARS + 1);
-        assert!(text.ends_with('…'));
+        match step {
+            TraceStep::Text { text } => {
+                assert!(text.chars().count() <= STEP_TEXT_CHARS + 1);
+                assert!(text.ends_with('…'));
+            }
+            other => panic!("应为文本步骤：{other:?}"),
+        }
 
         let tool = tool_step("grep", Some("needle".to_string()), "completed");
-        assert_eq!(tool["kind"], "tool");
-        assert_eq!(tool["status"], "completed");
+        match tool {
+            TraceStep::Tool {
+                name,
+                summary,
+                status,
+            } => {
+                assert_eq!(name, "grep");
+                assert_eq!(summary.as_deref(), Some("needle"));
+                assert_eq!(status, "completed");
+            }
+            other => panic!("应为工具步骤：{other:?}"),
+        }
     }
 
     #[test]
     fn metadata_shape_carries_agent_type_and_steps() {
-        let meta = metadata_of(
-            AgentType::General,
-            &[text_step("看一下"), tool_step("grep", None, "completed")],
-            2,
-        );
+        let trace = SubagentTrace {
+            agent_type: "general",
+            label: "通用",
+            turns: 2,
+            forced: false,
+            steps: vec![
+                text_step("看一下"),
+                tool_step("grep", None, "completed"),
+            ],
+        };
+        let outcome = SubagentOutcome {
+            report: String::new(),
+            error: None,
+            trace,
+            tokens_input: 0,
+            tokens_output: 0,
+        };
+        let meta = outcome.metadata();
         let sub = &meta["subagent"];
         assert_eq!(sub["agentType"], "general");
         assert_eq!(sub["label"], "通用");
         assert_eq!(sub["turns"], 2);
         assert_eq!(sub["steps"].as_array().unwrap().len(), 2);
+        // 未强收时 forced 不序列化（默认 false，前端不读也不会误解）。
+        assert!(sub.get("forced").is_none(), "{sub}");
+    }
+
+    #[test]
+    fn forced_report_is_serialized() {
+        let trace = SubagentTrace {
+            agent_type: "explore",
+            label: "探索",
+            turns: 16,
+            forced: true,
+            steps: Vec::new(),
+        };
+        let outcome = SubagentOutcome {
+            trace,
+            ..Default::default()
+        };
+        let meta = outcome.metadata();
+        assert_eq!(meta["subagent"]["forced"], true);
     }
 
     #[test]

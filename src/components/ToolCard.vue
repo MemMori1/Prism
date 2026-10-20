@@ -204,6 +204,8 @@ interface SubagentInfo {
   agentType?: string
   label?: string
   turns?: number
+  /** 报告是被轮次/预算强收出来的（没跑完）。 */
+  forced?: boolean
   steps: SubagentStep[]
 }
 
@@ -217,6 +219,7 @@ const subagentInfo = computed<SubagentInfo | null>(() => {
     agentType: sub.agentType,
     label: sub.label ?? (sub.agentType === 'general' ? '通用' : '探索'),
     turns: sub.turns,
+    forced: sub.forced,
     steps: sub.steps,
   }
 })
@@ -324,6 +327,7 @@ function signOf(type: DiffRow['type']): string {
           <div class="block-label">
             子代理过程
             <span v-if="subagentInfo.turns" class="agent-turns">{{ subagentInfo.turns }} 轮</span>
+            <span v-if="subagentInfo.forced" class="agent-forced">已强收</span>
           </div>
           <div class="agent-steps">
             <div
