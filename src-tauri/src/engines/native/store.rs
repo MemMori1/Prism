@@ -57,6 +57,9 @@ pub enum StoredPart {
         output: Option<String>,
         #[serde(default)]
         error: Option<String>,
+        /// 引擎附带的元数据（子代理的步骤轨迹、edit 的 diff 等）。
+        #[serde(default)]
+        metadata: Option<Value>,
     },
 }
 
@@ -417,6 +420,7 @@ pub fn tool_detail(session_id: &str, call_id: &str) -> Option<ToolDetail> {
                 input,
                 output,
                 error,
+                metadata,
                 ..
             } = part
             {
@@ -425,7 +429,7 @@ pub fn tool_detail(session_id: &str, call_id: &str) -> Option<ToolDetail> {
                         input,
                         output,
                         error,
-                        metadata: None,
+                        metadata,
                         truncated: false,
                     });
                 }
@@ -465,6 +469,7 @@ mod tests {
             input: None,
             output: Some("ok".to_string()),
             error: None,
+            metadata: None,
         };
         match part.to_timeline() {
             TimelinePart::Tool { name, call_id, .. } => {

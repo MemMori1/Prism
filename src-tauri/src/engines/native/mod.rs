@@ -16,6 +16,7 @@ pub mod config;
 pub mod context;
 pub mod provider;
 pub mod store;
+pub mod subagent;
 pub mod tools;
 
 /// 往引擎事件通道推一条事件。

@@ -190,6 +190,52 @@ const editFallback = computed(() => {
   return { before: before ?? '（空）', after: after ?? '（空）' }
 })
 
+// ---- 子代理（task）：步骤轨迹 ----
+
+interface SubagentStep {
+  kind?: string
+  text?: string
+  name?: string
+  summary?: string | null
+  status?: string
+}
+
+interface SubagentInfo {
+  agentType?: string
+  label?: string
+  turns?: number
+  steps: SubagentStep[]
+}
+
+/** 子代理过程（metadata.subagent）；不是 task 工具时为 null。 */
+const subagentInfo = computed<SubagentInfo | null>(() => {
+  if (props.part.name !== 'task' && props.part.name !== 'subagent') return null
+  const meta = resolved.value?.metadata as { subagent?: Partial<SubagentInfo> } | null
+  const sub = meta?.subagent
+  if (!sub || !Array.isArray(sub.steps)) return null
+  return {
+    agentType: sub.agentType,
+    label: sub.label ?? (sub.agentType === 'general' ? '通用' : '探索'),
+    turns: sub.turns,
+    steps: sub.steps,
+  }
+})
+
+/** 过程还没落库时（只有入参没有 metadata）：至少把类型亮出来。 */
+const subagentLabel = computed(() => {
+  if (subagentInfo.value) return subagentInfo.value.label ?? '子代理'
+  const raw = input.value.agent_type
+  if (typeof raw !== 'string') return null
+  return raw.toLowerCase() === 'general' ? '通用' : '探索'
+})
+
+function stepStatus(step: SubagentStep): string | null {
+  if (step.kind !== 'tool') return null
+  if (step.status === 'error') return '失败'
+  if (step.status === 'completed') return '完成'
+  return step.status ?? null
+}
+
 /** 头部摘要是不是一个文件路径（是就做成可点的）。 */
 const summaryIsPath = computed(() => looksLikePath(props.part.summary ?? ''))
 
@@ -197,7 +243,7 @@ const summaryIsPath = computed(() => looksLikePath(props.part.summary ?? ''))
 const rawInput = computed(() => {
   const source = input.value
   if (!source || Object.keys(source).length === 0) return null
-  if (['read', 'grep', 'glob', 'webfetch', 'shell', 'bash', 'write'].includes(props.part.name)) {
+  if (['read', 'grep', 'glob', 'webfetch', 'shell', 'bash', 'write', 'task', 'subagent'].includes(props.part.name)) {
     return null
   }
   return JSON.stringify(source, null, 2)
@@ -216,6 +262,7 @@ function signOf(type: DiffRow['type']): string {
     <button class="tool-head" @click="toggle">
       <span class="tool-glyph">{{ toolGlyph }}</span>
       <span class="tool-name">{{ part.name }}</span>
+      <span v-if="subagentLabel" class="tool-agent">{{ subagentLabel }}</span>
       <span
         v-if="part.summary && summaryIsPath"
         class="tool-summary tool-file"
@@ -272,12 +319,46 @@ function signOf(type: DiffRow['type']): string {
           <pre class="tool-pre">{{ block.text }}</pre>
         </template>
 
+        <!-- 子代理步骤轨迹 -->
+        <template v-if="subagentInfo">
+          <div class="block-label">
+            子代理过程
+            <span v-if="subagentInfo.turns" class="agent-turns">{{ subagentInfo.turns }} 轮</span>
+          </div>
+          <div class="agent-steps">
+            <div
+              v-for="(step, index) in subagentInfo.steps"
+              :key="index"
+              class="agent-step"
+            >
+              <template v-if="step.kind === 'tool'">
+                <span class="agent-step-glyph">▸</span>
+                <span class="agent-step-name">{{ step.name ?? 'tool' }}</span>
+                <span v-if="step.summary" class="agent-step-summary" :title="step.summary">
+                  {{ step.summary }}
+                </span>
+                <span
+                  v-if="stepStatus(step)"
+                  class="agent-step-status"
+                  :class="step.status === 'error' ? 'bad' : ''"
+                >{{ stepStatus(step) }}</span>
+              </template>
+              <span v-else class="agent-step-text">{{ step.text ?? '' }}</span>
+            </div>
+            <div v-if="!subagentInfo.steps.length" class="agent-steps-empty">
+              （还没有过程记录）
+            </div>
+          </div>
+        </template>
+
         <!-- 错误 -->
         <div v-if="resolved.error" class="tool-error">{{ resolved.error }}</div>
 
         <!-- 输出 -->
         <template v-if="resolved.output">
-          <div class="block-label">输出{{ resolved.truncated ? '（已截断）' : '' }}</div>
+          <div class="block-label">
+            {{ part.name === 'task' || part.name === 'subagent' ? '报告' : '输出' }}{{ resolved.truncated ? '（已截断）' : '' }}
+          </div>
           <pre class="tool-pre output">{{ resolved.output }}</pre>
         </template>
 

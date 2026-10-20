@@ -4,7 +4,7 @@
 //! `session.tool.called` …），这样前端不需要为原生引擎加任何适配逻辑：
 //! 流式过程走事件，落定后走 `read_timeline`。
 
-use super::{approval, config, provider, store, tools};
+use super::{approval, config, provider, store, subagent, tools};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +12,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 pub const EVENT_NAME: &str = "engine-event";
+
+/// 主代理的完整工具清单：六个内置 + `task`（子代理）。
+pub(crate) fn tool_specs() -> Vec<Value> {
+    let mut specs = tools::specs();
+    specs.push(subagent::spec());
+    specs
+}
 
 /// 正在跑的回合：会话 id → 停止标记。
 fn running() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
@@ -168,7 +175,8 @@ pub(crate) fn system_prompt(directory: &str) -> String {
          1. 改文件前先用 read_file 读原文，edit_file 的 old_string 必须与原文逐字一致（含缩进）。\n\
          2. 需要事实时用 grep / list_files 查，不要凭印象编造文件内容。\n\
          3. 命令要短、可复现；不要执行需要交互输入的命令。\n\
-         4. 回答简洁：先说结论，再给必要的改动说明。"
+         4. 回答简洁：先说结论，再给必要的改动说明。\n\
+         5. 大范围探索 / 调研（翻一堆文件、搜一堆关键词）交给 task 子代理：它有独立上下文，只把结论带回来。"
     )
 }
 
@@ -331,6 +339,34 @@ fn summarize_input(input: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// 把一次子代理的产出收成工具结果：报告转正 / 失败转红，token 折进消息。
+///
+/// 抽成纯函数是因为它正对「task 调用 → 子代理结果 → 回填」这条最该有测试
+/// 的路径——`run_turns` 里嵌着的话，`provider::chat` 没法 mock，这条路就永远
+/// 没有单测。这里只看 outcome，不碰网络。
+fn fold_subagent_outcome(outcome: subagent::SubagentOutcome) -> (tools::ToolOutcome, Value, Option<store::StoredTokens>) {
+    let tokens = if outcome.tokens_input == 0 && outcome.tokens_output == 0 {
+        None
+    } else {
+        Some(store::StoredTokens {
+            input: outcome.tokens_input,
+            output: outcome.tokens_output,
+        })
+    };
+    let result = match &outcome.error {
+        Some(error) => tools::ToolOutcome::fail(format!(
+            "{error}{}",
+            if outcome.report.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n已产出的部分报告：\n{}", outcome.report)
+            }
+        )),
+        None => tools::ToolOutcome::ok(outcome.report.clone()),
+    };
+    (result, outcome.metadata.clone(), tokens)
 }
 
 /// 会话里指定的模型与服务优先；没指定就用设置里的默认模型。
@@ -507,7 +543,7 @@ fn run_turns(
     permission: approval::Mode,
     slot: &RunSlot,
 ) -> Result<Stop, String> {
-    let specs = tools::specs();
+    let specs = tool_specs();
     // 历史只读一次：原来每轮都重读整份 messages.jsonl 再逐行解析，长会话
     // 走一个工具循环就是平方级开销。本轮自己写进去的消息同步补进来，
     // 下一轮看到的历史与磁盘一致。
@@ -691,12 +727,42 @@ fn run_turns(
                     approval::Verdict::Deny(reason) => Some(reason),
                 }
             });
-            let result = match gate {
-                Some(reason) => tools::ToolOutcome::fail(reason),
-                None => tools::execute_with_stop(directory, &call.name, &call.arguments, &|| {
-                    slot.stopped()
-                }),
+            // task 是特例：不走 tools 的分发，而是起一个隔离上下文的子代理循环。
+            // 它自己的写类工具照样过权限闸门（在 subagent::run 里）。
+            let (result, extra_meta, extra_tokens) = match &gate {
+                Some(reason) => (tools::ToolOutcome::fail(reason.clone()), None, None),
+                None if call.name == "task" => {
+                    let outcome = subagent::run(
+                        app,
+                        session_id,
+                        &call.id,
+                        directory,
+                        provider,
+                        model,
+                        &input,
+                        permission,
+                        &|| slot.stopped(),
+                    );
+                    let (result, extra_meta, extra_tokens) = fold_subagent_outcome(outcome);
+                    (result, Some(extra_meta), extra_tokens)
+                }
+                None => (
+                    tools::execute_with_stop(directory, &call.name, &call.arguments, &|| {
+                        slot.stopped()
+                    }),
+                    None,
+                    None,
+                ),
             };
+            // 进度元数据（子代理的步骤轨迹）与错误标志一起给到前端。
+            let mut metadata = json!({ "error": result.error.is_some() });
+            if let Some(extra) = &extra_meta {
+                if let (Some(meta), Some(extra)) = (metadata.as_object_mut(), extra.as_object()) {
+                    for (key, value) in extra {
+                        meta.insert(key.clone(), value.clone());
+                    }
+                }
+            }
             emit(
                 app,
                 "session.tool.success",
@@ -704,7 +770,7 @@ fn run_turns(
                     "sessionID": session_id,
                     "id": call.id,
                     "content": [{ "type": "text", "text": result.text }],
-                    "metadata": { "error": result.error.is_some() },
+                    "metadata": metadata,
                 }),
             );
 
@@ -716,6 +782,7 @@ fn run_turns(
                 input: if input.is_null() { None } else { Some(input) },
                 output: Some(result.text.clone()),
                 error: result.error.clone(),
+                metadata: extra_meta.clone(),
             });
 
             tool_messages.push(store::StoredMessage {
@@ -726,7 +793,7 @@ fn run_turns(
                 parts: Vec::new(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some(call.id.clone()),
-                tokens: None,
+                tokens: extra_tokens,
             });
         }
 
@@ -976,5 +1043,44 @@ mod tests {
         assert!(!cancel("native:slot-test"), "跑完之后再叫停应当返回 false");
         let again = RunSlot::take("native:slot-test").expect("释放后可以再跑");
         drop(again);
+    }
+
+    /// task 派发的回填路径：报告转正、token 折进消息、metadata 原样带回。
+    #[test]
+    fn fold_subagent_outcome_returns_report_and_tokens() {
+        let outcome = subagent::SubagentOutcome {
+            report: "结论：入口在 login.ts".to_string(),
+            error: None,
+            metadata: json!({ "subagent": { "agentType": "explore", "steps": [] } }),
+            tokens_input: 1200,
+            tokens_output: 300,
+        };
+        let (result, meta, tokens) = fold_subagent_outcome(outcome);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.text, "结论：入口在 login.ts");
+        // 元数据带回（含子代理轨迹），前端据此画步骤。
+        assert_eq!(meta["subagent"]["agentType"], "explore");
+        // token 折进工具消息，累加到会话总量。
+        let tokens = tokens.expect("有 token 就该折进去");
+        assert_eq!(tokens.input, 1200);
+        assert_eq!(tokens.output, 300);
+    }
+
+    /// 子代理失败时：错误转红，但已产出的部分报告也一并带出来（不白跑）。
+    #[test]
+    fn fold_subagent_outcome_keeps_partial_report_on_error() {
+        let outcome = subagent::SubagentOutcome {
+            report: "查到了入口".to_string(),
+            error: Some("子代理跑满 16 轮仍未交出报告，已停止".to_string()),
+            metadata: json!({}),
+            tokens_input: 0,
+            tokens_output: 0,
+        };
+        let (result, _, tokens) = fold_subagent_outcome(outcome);
+        assert!(result.error.is_some());
+        assert!(result.text.contains("查到了入口"), "部分报告不能丢：{}", result.text);
+        assert!(result.text.contains("已产出的部分报告"), "{}", result.text);
+        // 没烧 token 就不折 token（None，别记个 0/0 上去）。
+        assert!(tokens.is_none());
     }
 }

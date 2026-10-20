@@ -74,7 +74,7 @@ pub struct ToolOutcome {
 }
 
 impl ToolOutcome {
-    fn ok(text: impl Into<String>) -> Self {
+    pub(crate) fn ok(text: impl Into<String>) -> Self {
         ToolOutcome {
             text: text.into(),
             error: None,

@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use super::{agent, store, tools};
+use super::{agent, store};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,7 +31,8 @@ pub fn stats(session_id: &str) -> Option<ContextStats> {
     let meta = store::load_meta(raw)?;
 
     let system = agent::system_prompt(&meta.directory).chars().count();
-    let tools = serde_json::to_string(&tools::specs())
+    // 工具声明按实际发出去的算：六个内置 + task 子代理。
+    let tools = serde_json::to_string(&agent::tool_specs())
         .map(|text| text.chars().count())
         .unwrap_or(0);
 

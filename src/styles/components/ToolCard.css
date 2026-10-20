@@ -260,3 +260,99 @@
 .tool-summary.tool-file:hover {
   color: var(--accent-text);
 }
+
+/* ---- 子代理 ---- */
+
+/* 头部的类型徽标（探索 / 通用） */
+.tool-agent {
+  flex: none;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.agent-turns {
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 6px;
+  letter-spacing: 0;
+}
+
+.agent-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 6px 4px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.agent-step {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 0 6px;
+  border-radius: 4px;
+  min-width: 0;
+}
+
+.agent-step:hover {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.agent-step-glyph {
+  flex: none;
+  color: var(--accent);
+  width: 12px;
+  text-align: center;
+}
+
+.agent-step-name {
+  flex: none;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.agent-step-summary {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-step-status {
+  flex: none;
+  font-size: 10px;
+  color: var(--green);
+}
+
+.agent-step-status.bad {
+  color: var(--red);
+}
+
+/* 文本步骤：整段弱化展示，冒头是「说」的语气 */
+.agent-step-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-steps-empty {
+  font-size: 11px;
+  color: var(--faint);
+  padding: 2px 8px;
+}
