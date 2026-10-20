@@ -25,8 +25,13 @@ const props = defineProps<{
   sessionId: string | null
   /** 从任务坞点进来时直接选中这条。 */
   initialTaskId?: string | null
-  /** 外部（抽屉头「新建终端任务」）每加一次就打开表单。 */
+  /** 外部（任务坞「＋ 新任务」/ 标签页）每加一次就打开表单。 */
   newTaskTick?: number
+}>()
+
+const emit = defineEmits<{
+  /** 当前选中的任务命令：标签上用它。 */
+  (e: 'title', title: string | null): void
 }>()
 
 const selectedId = ref<string | null>(props.initialTaskId ?? null)
@@ -264,6 +269,12 @@ watch(
 )
 
 watch(
+  () => selected.value?.cmd,
+  cmd => emit('title', cmd || null),
+  { immediate: true },
+)
+
+watch(
   () => selected.value?.tail.length,
   () => {
     if (selected.value?.id === selectedId.value) void nextTick(followTail)
@@ -320,7 +331,7 @@ onBeforeUnmount(() => {
 
         <div v-if="!tasks.length" class="tl-empty">
           还没有终端任务<br />
-          <span>点右上「新建终端任务」起一个</span>
+          <span>点左上「＋」起一个</span>
         </div>
       </div>
     </aside>

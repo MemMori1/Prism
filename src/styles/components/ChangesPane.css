@@ -1,6 +1,8 @@
 /*
- * 变更抽屉：右边滑出，不挡住聊天的上半部分。
- * 左＝文件列表（状态 + 路径 + ±），右＝变更 diff / 当前文件内容。
+ * 面板外壳（M23c）：一行标签页 + 内容区。
+ *
+ * 每个标签的内容自带工具条（文件页 .fp-bar、终端页 .tl-head），这里只管标签条、
+ * 空标签页的两个入口和抽屉本身。以后要加网页之类的内容，只在这里加一种标签。
  */
 
 .changes-backdrop {
@@ -19,6 +21,7 @@
   display: flex;
   flex-direction: column;
   width: min(920px, 94vw);
+  overflow: hidden;
   border-left: 1px solid var(--border-strong);
   background: var(--panel);
   box-shadow: var(--shadow-drawer);
@@ -32,68 +35,204 @@
   }
 }
 
-/* ---------- 头部 ---------- */
+/* ---------- 标签条 ---------- */
 
-.ch-head {
+.pane-strip {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 6px;
   height: 44px;
-  padding: 0 10px 0 14px;
+  padding: 0 8px 0 10px;
   border-bottom: 1px solid var(--border);
   background: var(--panel-2);
 }
 
-.ch-head-main {
-  flex: 1;
+.pane-tabs {
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 3px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  /* 滚动条藏起来（44px 的条上放不下，macOS 本来也是 overlay）：
+     能不能滚靠两端渐隐 + 滚轮横滚（见 onWheel）。 */
+  scrollbar-width: none;
 }
 
-.ch-title {
-  flex: none;
-  font-size: 12.5px;
-  font-weight: 660;
-  letter-spacing: 0.2px;
+.pane-tabs::-webkit-scrollbar {
+  display: none;
 }
 
-.ch-counts {
+/* 两端渐隐：macOS 的滚动条平时看不见，用它提示「这一侧还有标签」 */
+.pane-tabs.fade-right {
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 38px), transparent 100%);
+}
+
+.pane-tabs.fade-left {
+  mask-image: linear-gradient(to left, #000 0, #000 calc(100% - 38px), transparent 100%);
+}
+
+.pane-tabs.fade-left.fade-right {
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 30px,
+    #000 calc(100% - 38px),
+    transparent 100%
+  );
+}
+
+.pane-tab {
   flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
+  gap: 6px;
+  max-width: 190px;
+  height: 29px;
+  padding: 0 4px 0 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  /* 可拖拽排序：给个抓手光标 */
+  cursor: grab;
+  -webkit-user-drag: element;
+  transition:
+    background 0.13s ease,
+    color 0.13s ease,
+    border-color 0.13s ease;
 }
 
-.ch-files {
+.pane-tab:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.pane-tab.on {
+  border-color: var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-weight: 650;
+  box-shadow: var(--shadow-sm);
+}
+
+.pane-tab.empty {
   color: var(--faint);
+  font-style: italic;
 }
 
-.ch-branch {
+/* 正在拖的那一枚淡下去，位置由实时重排表现 */
+.pane-tab.dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.pane-tab-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  opacity: 0.9;
+}
+
+.pane-tab.on .pane-tab-icon {
+  color: var(--accent-text);
+  opacity: 1;
+}
+
+.pane-tab-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 10.5px;
 }
 
-.ch-head-acts {
+.pane-tab-badge {
   flex: none;
-  display: flex;
-  align-items: center;
-  gap: 2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 9.5px;
+  font-weight: 700;
+  font-style: normal;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
-.ch-icon {
+.pane-tab-x {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 4px;
+  color: var(--faint);
+  opacity: 0;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.pane-tab-x svg {
+  width: 10px;
+  height: 10px;
+}
+
+.pane-tab:hover .pane-tab-x,
+.pane-tab.on .pane-tab-x {
+  opacity: 1;
+}
+
+.pane-tab-x:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* ＋ 新标签页：虚线框，和「已经存在的标签」区分开 */
+.pane-add {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 7px;
+  color: var(--muted);
+  transition:
+    border-color 0.13s ease,
+    background 0.13s ease,
+    color 0.13s ease;
+}
+
+.pane-add svg {
+  width: 13px;
+  height: 13px;
+}
+
+.pane-add:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.pane-strip .grow {
+  flex: 1;
+  min-width: 8px;
+}
+
+.pane-close {
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -103,798 +242,176 @@
   color: var(--muted);
 }
 
-.ch-icon svg {
+.pane-close svg {
   width: 14px;
   height: 14px;
 }
 
-.ch-icon:hover:not(:disabled) {
+.pane-close:hover {
   background: var(--hover);
   color: var(--text);
 }
 
-.ch-icon:disabled {
-  opacity: 0.5;
-  cursor: default;
+.pane-add:focus-visible,
+.pane-close:focus-visible,
+.pane-choice:focus-visible,
+.pane-tab:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
 }
 
-/* ---------- 主体 ---------- */
+/* ---------- 内容区 ---------- */
 
-.ch-body {
+.pane-body {
   flex: 1;
   min-height: 0;
   display: flex;
 }
 
-/* 左半边：列表切换 + 搜索 + 文件列表 */
-.ch-side {
-  flex: none;
-  width: 300px;
+.pane-view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid var(--border);
-  background: color-mix(in srgb, var(--panel) 60%, var(--panel-2));
 }
 
-.ch-switch {
-  flex: none;
-  display: flex;
-  gap: 2px;
-  padding: 6px 6px 4px;
-}
+/* ---------- 空标签页：两个入口居中 ---------- */
 
-.ch-switch-btn {
+.pane-empty {
   flex: 1;
-  display: inline-flex;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  color: var(--muted);
-  font-size: 11.5px;
-  font-weight: 550;
+  gap: 22px;
+  padding: 28px 24px 40px;
+  overflow: auto;
+  background:
+    radial-gradient(
+      120% 90% at 50% 0%,
+      color-mix(in srgb, var(--accent) 7%, transparent) 0%,
+      transparent 62%
+    ),
+    var(--panel);
 }
 
-.ch-switch-btn:hover {
-  color: var(--text);
-  background: var(--hover);
-}
-
-.ch-switch-btn.on {
-  background: var(--panel);
-  color: var(--text);
-  box-shadow: var(--shadow-sm);
-}
-
-.ch-switch-count {
-  color: var(--faint);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.ch-search {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 2px 6px 4px;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  color: var(--faint);
-}
-
-.ch-search:focus-within {
-  border-color: var(--border-strong);
-}
-
-.ch-search svg {
-  flex: none;
-  width: 13px;
-  height: 13px;
-}
-
-.ch-search input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  font-family: inherit;
-  font-size: 11.5px;
-}
-
-.ch-search input:focus {
-  outline: none;
-}
-
-.ch-search input::placeholder {
-  color: var(--faint);
-}
-
-.ch-list {
-  flex: 1;
-  min-height: 0;
-  margin: 0;
-  padding: 2px 6px 8px;
-  list-style: none;
-  overflow-y: auto;
-}
-
-.ch-more {
-  flex: none;
-  margin: 0;
-  padding: 4px 10px 8px;
-  color: var(--faint);
-  font-size: 10.5px;
-  line-height: 1.5;
-}
-
-.ch-detail-empty {
-  margin: auto;
-  text-align: center;
-}
-
-.ch-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 5px 7px;
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  text-align: left;
-}
-
-.ch-row:hover {
-  background: var(--hover);
-}
-
-.ch-row.on {
-  background: var(--accent-soft);
-}
-
-.ch-mark {
-  flex: none;
-  width: 15px;
-  text-align: center;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 700;
-}
-
-.ch-mark.st-added {
-  color: var(--green);
-}
-
-.ch-mark.st-modified {
-  color: var(--amber);
-}
-
-.ch-mark.st-deleted {
-  color: var(--red);
-}
-
-.ch-mark.st-renamed {
-  color: var(--accent-text);
-}
-
-.ch-mark.st-plain {
-  color: var(--faint);
-}
-
-.ch-path {
-  flex: 1;
-  min-width: 0;
+.pane-empty-head {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  line-height: 1.35;
-}
-
-.ch-dir,
-.ch-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11.5px;
-}
-
-.ch-dir {
-  color: var(--faint);
-  font-size: 10px;
-}
-
-.ch-name {
-  color: var(--text);
-}
-
-.ch-stat {
-  flex: none;
-  display: inline-flex;
-  gap: 5px;
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* ---------- 全部文件：目录树 ---------- */
-
-.ch-tree .ch-row {
+  align-items: center;
   gap: 6px;
-}
-
-.ch-dir-row {
-  color: var(--muted);
-}
-
-.ch-caret {
-  flex: none;
-  width: 12px;
-  height: 12px;
-  color: var(--faint);
-  transition: transform 0.12s ease;
-}
-
-.ch-caret.open {
-  transform: rotate(90deg);
-}
-
-.ch-dir-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11.5px;
-  font-weight: 560;
-}
-
-.ch-file-row .ch-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 文件类型图标（形状见 fileIcons.ts），状态字母挪到行尾 */
-.ch-file-icon {
-  flex: none;
-  width: 15px;
-  height: 15px;
-  color: var(--muted);
-}
-
-.ch-file-row.on .ch-file-icon {
-  color: var(--accent-text);
-}
-
-.ch-file-row .ch-mark {
-  width: auto;
-  min-width: 9px;
-}
-
-/* 目录名后面的小圆点：这个目录里有几个改过的文件 */
-.ch-dir-count {
-  flex: none;
-  min-width: 15px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--amber-soft);
-  color: var(--amber);
-  font-size: 10px;
-  line-height: 15px;
   text-align: center;
-  font-variant-numeric: tabular-nums;
 }
 
-.ch-added {
-  color: var(--green);
-}
-
-.ch-removed {
-  color: var(--red);
-}
-
-.ch-binary {
+.pane-empty-kicker {
   color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
-/* ---------- 详情 ---------- */
-
-.ch-detail {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.ch-detail-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 38px;
-  padding: 0 8px 0 12px;
-  border-bottom: 1px solid var(--border);
-}
-
-.ch-detail-path {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.ch-tabs {
-  flex: none;
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 7px;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-}
-
-.ch-tab {
-  padding: 2px 8px;
-  border-radius: 5px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.ch-tab.on {
-  background: var(--panel);
-  color: var(--text);
-  box-shadow: var(--shadow-sm);
-}
-
-.ch-open {
-  flex: none;
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.ch-open {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.ch-open svg {
-  width: 11px;
-  height: 11px;
-}
-
-.ch-open:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.ch-open-wrap {
-  position: relative;
-  flex: none;
-}
-
-.ch-menu-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1;
-}
-
-.ch-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 2;
-  min-width: 168px;
-  padding: 4px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  box-shadow: var(--shadow-md);
-}
-
-.ch-menu-item {
-  display: block;
-  width: 100%;
-  padding: 6px 9px;
-  border-radius: 5px;
-  color: var(--text);
-  font-size: 11.5px;
-  text-align: left;
-}
-
-.ch-menu-item:hover:not(:disabled) {
-  background: var(--hover);
-}
-
-.ch-menu-item:disabled {
-  color: var(--faint);
-  cursor: default;
-}
-
-.ch-menu-sep {
-  height: 1px;
-  margin: 4px 6px;
-  background: var(--border);
-}
-
-.ch-detail-body {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-}
-
-.ch-diff-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* ---------- diff ---------- */
-
-.ch-diff {
-  padding: 0 0 10px;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.6;
-}
-
-.ch-drow {
-  display: flex;
-  gap: 8px;
-  padding: 0 12px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.ch-sign {
-  flex: none;
-  width: 8px;
-  color: var(--faint);
-  user-select: none;
-}
-
-.ch-line-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.ch-drow.t-add {
-  background: var(--green-soft);
-}
-
-.ch-drow.t-add .ch-sign,
-.ch-drow.t-add .ch-line-text {
-  color: var(--green);
-}
-
-.ch-drow.t-del {
-  background: var(--red-soft);
-}
-
-.ch-drow.t-del .ch-sign,
-.ch-drow.t-del .ch-line-text {
-  color: var(--red);
-}
-
-.ch-drow.t-hunk {
-  margin: 4px 0;
-  padding-top: 3px;
-  padding-bottom: 3px;
-  background: var(--panel-2);
-  color: var(--faint);
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-}
-
-.ch-drow.t-hunk .ch-line-text {
-  color: var(--faint);
-}
-
-/* ---------- 文件内容 ---------- */
-
-.ch-code {
-  padding: 4px 0 12px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.65;
-}
-
-.ch-code-row {
-  display: flex;
-  gap: 10px;
-  padding: 0 12px 0 0;
-}
-
-.ch-code-row:hover {
-  background: var(--hover);
-}
-
-.ch-code-no {
-  flex: none;
-  width: 44px;
-  padding-right: 4px;
-  text-align: right;
-  color: var(--faint);
-  user-select: none;
-  font-variant-numeric: tabular-nums;
-}
-
-.ch-code-text {
-  flex: 1;
-  min-width: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--text);
-}
-
-/* ---------- 空态 ---------- */
-
-.ch-hint {
+.pane-empty-title {
   margin: 0;
-  padding: 16px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.7;
-}
-
-.ch-hint-sub {
-  color: var(--faint);
-  font-size: 11px;
-}
-
-.ch-trunc {
-  margin: 0;
-  padding: 2px 12px;
-  color: var(--amber);
-  font-size: 10.5px;
-}
-
-.ch-error {
-  margin: 12px;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
-  border-radius: var(--radius-sm);
-  background: var(--red-soft);
-  color: var(--red);
-  font-size: 11.5px;
-}
-
-/* ---------- 编辑器 ---------- */
-
-.ch-detail-body.is-edit {
-  overflow: hidden;
-}
-
-.ch-edit {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
-.ch-edit-main {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-
-/* 行号栏：只有纵向位移，跟着 textarea 滚 */
-.ch-edit-gutter-box {
-  flex: none;
-  width: 46px;
-  overflow: hidden;
-  border-right: 1px solid var(--border);
-  background: var(--panel-2);
-}
-
-.ch-edit-gutter {
-  padding: 10px 8px 10px 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.65;
-  color: var(--faint);
-  text-align: right;
-  user-select: none;
-  will-change: transform;
-}
-
-.ch-edit-gutter span {
-  display: block;
-}
-
-.ch-edit-scroll {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-}
-
-/* 高亮层与输入层必须像素级同款（字体 / 行高 / 内边距 / tab），否则光标会歪 */
-.ch-edit-hl,
-.ch-editor {
-  position: absolute;
-  inset: 0;
-  margin: 0;
-  padding: 10px 12px;
-  border: 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.65;
-  tab-size: 2;
-}
-
-.ch-edit-hl {
-  overflow: hidden;
-  background: var(--panel);
   color: var(--text);
-  white-space: pre;
-  pointer-events: none;
-}
-
-.ch-edit-hl code {
-  font: inherit;
-  color: inherit;
-  background: none;
-  padding: 0;
-}
-
-.ch-editor {
-  overflow: auto;
-  background: transparent;
-  color: transparent;
-  caret-color: var(--text);
-  resize: none;
-  outline: none;
-}
-
-/* 选中的是文字本身（透明），底色用半透明强调色，别把下面的高亮盖死 */
-.ch-editor::selection {
-  background: color-mix(in srgb, var(--accent) 26%, transparent);
-}
-
-.ch-edit-bar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  border-top: 1px solid var(--border);
-  background: var(--panel-2);
-}
-
-.ch-edit-note {
-  flex: 1;
-  color: var(--muted);
-  font-size: 10.5px;
-}
-
-.ch-edit-note.ok {
-  color: var(--green);
-}
-
-.ch-save {
-  flex: none;
-  padding: 4px 12px;
-  border-radius: 6px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 11.5px;
-  font-weight: 550;
-}
-
-.ch-save:hover:not(:disabled) {
-  background: var(--accent-strong);
-}
-
-.ch-save:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-/* ---------- 图片预览 ---------- */
-
-.ch-image {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  min-height: 100%;
-}
-
-.ch-image img {
-  max-width: 100%;
-  max-height: calc(100% - 8px);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--preview-bg);
-  object-fit: contain;
-}
-
-/* ---------- markdown 预览 ---------- */
-
-.ch-md {
-  padding: 14px 18px 24px;
-  max-width: 860px;
-  color: var(--text);
-}
-
-/* ---------- 文件 / 终端 tab（M23） ---------- */
-
-.ch-tabs {
-  flex: none;
-  display: inline-flex;
-  padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel);
-}
-
-.ch-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 24px;
-  padding: 0 10px;
-  border-radius: 6px;
-  color: var(--muted);
-  font-size: 11.5px;
-  white-space: nowrap;
-}
-
-.ch-tab:hover {
-  color: var(--text);
-}
-
-.ch-tab.on {
-  background: var(--accent-soft);
-  color: var(--accent-text);
+  font-size: 14px;
   font-weight: 650;
 }
 
-.ch-tab-badge {
-  min-width: 15px;
-  height: 15px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 9.5px;
-  font-weight: 700;
-  line-height: 15px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.ch-new-term {
-  display: inline-flex;
-  align-items: center;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 7px;
-  background: var(--accent);
-  color: var(--on-accent);
+.pane-empty-sub {
+  margin: 0;
+  color: var(--faint);
   font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
+  line-height: 1.6;
 }
 
-.ch-new-term:hover {
-  background: var(--accent-strong);
+.pane-choices {
+  display: flex;
+  gap: 14px;
+}
+
+.pane-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  width: 208px;
+  padding: 22px 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  text-align: center;
+  transition:
+    transform 0.14s ease,
+    border-color 0.14s ease,
+    box-shadow 0.14s ease;
+}
+
+.pane-choice:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  box-shadow: var(--shadow-sm);
+}
+
+.pane-choice:active {
+  transform: translateY(0);
+}
+
+.pane-choice-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.pane-choice-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.pane-choice-name {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.pane-choice-sub {
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.65;
+}
+
+.pane-empty-foot {
+  margin: 0;
+  max-width: 380px;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+@media (max-width: 620px) {
+  .pane-choices {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .pane-choice {
+    width: min(280px, 72vw);
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    text-align: left;
+  }
+
+  .pane-choice-sub {
+    display: none;
+  }
 }

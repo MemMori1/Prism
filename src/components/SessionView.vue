@@ -137,16 +137,22 @@ const nativeSession = computed(() => props.session?.engine === 'native')
  */
 const queued = ref('')
 
-/** 「文件」抽屉：看改动 / 全部文件，也能被聊天里的路径直接点开。 */
+/** 「面板」：一个能开多个标签页的侧边抽屉（文件 / 终端 / 以后的网页）。 */
 const changesOpen = ref(false)
-/** 抽屉当前页：文件 / 终端（任务坞「在终端打开」会切到后者）。 */
-const changesTab = ref<'files' | 'term'>('files')
-/** 终端页要选中的任务。 */
-const terminalTaskId = ref<string | null>(null)
-/** 每次 +1：让终端页打开「新建任务」表单。 */
-const terminalNewTick = ref(0)
-/** 聊天里点了某个路径：抽屉打开后直接定位到它（绝对路径）。 */
-const fileTarget = ref<string | null>(null)
+/** 要侧栏打开什么；每次 +1 让同样的意图再触发一次。 */
+const paneTarget = ref<
+  | { kind: 'files'; path?: string | null }
+  | { kind: 'term'; taskId?: string | null; newTask?: boolean }
+  | null
+>(null)
+const paneTick = ref(0)
+
+function openPane(target: NonNullable<typeof paneTarget.value>): void {
+  paneTarget.value = target
+  paneTick.value += 1
+  changesOpen.value = true
+}
+
 /** 未吸附底部时累计的新消息数（回底浮标角标）。 */
 const unseen = ref(0)
 
@@ -1201,55 +1207,42 @@ async function copyCodeBlock(button: HTMLElement, text: string) {
   )
 }
 
-/** 聊天里点到文件路径：相对路径按会话目录补全，然后开抽屉定位。 */
+/** 聊天里点到文件路径：相对路径按会话目录补全，然后开侧栏定位。 */
 function openFileLink(raw: string) {
   const path = raw.trim()
   if (!path) return
   const directory = props.session?.directory ?? ''
-  fileTarget.value = path.startsWith('/') ? path : joinPath(directory, path)
-  changesTab.value = 'files'
-  changesOpen.value = true
+  openPane({ kind: 'files', path: path.startsWith('/') ? path : joinPath(directory, path) })
 }
 
-// ---- 文件侧栏：文件 / 终端两页 ----
+// ---- 面板：标签页（文件 / 终端） ----
 
-/** 点会话头的「文件」：开着文件页就收起，否则切到文件页。 */
-function toggleFilesPane() {
-  if (changesOpen.value && changesTab.value === 'files') {
+/** 点会话头的「面板」：开着就收起，关着就打开（落在文件标签）。 */
+function togglePane() {
+  if (changesOpen.value) {
     changesOpen.value = false
-    fileTarget.value = null
     return
   }
-  changesTab.value = 'files'
-  changesOpen.value = true
+  openPane({ kind: 'files' })
 }
 
-/** 任务坞「在终端打开」：切到终端页并选中那条任务。 */
+/** 任务坞「在终端打开」：切到终端标签并选中那条任务。 */
 function openTerminalTab(taskId: string) {
-  changesTab.value = 'term'
-  terminalTaskId.value = taskId
-  changesOpen.value = true
+  openPane({ kind: 'term', taskId })
 }
 
 /** 任务坞「在终端里看全部」。 */
 function openTerminalList() {
-  changesTab.value = 'term'
-  terminalTaskId.value = null
-  changesOpen.value = true
+  openPane({ kind: 'term' })
 }
 
-/** 任务坞「＋ 新任务」：终端页直接落在新建表单。 */
+/** 任务坞「＋ 新任务」：终端标签直接落在新建表单。 */
 function openNewTerminal() {
-  changesTab.value = 'term'
-  terminalTaskId.value = null
-  terminalNewTick.value += 1
-  changesOpen.value = true
+  openPane({ kind: 'term', newTask: true })
 }
 
 function closeChangesPane() {
   changesOpen.value = false
-  fileTarget.value = null
-  terminalTaskId.value = null
 }
 
 function onTimelineClick(event: MouseEvent) {
@@ -1659,8 +1652,8 @@ watch(
             <button
               class="changes-btn"
               :class="{ on: changesOpen }"
-              title="文件与终端：改动 / 全部文件 / 后台任务输出"
-              @click.stop="toggleFilesPane"
+              title="面板：文件改动 / 全部文件 / 后台任务，可开多个标签页"
+              @click.stop="togglePane"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -1671,11 +1664,10 @@ watch(
                 stroke-linejoin="round"
                 aria-hidden="true"
               >
-                <path d="M6 3.5h8l5 5v12a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 20.5v-15A2 2 0 0 1 7 3.5Z" />
-                <path d="M14 3.5V9h5" />
-                <path d="M8.5 13.5h5M8.5 17h7" />
+                <rect x="3.4" y="4.6" width="17.2" height="14.8" rx="2.2" />
+                <path d="M14.6 4.6v14.8M17.6 9.2h.01M17.6 12h.01" />
               </svg>
-              文件
+              面板
             </button>
             <button
               v-if="!embedded"
@@ -2141,15 +2133,12 @@ watch(
     <ArtifactViewer :path="artifactPath" @close="artifactPath = null" />
     <ChangesPane
       v-if="changesOpen && session"
-      :key="fileTarget ?? 'changes'"
       :directory="session.directory"
       :session-id="session.id"
       :running="running"
-      :initial-path="fileTarget"
-      :tab="changesTab"
-      :initial-task-id="terminalTaskId"
-      :new-task-tick="terminalNewTick"
-      @update:tab="changesTab = $event"
+      :intent="paneTarget"
+      :intent-tick="paneTick"
+
       @close="closeChangesPane"
     />
   </main>
