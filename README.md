@@ -75,10 +75,28 @@ scripts/release.sh                 # macOS 发版：构建 + updater 签名 + la
 
 Windows 版不在本机构建（macOS 不能交叉编译 Tauri 的 Windows 目标），走 Actions 的 `release-windows` 工作流。
 
+### 视觉验证
+
+`dev-preview.html` 把真 App 挂在假后端上，在普通浏览器里跑——改完样式想确认“实际长什么样”，
+不必启动 Tauri，也不必真的建会话。
+
+```bash
+pnpm dev --port 1521        # 换端口，别和真 app（1520 同源）共用 localStorage
+open "http://localhost:1521/dev-preview.html?view=archive&theme=light"
+```
+
+URL 参数控制落点：`view=`（归档 / 工作台）、`theme=`（light / dark）、`state=`（bound / fresh / legacy）、
+`settings=6`（开设置第 7 个分类）、`tasks=open|files|terminal|chooser`、`drive=flow`（自驱点一遍并把探针写进
+`<pre id="probe">`，无头 Chrome 读 `--dump-dom` 即可断言）。
+
+`dev-preview-fake.ts` 是那个假后端，在 `tsconfig.include` 范围内，`pnpm build` 的类型检查会覆盖它。
+真后端新增 `invoke` 命令后要在这里补一条，否则预览会拿到 `null` 并在组件里炸。
+
 ```
 src/                 Vue 前端；components/ 一组件一文件，样式在 styles/components/
 src/*.ts             纯逻辑模块（nav / diff / markdown / tasks / paneTabs …，多数带单测）
-src-tauri/src/       Rust 后端；ipc.rs 命令入口，engines/{opencode,codex,claude,native} 适配器
+src/dev-preview*     浏览器预览与假后端（视觉回归用，不进打包产物）
+src-tauri/src/       Rust 后端；ipc.rs 命令入口，engines/{opencode,codex,claude,dsh,native} 适配器
 ```
 
 ## 已知边界

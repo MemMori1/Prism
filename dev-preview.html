@@ -1,0 +1,20 @@
+<!doctype html>
+<!--
+  浏览器预览入口（视觉回归用，不进打包产物）。
+
+    pnpm dev --port 1521
+    open "http://localhost:1521/dev-preview.html?view=archive&theme=light"
+
+  参数见 README「视觉验证」。真正的入口逻辑在 src/dev-preview.ts。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prism 预览（页面化导航验证）</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/dev-preview.ts"></script>
+  </body>
+</html>
