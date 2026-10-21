@@ -49,7 +49,21 @@
 - 客户端：设置面板 →「更新」区块 → 检查更新 / 下载并安装 / 重启生效。
 - 验收闭环：装旧版 → 发布新版（版本号 +1）→ 点「检查更新」→ 下载重启后版本已更新。
 
-## 5. 版本历史
+## 5. Windows 版
+
+macOS 上不能交叉编译 Tauri 的 Windows 目标（NSIS / MSVC 工具链），所以走 GitHub Actions：
+
+1. Actions → **release-windows** → Run workflow，`tag` 填要发的那一版（如 `v0.3.0`）。
+2. 在 `windows-latest` 上打 NSIS 安装包：`Prism_<版本>_x64-setup.exe`。
+3. 工作流自动把它挂到该 tag 的 Release，并把 Release 里的全部产物同步到 gh-pages 镜像。
+4. 自动更新：仓库配好 `TAURI_SIGNING_PRIVATE_KEY`（私钥文件内容）与
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 后，额外签 updater 产物，并把
+   `windows-x86_64` 平台项并进 `latest.json`；没配就只出安装包（Windows 端不提示更新）。
+
+已知差异：Windows 没有进程组，停止任务只收直接子进程，`pnpm build` 这类拉起的
+孙子进程可能残留；macOS 侧是整组 SIGTERM → SIGKILL。
+
+## 6. 版本历史
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
