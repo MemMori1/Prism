@@ -112,8 +112,10 @@ pub fn run() {
                 // Cmd+Q / 系统注销：放行退出，并解除关窗拦截。
                 tray::mark_quitting();
             }
+            // Reopen 只有 macOS / iOS 有（点 Dock 图标唤回窗口），Windows 上这个
+            // 变体不存在，不加 cfg 会直接编译失败。
+            #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
-                // Dock 图标被点击：唤起主窗口（macOS）。
                 tray::show_main(app_handle);
             }
             tauri::RunEvent::Exit => {
