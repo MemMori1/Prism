@@ -16,10 +16,10 @@
 //! - 反向请求不在读线程里处理（读线程一阻塞，所有响应都堵住），而是推给
 //!   `Incoming` 通道，由调用方决定何时应答。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -48,7 +48,74 @@ pub enum Incoming {
     Closed { reason: String },
 }
 
+/// stderr 最后保留多少行「上下文」。
+///
+/// 只留尾部是不够的：dsh 崩溃时会先打一行真正的原因，再跟十几层栈帧。
+/// 一个纯尾部的环形缓冲恰好会把原因挤掉，只留下一堆 `at ...index.js:1070`。
+const STDERR_TAIL_LINES: usize = 8;
+/// 「像原因」的行最多留几条（`Error:` / `EACCES` / `failed to …`）。
+const STDERR_CAUSE_LINES: usize = 3;
+/// 单行截断长度。栈帧路径动辄两百字符，整段拼进错误提示会撑爆界面。
+const STDERR_LINE_LIMIT: usize = 180;
+
+/// stderr 的两段式缓冲：原因 + 尾巴。
+#[derive(Default)]
+struct StderrLog {
+    causes: VecDeque<String>,
+    tail: VecDeque<String>,
+}
+
+impl StderrLog {
+    fn push(&mut self, line: &str) {
+        let line: String = line.chars().take(STDERR_LINE_LIMIT).collect();
+        push_bounded(&mut self.tail, line.clone(), STDERR_TAIL_LINES);
+        if looks_like_cause(&line) {
+            push_bounded(&mut self.causes, line, STDERR_CAUSE_LINES);
+        }
+    }
+
+    /// 原因在前、尾巴在后，去重。原因没了就只剩尾巴，不会报空。
+    fn render(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        for line in self.causes.iter().chain(self.tail.iter()) {
+            if !parts.contains(&line.as_str()) {
+                parts.push(line);
+            }
+        }
+        parts.join(" · ")
+    }
+}
+
+fn push_bounded(queue: &mut VecDeque<String>, line: String, limit: usize) {
+    if queue.len() == limit {
+        queue.pop_front();
+    }
+    queue.push_back(line);
+}
+
+/// 这行是不是「真正的原因」。
+///
+/// 刻意宽松：多留一行噪音的代价，远小于把唯一有用的那行挤掉。
+fn looks_like_cause(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    [
+        "error:",
+        "failed to",
+        "permission denied",
+        "eacces",
+        "enotdir",
+        "enoent",
+        "cannot find",
+        "not found",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 struct Pending {
+    /// 请求方法名。断开时要靠它说清"是哪一步"失败的——一律报
+    /// "连接已断开"的话，用户看不出是握手就没起来还是发消息时掉的。
+    method: String,
     sender: Sender<Result<Value, String>>,
 }
 
@@ -60,6 +127,8 @@ pub struct AcpClient {
     alive: Arc<AtomicBool>,
     /// 读线程产出的非响应帧。只能被取走一次（运行轴独占消费）。
     incoming: Mutex<Option<Receiver<Incoming>>>,
+    /// stderr 的尾部若干行，断线时拼进错误信息。
+    stderr_tail: Arc<Mutex<StderrLog>>,
 }
 
 impl AcpClient {
@@ -104,6 +173,7 @@ impl AcpClient {
 
         let (incoming_tx, incoming_rx) = mpsc::channel::<Incoming>();
         let alive = Arc::new(AtomicBool::new(true));
+        let stderr_tail = Arc::new(Mutex::new(StderrLog::default()));
         let client = Arc::new(AcpClient {
             stdin: Mutex::new(stdin),
             child: Mutex::new(child),
@@ -111,10 +181,11 @@ impl AcpClient {
             next_id: AtomicI64::new(1),
             alive: alive.clone(),
             incoming: Mutex::new(Some(incoming_rx)),
+            stderr_tail: stderr_tail.clone(),
         });
 
         spawn_reader(stdout, client.clone(), incoming_tx, alive.clone());
-        spawn_stderr_reader(stderr);
+        spawn_stderr_reader(stderr, stderr_tail);
 
         Ok(client)
     }
@@ -131,6 +202,28 @@ impl AcpClient {
         self.alive.load(Ordering::Relaxed)
     }
 
+    /// stderr 的最后若干行（拼成一段，供错误信息用）。没有输出时返回空串。
+    pub fn last_stderr(&self) -> String {
+        self.stderr_tail
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .render()
+    }
+
+    /// 连接为什么断了——一句能直接给用户看的话。
+    ///
+    /// 顺序是"退出码 + stderr 尾部"。只报 `code=1` 用户没法处置；只报 stderr
+    /// 又可能看不出是哪一步。两条都给，才够定位。
+    fn close_detail(&self, status: Option<String>) -> String {
+        let stderr = self.last_stderr();
+        match (status, stderr.is_empty()) {
+            (Some(status), false) => format!("{status}：{stderr}"),
+            (Some(status), true) => status,
+            (None, false) => stderr,
+            (None, true) => "dsh 进程已退出（没有留下错误输出）".to_string(),
+        }
+    }
+
     /// 发一个请求，等着响应（带超时）。
     pub fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         let (id, receiver) = self.send_request(method, params)?;
@@ -144,7 +237,10 @@ impl AcpClient {
                     .remove(&id);
                 Err(format!("{method} 超时（{}s）", timeout.as_secs()))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!("{method} 连接已断开")),
+            // 通道被丢掉说明读线程收摊时没来得及配对：把原因补上。
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(format!("{method} 失败：{}", self.close_detail(None)))
+            }
         }
     }
 
@@ -156,7 +252,7 @@ impl AcpClient {
         params: Value,
     ) -> Result<(String, Receiver<Result<Value, String>>), String> {
         if !self.is_alive() {
-            return Err("dsh 连接已断开".to_string());
+            return Err(self.close_detail(None));
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let key = id.to_string();
@@ -164,7 +260,13 @@ impl AcpClient {
         self.pending
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(key.clone(), Pending { sender });
+            .insert(
+                key.clone(),
+                Pending {
+                    method: method.to_string(),
+                    sender,
+                },
+            );
 
         let frame = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         if let Err(error) = self.write_frame(&frame) {
@@ -192,13 +294,10 @@ impl AcpClient {
     }
 
     fn write_frame(&self, frame: &Value) -> Result<(), String> {
-        let mut line = serde_json::to_string(frame)
-            .map_err(|cause| format!("序列化 ACP 帧失败：{cause}"))?;
+        let mut line =
+            serde_json::to_string(frame).map_err(|cause| format!("序列化 ACP 帧失败：{cause}"))?;
         line.push('\n');
-        let mut stdin = self
-            .stdin
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut stdin = self.stdin.lock().unwrap_or_else(|error| error.into_inner());
         stdin
             .write_all(line.as_bytes())
             .and_then(|_| stdin.flush())
@@ -229,7 +328,12 @@ impl AcpClient {
 impl Drop for AcpClient {
     fn drop(&mut self) {
         // 直接 kill：会话持久化由 dsh 自己负责，Prism 不替它 flush。
-        let _ = self.child.lock().map(|mut child| child.kill());
+        // 顺手 wait 一下，否则子进程会以僵尸态挂着（`initialize` 失败时
+        // 每次重试都留一个）。
+        let _ = self.child.lock().map(|mut child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        });
     }
 }
 
@@ -253,7 +357,9 @@ fn spawn_reader(
                 }
             }
             alive.store(false, Ordering::SeqCst);
-            // 进程没了，等待中的请求不能靠超时熬过去。
+            // 进程没了，等待中的请求不能靠超时熬过去。退出码与 stderr 一起带上：
+            // dsh 崩在 stdout 上是不留话的，真正的原因只在 stderr 里。
+            let detail = client.close_detail(exit_status(&client));
             let pending = std::mem::take(
                 &mut *client
                     .pending
@@ -261,30 +367,72 @@ fn spawn_reader(
                     .unwrap_or_else(|error| error.into_inner()),
             );
             for (_, entry) in pending {
-                let _ = entry.sender.send(Err("dsh 连接已断开".to_string()));
+                let _ = entry
+                    .sender
+                    .send(Err(format!("{} 失败：{detail}", entry.method)));
             }
-            let _ = incoming.send(Incoming::Closed {
-                reason: "dsh 进程已退出".to_string(),
-            });
+            let _ = incoming.send(Incoming::Closed { reason: detail });
         });
 }
 
+/// 取子进程的退出状态。
+///
+/// stdout 读到 EOF 之后进程通常已经（或正在）退出，但可能会晚几十毫秒。
+/// 用 `try_wait` 短轮询而不是 `wait`：`wait` 要独占 `child` 锁，而
+/// `shutdown()` 也在抢这把锁，两边撞上会互相等到对方放锁。
+fn exit_status(client: &AcpClient) -> Option<String> {
+    for _ in 0..40 {
+        if let Ok(mut child) = client.child.try_lock() {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(describe_status(status)),
+                // 还没退出：stdout 先关了而已，再等一轮。
+                Ok(None) => {}
+                Err(_) => return None,
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    None
+}
+
+fn describe_status(status: ExitStatus) -> String {
+    match (status.code(), status_signal(&status)) {
+        (Some(code), _) => format!("dsh 退出（code {code}）"),
+        (None, Some(signal)) => format!("dsh 被信号 {signal} 终止"),
+        (None, None) => "dsh 异常退出".to_string(),
+    }
+}
+
+#[cfg(unix)]
+fn status_signal(status: &ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn status_signal(_status: &ExitStatus) -> Option<i32> {
+    None
+}
+
 /// stderr 必须有人读：管道写满会让 dsh 卡住，表现为"莫名其妙超时"。
-fn spawn_stderr_reader(stderr: std::process::ChildStderr) {
+///
+/// 同时留一份尾部在内存里——dsh 起不来时，这几十个字是用户唯一的线索。
+fn spawn_stderr_reader(stderr: std::process::ChildStderr, tail: Arc<Mutex<StderrLog>>) {
     let _ = thread::Builder::new()
         .name("prism-dsh-err".into())
         .spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
-                #[cfg(debug_assertions)]
-                {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        println!("[prism] dsh: {trimmed}");
-                    }
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
                 }
-                #[cfg(not(debug_assertions))]
-                let _ = line;
+                #[cfg(debug_assertions)]
+                println!("[prism] dsh: {trimmed}");
+
+                tail.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(trimmed);
             }
         });
 }
@@ -396,6 +544,48 @@ mod tests {
     fn id_key_normalizes_numbers_and_strings() {
         assert_eq!(id_key(&json!(5)), "5");
         assert_eq!(id_key(&json!("5")), "5");
+    }
+
+    /// 真机踩过的形状：一行原因 + 二十层栈帧 + 一行 Node 版本。
+    /// 纯尾部缓冲会只留下栈帧——所以原因必须单独留。
+    #[test]
+    fn stderr_keeps_the_cause_when_frames_flood_the_tail() {
+        let mut log = StderrLog::default();
+        log.push("Error: EACCES: permission denied, mkdir '/Users/x/.dsh/profiles/acp'");
+        for index in 0..20 {
+            log.push(&format!("    at frame{index} (/long/path/index.js:1:1)"));
+        }
+        log.push("Node.js v22.22.2");
+
+        let rendered = log.render();
+        assert!(rendered.contains("EACCES"), "原因被栈帧挤掉了：{rendered}");
+        assert!(rendered.contains("Node.js"), "尾巴也没了：{rendered}");
+        // 中间那些栈帧不该整体搬进来。
+        assert!(!rendered.contains("frame2 "), "带上了太多噪音：{rendered}");
+    }
+
+    #[test]
+    fn stderr_lines_are_truncated_and_deduped() {
+        let mut log = StderrLog::default();
+        let long = format!("Error: {}", "x".repeat(500));
+        log.push(&long);
+        log.push("Error: boom");
+        let rendered = log.render();
+        // 单行截断，整段不该超过两条截断行 + 分隔符。
+        assert!(rendered.len() < 500, "没截断：{}", rendered.len());
+        assert!(rendered.contains("boom"));
+    }
+
+    #[test]
+    fn cause_detection_covers_common_failure_lines() {
+        assert!(looks_like_cause(
+            "Error: EACCES: permission denied, mkdir '/x'"
+        ));
+        assert!(looks_like_cause("dsh: failed to load .env"));
+        assert!(looks_like_cause("ENOTDIR: not a directory"));
+        // 普通日志不该被当成原因。
+        assert!(!looks_like_cause("    at frame0 (/a/b.js:1:1)"));
+        assert!(!looks_like_cause("Node.js v22.22.2"));
     }
 
     /// 与 `route_frame` 同构的分类，只用于测试断言。

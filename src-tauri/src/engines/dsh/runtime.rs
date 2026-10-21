@@ -118,19 +118,26 @@ impl Runtime {
         }
 
         let client = AcpClient::spawn(locator::home().as_deref())?;
-        let handshake = client.call(
-            "initialize",
-            json!({
-                "protocolVersion": super::acp::PROTOCOL_VERSION,
-                // Prism 不接管文件系统与终端：工具都在 dsh 进程里跑，
-                // 声明不支持比假装支持更安全（ACP 会据此避开这些扩展）。
-                "clientCapabilities": {
-                    "fs": { "readTextFile": false, "writeTextFile": false },
-                    "terminal": false,
-                },
-            }),
-            INIT_TIMEOUT,
-        )?;
+        let handshake = client
+            .call(
+                "initialize",
+                json!({
+                    "protocolVersion": super::acp::PROTOCOL_VERSION,
+                    // Prism 不接管文件系统与终端：工具都在 dsh 进程里跑，
+                    // 声明不支持比假装支持更安全（ACP 会据此避开这些扩展）。
+                    "clientCapabilities": {
+                        "fs": { "readTextFile": false, "writeTextFile": false },
+                        "terminal": false,
+                    },
+                }),
+                INIT_TIMEOUT,
+            )
+            .map_err(|error| {
+                // 这一段是"dsh 起不来"最常被撞见的地方：home 目录权限、profile
+                // 首次装配、Node 版本，全在这一步暴露。原样带出去，别压成
+                // 一句"连接失败"——用户拿着 `EACCES ... /profiles/acp` 才能自救。
+                format!("dsh 初始化失败（`{error}`）")
+            })?;
         let _ = handshake;
 
         if let Some(incoming) = client.take_incoming() {
@@ -382,7 +389,10 @@ impl Runtime {
                 None => vec![group],
             };
             for candidate in candidates {
-                let name = candidate.get("name").and_then(Value::as_str).unwrap_or_default();
+                let name = candidate
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 if name == model {
                     return candidate
                         .get("value")
@@ -486,10 +496,7 @@ fn prefix_session(mut event: Value) -> Value {
         return event;
     };
     if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
-        data.insert(
-            "sessionID".to_string(),
-            json!(super::session_id_of(&raw)),
-        );
+        data.insert("sessionID".to_string(), json!(super::session_id_of(&raw)));
     }
     event
 }
@@ -512,7 +519,9 @@ fn pump(inner: Arc<RuntimeInner>, client: Arc<AcpClient>, incoming: mpsc::Receiv
                     // 不认识的反向请求必须回一个错误，否则对面会一直等。
                     let _ = client.respond(
                         &id,
-                        Err(json!({ "code": -32601, "message": format!("未实现的方法：{method}") })),
+                        Err(
+                            json!({ "code": -32601, "message": format!("未实现的方法：{method}") }),
+                        ),
                     );
                 }
             }
@@ -884,6 +893,44 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    /// 真机冒烟：dsh 起不来时，错误里必须带着 stderr 的真实原因。
+    ///
+    /// ```text
+    /// DSH_BIN=/path/to/dsh cargo test --lib real_acp -- --ignored --nocapture
+    /// ```
+    ///
+    /// 用一个普通**文件**当 `DSH_HOME` 制造必然的启动失败（比依赖某个真实目录的
+    /// 权限更好复现）。这条链以前会把 `EACCES / ENOTDIR` 吞掉，只给用户一句
+    /// "连接已断开"——所以断言里必须看到底层那句话。
+    #[test]
+    #[ignore = "会真的启动 dsh（需 DSH_BIN 或 PATH 里有 dsh）"]
+    fn real_acp_surfaces_launch_failure() {
+        let bad_home =
+            std::env::temp_dir().join(format!("prism-dsh-badhome-{}", std::process::id()));
+        std::fs::write(&bad_home, b"not a directory").expect("写占位文件");
+        std::env::set_var("DSH_HOME", &bad_home);
+
+        let runtime = Runtime::new(None);
+        let error = runtime
+            .create_session("/tmp")
+            .expect_err("home 不可写时不该建会话成功");
+        println!("错误信息：{error}");
+
+        assert!(error.contains("初始化失败"), "错误没说明是哪一步：{error}");
+        // 底层那句话必须露出来：EACCES（权限）或 ENOTDIR（路径不是目录）。
+        let lower = error.to_lowercase();
+        assert!(
+            lower.contains("permission denied")
+                || lower.contains("not a directory")
+                || lower.contains("eacces")
+                || lower.contains("enotdir"),
+            "错误里没有底层原因：{error}"
+        );
+
+        std::env::remove_var("DSH_HOME");
+        let _ = std::fs::remove_file(&bad_home);
+    }
+
     /// 真机冒烟：真起 `dsh --profile acp`，握手 → 建会话 → 一问一答。
     ///
     /// ```text
@@ -915,7 +962,10 @@ mod tests {
             let Ok(event) = events.recv_timeout(Duration::from_secs(5)) else {
                 continue;
             };
-            let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
+            let kind = event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             println!("  事件 {kind}");
             match kind {
                 "session.text.delta" => {
@@ -952,7 +1002,8 @@ mod tests {
         );
 
         // 会话必须出现在历史里：ACP 建会话与日志写入是同一条链。
-        let summary = crate::engines::dsh::history::session_summary(&session_id).expect("历史里应当有这个会话");
+        let summary = crate::engines::dsh::history::session_summary(&session_id)
+            .expect("历史里应当有这个会话");
         assert_eq!(summary.directory, "/tmp");
 
         runtime.shutdown();

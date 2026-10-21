@@ -31,6 +31,30 @@ pub fn sessions_dir() -> Option<PathBuf> {
     home().map(|home| home.join("sessions"))
 }
 
+/// dsh 的 home 有没有问题（不可写 / 被别的用户占着）。
+///
+/// 这是"连接已断开"最常见的真凶：某次 `sudo dsh` 留下的 `~/.dsh` 属主是 root、
+/// 权限 700，普通用户连读都不行。dsh 启动时会 `mkdir <home>/profiles/<profile>`，
+/// 那里一失败进程立刻退，ACP 侧只能感知到 stdout 关了。
+///
+/// 探测方式就是建它本来就要建的目录，幂等且没有额外副作用——顺带把"父目录不存在"
+/// 这种首次运行情况也变成可用。
+pub fn home_problem() -> Option<String> {
+    probe_writable(&home()?)
+}
+
+fn probe_writable(home: &Path) -> Option<String> {
+    match std::fs::create_dir_all(home.join("profiles")) {
+        Ok(()) => None,
+        Err(error) => Some(format!(
+            "dsh 主目录 {} 不可写（{error}）。若曾被 sudo 跑过，属主可能是 root：\
+             sudo chown -R \"$(whoami)\" {}",
+            home.display(),
+            home.display()
+        )),
+    }
+}
+
 /// `dsh` 可执行文件。
 ///
 /// 查找顺序刻意从"用户显式指定"到"常见安装位"：
@@ -64,9 +88,7 @@ pub fn cli_path() -> Option<PathBuf> {
     }
     fallbacks.push(PathBuf::from("/opt/homebrew/bin"));
     fallbacks.push(PathBuf::from("/usr/local/bin"));
-    fallbacks
-        .iter()
-        .find_map(|dir| first_executable(dir))
+    fallbacks.iter().find_map(|dir| first_executable(dir))
 }
 
 /// 某个目录下的 dsh 可执行文件（Windows 上 npm 装出来的是 `.cmd`）。
@@ -107,5 +129,24 @@ mod tests {
         assert_eq!(cli_path(), Some(fake));
         std::env::remove_var("DSH_BIN");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn writable_home_has_no_problem() {
+        let dir = std::env::temp_dir().join(format!("prism-dsh-ok-{}", std::process::id()));
+        assert!(probe_writable(&dir).is_none());
+        assert!(dir.join("profiles").is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_in_place_of_home_is_reported() {
+        // 拿普通文件当 home：在它下面建 `profiles` 必然失败。这覆盖的是
+        // "~/.dsh 被 root 占着" 那类现象——探测必须能报出来，否则用户只会
+        // 看到 ACP 侧一句"连接已断开"。
+        let file = std::env::temp_dir().join(format!("prism-dsh-file-{}", std::process::id()));
+        std::fs::write(&file, b"not a directory").expect("写文件");
+        assert!(probe_writable(&file).is_some());
+        let _ = std::fs::remove_file(&file);
     }
 }

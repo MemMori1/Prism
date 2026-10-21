@@ -27,10 +27,11 @@ impl Engine for Runtime {
         let home = locator::home();
         // 历史和运行时是两件事：装了 dsh 但还没跑过任何会话时，`sessions` 目录
         // 不存在也是"可用"的（第一条消息会创建它），只是列表暂时是空的。
+        // 但 home 不可写就不是"暂时没数据"了——那是发消息必然失败，得算未就绪。
         EngineHealth {
             engine_id: locator::ENGINE_ID.to_string(),
             display_name: locator::DISPLAY_NAME.to_string(),
-            ready: cli.is_some(),
+            ready: cli.is_some() && locator::home_problem().is_none(),
             database_path: home.map(|path| path.display().to_string()),
             cli_path: cli.map(|path| path.display().to_string()),
         }
@@ -38,10 +39,7 @@ impl Engine for Runtime {
 
     fn create_session(&self, directory: &str) -> Result<CreatedSession, String> {
         let session_id = Runtime::create_session(self, directory)?;
-        Ok(CreatedSession::new(
-            session_id,
-            Some(directory.to_string()),
-        ))
+        Ok(CreatedSession::new(session_id, Some(directory.to_string())))
     }
 
     /// 能力目录：模型按 ACP 的 `configOptions` 翻，推理档位当变体。
@@ -54,6 +52,11 @@ impl Engine for Runtime {
                 locator::ENGINE_ID,
                 "未找到 dsh 命令：装好 DeepSeek Harness 后重启 Prism",
             ));
+        }
+        // home 不可写就直接说清：这种情况下建会话/发消息会在 ACP 里断成
+        // "连接已断开"，与其让用户在那儿猜，不如在能力目录里先报。
+        if let Some(problem) = locator::home_problem() {
+            return Ok(catalog::unavailable(locator::ENGINE_ID, problem));
         }
         let options = match self.config_options(directory) {
             Ok(options) => options,
