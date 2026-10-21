@@ -1,0 +1,148 @@
+# Windows 发版：在 windows-latest 上打出 NSIS 安装包，挂到已有的 GitHub Release，
+# 并把 gh-pages 镜像补上（安装包 + latest.json）。
+#
+# 为什么不在本机打：Tauri 的 Windows 目标需要在 Windows 上跑（NSIS / MSVC），
+# 从 macOS 交叉编译不受支持。
+#
+# 用法：Actions → release-windows → Run workflow，tag 填 v0.3.0。
+# 有 TAURI_SIGNING_PRIVATE_KEY 这个 secret 时顺带签 updater 产物，并把
+# windows-x86_64 写进 latest.json；没有就只出安装包（Windows 端暂无自动更新）。
+name: release-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag，例如 v0.3.0'
+        required: true
+        default: 'v0.3.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # 只在仓库里配了密钥时才签名；空值走无签名分支
+      TAURI_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (signed updater artifacts)
+        if: ${{ env.TAURI_KEY != '' }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":true}}'
+
+      - name: Build (unsigned)
+        if: ${{ env.TAURI_KEY == '' }}
+        run: pnpm tauri build --bundles nsis
+
+      - name: Upload installer to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ inputs.tag }}"
+          $nsis = "src-tauri/target/release/bundle/nsis"
+          $exe = Get-ChildItem "$nsis/*.exe" | Where-Object { $_.Name -notlike "*.sig" } | Select-Object -First 1
+          if (-not $exe) { throw "没有找到 NSIS 安装包（$nsis）" }
+          Write-Host "安装包：$($exe.Name)"
+          gh release upload $tag $exe.FullName --clobber
+
+          # 有签名时一起上传，并生成 windows 平台清单片段
+          $sig = Get-ChildItem "$nsis/*.exe.sig" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($sig) {
+            gh release upload $tag $sig.FullName --clobber
+            $fragment = @{
+              url       = "https://memmori1.github.io/Prism/$($exe.Name)"
+              signature = (Get-Content $sig.FullName -Raw)
+            }
+            $fragment | ConvertTo-Json -Compress | Set-Content "windows-latest.json" -Encoding utf8
+            Write-Host "已生成 windows-latest.json"
+          } else {
+            Write-Host "未配置签名密钥：跳过 updater 清单（Windows 端不接受自动更新）"
+          }
+
+      - name: Upload manifest fragment
+        if: ${{ env.TAURI_KEY != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-manifest
+          path: windows-latest.json
+          if-no-files-found: ignore
+
+  sync:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-manifest
+          path: fragment
+        continue-on-error: true
+
+      - name: Fetch release assets
+        run: |
+          mkdir -p assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets --clobber
+          ls -lh assets
+
+      - name: Merge windows entry into latest.json
+        run: |
+          if [ ! -f fragment/windows-latest.json ]; then
+            echo "没有签名片段，latest.json 保持不变（安装包仍会镜像到 gh-pages）"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, pathlib
+          manifest = json.loads(pathlib.Path('assets/latest.json').read_text())
+          fragment = json.loads(pathlib.Path('fragment/windows-latest.json').read_text())
+          manifest.setdefault('platforms', {})['windows-x86_64'] = fragment
+          pathlib.Path('assets/latest.json').write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + '\n'
+          )
+          print('platforms:', list(manifest['platforms']))
+          PY
+
+      - name: Update release manifest
+        run: |
+          if [ ! -f fragment/windows-latest.json ]; then exit 0; fi
+          gh release upload "$TAG" assets/latest.json --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Sync gh-pages mirror
+        run: |
+          cd assets
+          touch .nojekyll
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name="Prism Release" \
+              -c user.email="prism-release@users.noreply.github.com" \
+              commit -qm "release: $TAG (windows)"
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
