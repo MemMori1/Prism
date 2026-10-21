@@ -74,6 +74,7 @@ const opencode = computed(() => engines.value.find(item => item.engineId === 'op
 const engineRoles: Record<string, string> = {
   opencode: '运行轴',
   codex: '浏览 + 运行',
+  dsh: '浏览 + 运行',
   claude: '历史浏览',
   native: '内置运行轴',
 }

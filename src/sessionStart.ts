@@ -1,7 +1,7 @@
 import type { EngineHealth, ProjectItem } from './types'
 
 /** 引擎图标样式（无第三方图标依赖，用内联 SVG / 文本绘制）。 */
-export type EngineIcon = 'claude' | 'codex' | 'opencode' | 'prism'
+export type EngineIcon = 'claude' | 'codex' | 'dsh' | 'opencode' | 'prism'
 
 export interface EngineChoice {
   id: string
@@ -17,7 +17,7 @@ export interface EngineChoice {
 }
 
 /** 运行轴当前能从 Prism 直接建会话的引擎。 */
-export const CREATABLE_ENGINE_IDS = ['opencode', 'codex', 'native'] as const
+export const CREATABLE_ENGINE_IDS = ['opencode', 'codex', 'dsh', 'native'] as const
 
 const PRESENTATION: ReadonlyArray<Omit<EngineChoice, 'available' | 'checking'>> = [
   {
@@ -37,6 +37,12 @@ const PRESENTATION: ReadonlyArray<Omit<EngineChoice, 'available' | 'checking'>> 
     label: 'Codex',
     description: '使用 Codex 开始一个空白会话',
     icon: 'codex',
+  },
+  {
+    id: 'dsh',
+    label: 'DeepSeek Harness',
+    description: '使用 dsh 开始一个空白会话（ACP 接入，历史与 CLI 共用）',
+    icon: 'dsh',
   },
   {
     id: 'opencode',

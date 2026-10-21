@@ -11,7 +11,7 @@ export interface EngineOption {
 }
 
 /** 固定顺序：原生排第一，与新建会话的入口卡片一致。 */
-const ORDER = ['native', 'opencode', 'codex', 'claude']
+const ORDER = ['native', 'opencode', 'codex', 'dsh', 'claude']
 
 /** 下拉选项只列当前真实存在的类型，避免选了个空列表。 */
 export function projectEngineOptions(projects: ReadonlyArray<{ engine: string }>): EngineOption[] {
@@ -32,11 +32,12 @@ export function filterByEngine<T extends { engine: string }>(projects: readonly 
   return projects.filter(project => project.engine === engine)
 }
 
-/** 徽标上的两字缩写（OC / CX / CC / PR）。 */
+/** 徽标上的两字缩写（OC / CX / DS / CC / PR）。 */
 const SHORT_LABELS: Record<string, string> = {
   native: 'PR',
   opencode: 'OC',
   codex: 'CX',
+  dsh: 'DS',
   claude: 'CC',
 }
 

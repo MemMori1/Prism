@@ -15,6 +15,7 @@ use tauri::AppHandle;
 
 use crate::engines::claude::engine::ClaudeEngine;
 use crate::engines::codex::runtime::Runtime as CodexRuntime;
+use crate::engines::dsh::runtime::Runtime as DshRuntime;
 use crate::engines::engine::EngineRegistry;
 use crate::engines::native::engine::NativeEngine;
 use crate::engines::native::tools::{
@@ -103,6 +104,33 @@ impl Plugin for ClaudeEnginePlugin {
 
     fn setup(&self, ctx: &mut KernelCtx<'_>) -> Result<(), String> {
         ctx.register_engine(Arc::new(ClaudeEngine::new()));
+        Ok(())
+    }
+}
+
+/// DeepSeek Harness 引擎：拉起 `dsh --profile acp`，走 ACP v1（stdio JSON-RPC）。
+pub struct DshEngine {
+    app: AppHandle,
+}
+
+impl DshEngine {
+    pub fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl Plugin for DshEngine {
+    fn id(&self) -> &'static str {
+        "engine.dsh"
+    }
+
+    fn setup(&self, ctx: &mut KernelCtx<'_>) -> Result<(), String> {
+        let runtime = DshRuntime::new(Some(self.app.clone()));
+        // 双写理由同 opencode / codex：`session_send` 这类命令要按
+        // `State<DshRuntime>` 直接拿到运行轴，注册表那边给"按 id 分发"用。
+        // 两边是同一个实例（内部 `Arc<Inner>`），不会各起一个 dsh 进程。
+        ctx.manage(runtime.clone());
+        ctx.register_engine(Arc::new(runtime));
         Ok(())
     }
 }

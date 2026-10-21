@@ -30,7 +30,7 @@ const emit = defineEmits<{
   (e: 'error', message: string): void
 }>()
 
-const ENGINES = ['opencode', 'codex', 'claude'] as const
+const ENGINES = ['opencode', 'codex', 'dsh', 'claude'] as const
 type EngineId = (typeof ENGINES)[number]
 
 const engine = ref<EngineId>('opencode')

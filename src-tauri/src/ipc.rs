@@ -12,6 +12,8 @@ use crate::engines::codex::runtime::Runtime as CodexRuntime;
 use crate::engines::core::{
     EngineHealth, ProjectItem, SearchHit, SearchStats, SessionSummary, TimelinePage, ToolDetail,
 };
+use crate::engines::dsh;
+use crate::engines::dsh::runtime::Runtime as DshRuntime;
 use crate::engines::native;
 use crate::engines::opencode;
 use crate::engines::opencode::runtime::{
@@ -58,6 +60,11 @@ pub fn known_project_cwds() -> Vec<String> {
     }
     cwds.extend(
         native::store::list_projects()
+            .into_iter()
+            .map(|item| item.worktree),
+    );
+    cwds.extend(
+        dsh::history::list_projects(200)
             .into_iter()
             .map(|item| item.worktree),
     );
@@ -329,6 +336,9 @@ pub async fn list_projects() -> Result<Vec<ProjectItem>, String> {
             }
         }
         items.extend(native::store::list_projects());
+        // dsh 的项目直接由日志目录聚合：不需要拉起 ACP 进程，也不会因为
+        // 引擎没启动而漏掉历史。
+        items.extend(dsh::history::list_projects(500));
         items.sort_by(|a, b| b.time_updated.cmp(&a.time_updated));
         items
     })
@@ -348,6 +358,15 @@ pub async fn list_sessions(
         let limit = limit.unwrap_or(500).clamp(1, 1000) as usize;
         return tauri::async_runtime::spawn_blocking(move || {
             native::store::list_sessions(&project_id, limit)
+        })
+        .await
+        .map_err(|cause| cause.to_string());
+    }
+
+    if dsh::is_dsh_project(&project_id) {
+        let limit = limit.unwrap_or(500).clamp(1, 1000) as usize;
+        return tauri::async_runtime::spawn_blocking(move || {
+            dsh::history::list_sessions(&project_id, limit)
         })
         .await
         .map_err(|cause| cause.to_string());
@@ -397,6 +416,11 @@ pub async fn session_summary(session_id: String) -> Result<Option<SessionSummary
     if native::is_native_session(&session_id) {
         return Ok(native::store::summary(&session_id));
     }
+    if dsh::is_dsh_session(&session_id) {
+        return tauri::async_runtime::spawn_blocking(move || dsh::history::session_summary(&session_id))
+            .await
+            .map_err(|cause| cause.to_string());
+    }
     if claude::transcript::is_claude_session(&session_id) {
         let root = claude::locator::projects_dir()
             .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
@@ -443,6 +467,21 @@ pub async fn read_timeline(
             .map_err(|cause| cause.to_string());
     }
 
+    if dsh::is_dsh_session(&session_id) {
+        let page = tauri::async_runtime::spawn_blocking(move || {
+            dsh::history::read_timeline(&session_id, before_seq, limit)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+        let page = page?;
+        #[cfg(debug_assertions)]
+        println!(
+            "[prism] read_timeline(dsh) -> {} 条 (has_more={})",
+            page.records.len(),
+            page.has_more
+        );
+        return Ok(page);
+    }
     if claude::transcript::is_claude_session(&session_id) {
         let root = claude::locator::projects_dir()
             .ok_or_else(|| "无法定位 Claude 档案目录".to_string())?;
@@ -515,6 +554,13 @@ pub async fn read_tool_detail(
     if native::is_native_session(&session_id) {
         let detail = native::store::tool_detail(&session_id, &call_id);
         return detail.ok_or_else(|| format!("这条会话里找不到工具调用 {call_id}"));
+    }
+    if dsh::is_dsh_session(&session_id) {
+        return tauri::async_runtime::spawn_blocking(move || {
+            dsh::history::read_tool_detail(&session_id, &call_id)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
     }
     if claude::transcript::is_claude_session(&session_id) {
         let root = claude::locator::projects_dir()
@@ -671,6 +717,7 @@ pub async fn session_send(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, Runtime>,
     codex_runtime: tauri::State<'_, CodexRuntime>,
+    dsh_runtime: tauri::State<'_, DshRuntime>,
     session_id: String,
     text: String,
     options: Option<SendOptions>,
@@ -705,6 +752,21 @@ pub async fn session_send(
         let text = files_to_note(&text, &options.files);
         return tauri::async_runtime::spawn_blocking(move || {
             codex_runtime.send_prompt_with(
+                &session_id,
+                &text,
+                options.model.as_deref(),
+                options.variant.as_deref(),
+            )
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
+    if dsh::is_dsh_session(&session_id) {
+        let dsh_runtime = dsh_runtime.inner().clone();
+        // ACP 的 prompt 只吃文本块，附件按"路径清单"折进正文。
+        let text = files_to_note(&text, &options.files);
+        return tauri::async_runtime::spawn_blocking(move || {
+            dsh_runtime.send_prompt_with(
                 &session_id,
                 &text,
                 options.model.as_deref(),
@@ -782,6 +844,11 @@ pub async fn session_shell(
         .await
         .map_err(|cause| cause.to_string())?;
     }
+    if dsh::is_dsh_session(&session_id) {
+        // ACP 没有"代跑 shell"的方法：dsh 的工具都关在自己进程里，外部控制器
+        // 只能发 prompt，不能直接执行命令。
+        return Err("DeepSeek Harness 不支持从 Prism 直接执行 shell".to_string());
+    }
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || runtime.session_shell(&session_id, &command))
         .await
@@ -800,6 +867,10 @@ pub async fn session_command(
     println!("[prism] session_command -> {session_id} /{name}");
     if is_codex_session(&session_id) {
         return Err("Codex 暂不支持斜杠命令（可直接输入自然语言指令）".to_string());
+    }
+    if dsh::is_dsh_session(&session_id) {
+        // dsh 的命令是插件在会话里注册的，ACP 不上报全集，也没有"执行命令"的方法。
+        return Err("DeepSeek Harness 暂不支持斜杠命令（可直接输入自然语言指令）".to_string());
     }
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || runtime.session_command(&session_id, &name, &text))
@@ -883,6 +954,7 @@ pub async fn git_switch_branch(
 pub async fn session_interrupt(
     runtime: tauri::State<'_, Runtime>,
     codex_runtime: tauri::State<'_, CodexRuntime>,
+    dsh_runtime: tauri::State<'_, DshRuntime>,
     session_id: String,
 ) -> Result<(), String> {
     #[cfg(debug_assertions)]
@@ -901,6 +973,12 @@ pub async fn session_interrupt(
             .await
             .map_err(|cause| cause.to_string())?;
     }
+    if dsh::is_dsh_session(&session_id) {
+        let dsh_runtime = dsh_runtime.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || dsh_runtime.interrupt(&session_id))
+            .await
+            .map_err(|cause| cause.to_string())?;
+    }
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || runtime.interrupt(&session_id))
         .await
@@ -916,6 +994,12 @@ pub async fn session_permissions(
 ) -> Result<Vec<PermissionRequest>, String> {
     if native::is_native_session(&session_id) {
         return Ok(native::approval::list(&session_id));
+    }
+    if dsh::is_dsh_session(&session_id) {
+        // dsh 的权限询问只在事件流里出现一次（`permission.asked`）。切会话补拉
+        // 需要按会话 id 把挂起项捞回来，暂时没做——卡片本身就是事件驱动的，
+        // 正常路径不会漏。
+        return Ok(Vec::new());
     }
     if is_codex_session(&session_id) {
         let codex_runtime = codex_runtime.inner().clone();
@@ -936,6 +1020,7 @@ pub async fn session_permissions(
 pub async fn session_permission_reply(
     runtime: tauri::State<'_, Runtime>,
     codex_runtime: tauri::State<'_, CodexRuntime>,
+    dsh_runtime: tauri::State<'_, DshRuntime>,
     session_id: String,
     request_id: String,
     decision: String,
@@ -949,6 +1034,14 @@ pub async fn session_permission_reply(
         let codex_runtime = codex_runtime.inner().clone();
         return tauri::async_runtime::spawn_blocking(move || {
             codex_runtime.permission_reply(&session_id, &request_id, &decision)
+        })
+        .await
+        .map_err(|cause| cause.to_string())?;
+    }
+    if dsh::is_dsh_session(&session_id) {
+        let dsh_runtime = dsh_runtime.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            dsh_runtime.permission_reply(&session_id, &request_id, &decision)
         })
         .await
         .map_err(|cause| cause.to_string())?;

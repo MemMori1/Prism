@@ -1,6 +1,6 @@
 # Prism
 
-多引擎 AI 编码 Agent 指挥台。把 OpenCode / Codex / Claude Code / 内置 Agent 的会话收进同一面墙：浏览历史、下指令、执行中插话、权限审批，都在一处。
+多引擎 AI 编码 Agent 指挥台。把 OpenCode / Codex / Claude Code / DeepSeek Harness / 内置 Agent 的会话收进同一面墙：浏览历史、下指令、执行中插话、权限审批，都在一处。
 
 Tauri 2 + Vue 3 + Rust 桌面应用（macOS / Windows x64）。引擎原始数据只读，自有数据只写 `~/.prism/`。
 
@@ -29,14 +29,18 @@ Tauri 2 + Vue 3 + Rust 桌面应用（macOS / Windows x64）。引擎原始数�
 
 ## 引擎
 
-| 能力 | OpenCode | Codex | Claude Code | Prism 原生 |
-|---|---|---|---|---|
-| 历史浏览 | ✅ | ✅ | ✅ | ✅ |
-| 发消息 / 流式 | ✅ | ✅ | 待本机 CLI | ✅ |
-| 打断 / 插话 | ✅ | ✅ | — | 打断 ✅ / 插话 — |
-| 权限审批 | ✅ | ✅ | — | 仅工作目录守卫 |
-| 新建会话 | ✅ | ✅ | — | ✅ |
-| 用量统计 | ✅ | ✅ | ✅ | 会话内 token |
+| 能力 | OpenCode | Codex | Claude Code | DeepSeek Harness | Prism 原生 |
+|---|---|---|---|---|---|
+| 历史浏览 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 发消息 / 流式 | ✅ | ✅ | 待本机 CLI | ✅ | ✅ |
+| 打断 / 插话 | ✅ | ✅ | — | 打断 ✅ / 插话 — | 打断 ✅ / 插话 — |
+| 权限审批 | ✅ | ✅ | — | ✅ | 仅工作目录守卫 |
+| 新建会话 | ✅ | ✅ | — | ✅ | ✅ |
+| 用量统计 | ✅ | ✅ | ✅ | 会话内 token | 会话内 token |
+
+DeepSeek Harness 走官方 ACP（`dsh --profile acp`，stdio JSON-RPC）：Prism 是「外部控制器」，
+不碰它的内部结构；历史直接读 `$DSH_HOME/sessions/**/session.v*.jsonl.zstd`（多帧 zstd，
+只读不写）。CLI 与 Prism 共用同一份会话日志，一边聊的回合另一边刷新就能看到。
 
 ## 内置 Agent
 

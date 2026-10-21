@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod core;
+pub mod dsh;
 pub mod engine;
 pub mod mcp;
 pub mod native;

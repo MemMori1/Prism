@@ -6,6 +6,7 @@ export const ASSET_ENGINE_LABELS: Record<string, string> = {
   native: 'Prism 原生',
   opencode: 'OpenCode',
   codex: 'Codex',
+  dsh: 'DeepSeek Harness',
   claude: 'Claude Code',
 }
 
@@ -33,7 +34,7 @@ export interface AssetGroup {
   items: AssetItem[]
 }
 
-const ENGINE_ORDER = ['opencode', 'codex', 'claude']
+const ENGINE_ORDER = ['opencode', 'codex', 'dsh', 'claude']
 const KIND_ORDER: AssetKind[] = ['skill', 'command', 'agent', 'memory', 'plugin']
 
 function orderOf(list: readonly string[], value: string): number {

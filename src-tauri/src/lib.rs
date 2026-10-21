@@ -102,6 +102,7 @@ pub fn run() {
             let capabilities: Vec<Arc<dyn Plugin>> = vec![
                 Arc::new(plugins::OpencodeEngine::new(app.handle().clone())),
                 Arc::new(plugins::CodexEngine::new(app.handle().clone())),
+                Arc::new(plugins::DshEngine::new(app.handle().clone())),
                 Arc::new(plugins::NativeEnginePlugin),
                 Arc::new(plugins::ClaudeEnginePlugin),
                 Arc::new(plugins::EngineHost),

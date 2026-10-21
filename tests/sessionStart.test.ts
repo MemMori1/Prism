@@ -24,16 +24,29 @@ function project(id: string, timeUpdated: number): ProjectItem {
 }
 
 describe('engineChoices', () => {
-  it('原生引擎排在最前，其余按 Claude、Codex、OpenCode 排列', () => {
-    const choices = engineChoices([health('opencode', true), health('codex', true), health('claude', true)])
-    expect(choices.map(item => item.id)).toEqual(['native', 'claude', 'codex', 'opencode'])
+  it('原生引擎排在最前，其余按 Claude、Codex、DeepSeek Harness、OpenCode 排列', () => {
+    const choices = engineChoices([
+      health('opencode', true),
+      health('codex', true),
+      health('dsh', true),
+      health('claude', true),
+    ])
+    expect(choices.map(item => item.id)).toEqual(['native', 'claude', 'codex', 'dsh', 'opencode'])
     expect(choices.map(item => item.label)).toEqual([
       'Prism 原生',
       'Claude Code',
       'Codex',
+      'DeepSeek Harness',
       'OpenCode',
     ])
-    expect(choices[3].description).toBe('使用 OpenCode 开始一个空白会话')
+    expect(choices[4].description).toBe('使用 OpenCode 开始一个空白会话')
+  })
+
+  it('DeepSeek Harness 装了 CLI 就能从 Prism 直接建会话', () => {
+    const ready = engineChoices([health('dsh', true)]).find(item => item.id === 'dsh')
+    expect(ready).toMatchObject({ available: true, checking: false })
+    const missing = engineChoices([]).find(item => item.id === 'dsh')
+    expect(missing).toMatchObject({ available: false, checking: true })
   })
 
   it('原生引擎不依赖本机 CLI：没配置也可点，只标记待配置', () => {

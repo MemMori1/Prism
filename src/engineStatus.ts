@@ -11,6 +11,7 @@ export interface EngineStatus {
 const ENGINE_BADGES: Record<string, string> = {
   opencode: 'OC',
   codex: 'CX',
+  dsh: 'DS',
   claude: 'CC',
 }
 
