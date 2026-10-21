@@ -2,7 +2,7 @@
 
 > 多引擎 AI 编码 Agent 指挥台 —— 把不同引擎的会话收进同一面墙：浏览历史、发指令、执行中插话、权限审批，都在一处。
 
-Tauri 2 + Vue 3 + Rust 桌面应用（macOS）。四路引擎收进同一套中立事件模型：三路驱动各家官方 CLI / 本地服务，一路（Prism 原生）是内置 Agent，用自己的 API Key 直连模型。引擎原始数据**架构级只读**，Prism 自有数据只写 `~/.prism/`。
+Tauri 2 + Vue 3 + Rust 桌面应用（macOS / Windows x64）。四路引擎收进同一套中立事件模型：三路驱动各家官方 CLI / 本地服务，一路（Prism 原生）是内置 Agent，用自己的 API Key 直连模型。引擎原始数据**架构级只读**，Prism 自有数据只写 `~/.prism/`。
 
 ## 引擎支持
 
@@ -44,6 +44,7 @@ Tauri 2 + Vue 3 + Rust 桌面应用（macOS）。四路引擎收进同一套中�
 | `write_file` | 整文件写入 | 仅工作目录内，自动建父目录 |
 | `edit_file` | 按片段替换 | 同上，多命中需显式声明全部替换 |
 | `run_command` | 跑本机命令 | 默认 120s 超时；`background: true` 转后台任务 |
+| `task_status` | 查本会话的后台任务 | 不传 id 列全部，传 id 看尾部输出（最多 400 行），`stop: true` 停止 |
 
 路径先做词法归一（消掉 `..`），再对最近的已存在祖先 `canonicalize`，因此绕道符号链接也会被判定越界。
 
@@ -122,7 +123,11 @@ Tauri 2 + Vue 3 + Rust 桌面应用（macOS）。四路引擎收进同一套中�
 
 ## 安装
 
-下载 `Prism_x.y.z_aarch64.dmg`，拖入「应用程序」。未签名版首次打开会被 Gatekeeper 拦下，请在访达里对 Prism **右键 → 打开**（仅需一次）。细节与发版流程见 [docs/RELEASE.md](docs/RELEASE.md)。
+**macOS（Apple Silicon）** — 下载 `Prism_x.y.z_aarch64.dmg`，拖入「应用程序」。未签名版首次打开会被 Gatekeeper 拦下，请在访达里对 Prism **右键 → 打开**（仅需一次）。
+
+**Windows x64** — 下载 `Prism_x.y.z_x64-setup.exe` 直接安装。未做代码签名，首次运行会被 SmartScreen 拦一下，点「更多信息 → 仍要运行」。
+
+两边都发布在 [Releases](https://github.com/MemMori1/Prism/releases)，更新清单同时镜像到 gh-pages；发版与签名细节见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 开发
 
@@ -132,7 +137,11 @@ pnpm tauri dev     # 开发模式（需要 Rust 工具链）
 pnpm test          # 前端单测（vitest）
 cd src-tauri && cargo test --lib   # Rust 单测（引擎适配器 / IPC / 工具守卫）
 pnpm tauri build   # 打包（macOS：.app + .dmg）
+scripts/release.sh # macOS 发版：构建 + updater 签名 + latest.json
 ```
+
+Windows 版不在本机构建（macOS 不能交叉编译 Tauri 的 Windows 目标），走 GitHub Actions 的
+`release-windows` 工作流：在 `windows-latest` 上打 NSIS 安装包并挂到对应 tag 的 Release。
 
 ```
 src/                 Vue 前端；components/ 一组件一文件，样式按组件放 styles/components/
@@ -150,7 +159,8 @@ docs/                ROADMAP / RELEASE / PLAN
 
 ## 已知边界
 
-- 仅 macOS（aarch64）验证与打包；Windows 未支持，未做 Apple 公证。
+- macOS（aarch64）为主力验证平台；Windows x64 由 CI 构建 NSIS 安装包，两者都未做代码签名 / 公证，首次打开会有系统安全提示。
+- Windows 没有进程组：停止任务只结束直接子进程，`pnpm build` 这类再拉起的孙进程可能残留（macOS 是整组 SIGTERM → SIGKILL）。Windows 端也还没有 updater 签名，暂不参与自动更新。
 - Claude Code 目前只有历史浏览，运行轴待本机 CLI。
 - 搜索索引当前覆盖 OpenCode 归档，Codex / Claude / Prism 原生尚未纳入。
 - Prism 原生：暂无逐条权限审批（只有工作目录守卫 + 命令超时）、无图片/附件输入、不支持执行中排队插话；用量页还未统计原生会话。
