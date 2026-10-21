@@ -31,9 +31,8 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
 
+      # 版本交给 package.json 的 packageManager 决定，这里再写 version 会冲突
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:
