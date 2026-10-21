@@ -11,11 +11,7 @@
     "lib": ["ES2021", "DOM", "DOM.Iterable"],
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["vite/client"],
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["./src/*"]
-    }
+    "types": ["vite/client"]
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
 }

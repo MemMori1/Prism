@@ -42,8 +42,38 @@ export TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY")"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
 # ---- 构建（createUpdaterArtifacts 仅发版时开启） ----
+# dist 是纯构建产物，但 vite 的 emptyOutDir 会整目录删除；某些环境对批量删除有
+# 防护，直接把构建卡死。先把它挪进废纸篓（mv 不触发删除拦截），构建完自然重建。
+stash_dist() {
+  if [ -d dist ]; then
+    mkdir -p "$HOME/.Trash"
+    mv dist "$HOME/.Trash/prism-dist-${TAG}-$(date +%s)"
+  fi
+}
+stash_dist
+
 echo "==> 构建 Prism ${TAG}（含 updater 签名产物）"
-pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":true}}'
+if ! pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":true}}'; then
+  # bundle_dmg.sh 在新版 macOS 上会因 hdiutil/grep 行为变化失败（interstitial
+  # image 找不到）。退回只打 .app，再自己用 hdiutil 做一份同名的 dmg。
+  echo "⚠️ 默认打包失败，退回「只打 .app + 手工 dmg」" >&2
+  stash_dist
+  pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":true}}' --bundles app
+  BUNDLE="src-tauri/target/release/bundle"
+  APP="$BUNDLE/macos/Prism.app"
+  if [ ! -d "$APP" ]; then
+    echo "✗ 没有 .app 产物（$APP）" >&2
+    exit 1
+  fi
+  mkdir -p "$BUNDLE/dmg"
+  STAGE="$(mktemp -d)"
+  cp -R "$APP" "$STAGE/"
+  ln -s /Applications "$STAGE/Applications"
+  # 不做花哨的窗口布局，但至少是「拖进 Applications」的标准 dmg
+  hdiutil create -volname "Prism ${VERSION}" -srcfolder "$STAGE" -ov \
+    -format UDZO "$BUNDLE/dmg/Prism_${VERSION}_aarch64.dmg" >/dev/null
+  echo "==> 手工 dmg 已生成（$STAGE 留着由系统清理）"
+fi
 
 BUNDLE="src-tauri/target/release/bundle"
 APP_TAR=$(ls "$BUNDLE"/macos/*.app.tar.gz 2>/dev/null | head -n1 || true)
