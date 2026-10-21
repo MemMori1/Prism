@@ -1,0 +1,11 @@
+{
+  "version": "0.3.0",
+  "notes": "后台任务坞与终端标签：run_command 支持 background=true，配套 task_status 查进度 / 停止；停止按进程组收，构建拉起的子进程一起走。\n面板改成多标签：文件 / 终端各自独立（两个文件页可看不同文件），空标签页选入口、拖动排序、横向滚动。\n工作台内嵌会话复用完整会话头（星标 / 重命名 / 文件 / 标签 / 目录 · 模型 · token · 成本）。",
+  "pub_date": "2026-10-21T13:07:28.029Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSY2J0M21BR0t0WjNCVjNORDQ0aSsxRW9rbDJjOHFKYkM1SkozY3dhQ3k1V3BvL1NudUxOYkFvVFNaT3lVV2xiQ1grdkFrNXFNK01KM2pwRXc4TkVjVHpaYkE2QzhpN3dFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNTg4MDQyCWZpbGU6UHJpc20uYXBwLnRhci5negl2ZXJzaW9uOjAuMy4wCnZpNzFnR2RXUkF3ZUpQWHJLNFVFaWpnRUJZWWY2Vmx5UTNIbWtEY3ZBc0FKZE0rcmRIdjNHNk1JYXJlNU9hMldod2szKy9SWnBZdytER3UvNFhzbEF3PT0K",
+      "url": "https://memmori1.github.io/Prism/Prism_0.3.0_aarch64.app.tar.gz"
+    }
+  }
+}
