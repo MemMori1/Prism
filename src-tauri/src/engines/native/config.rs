@@ -122,7 +122,13 @@ impl ProviderConfig {
         if key.chars().count() < 4 {
             return String::new();
         }
-        key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect()
+        key.chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     fn view(&self, active: Option<&Selection>) -> ProviderView {
@@ -148,10 +154,7 @@ impl ProviderConfig {
                 .map(|model| ModelView {
                     id: model.id.clone(),
                     label: model.display().to_string(),
-                    active: is_active
-                        && active
-                            .map(|item| item.model == model.id)
-                            .unwrap_or(false),
+                    active: is_active && active.map(|item| item.model == model.id).unwrap_or(false),
                 })
                 .collect(),
             ready: self.ready(),
@@ -203,6 +206,8 @@ pub struct NativeConfigView {
     pub max_turns: u32,
     pub ready: bool,
     pub model_count: usize,
+    /// 工具开关的显式记录（未记录的工具按来源取默认）。
+    pub tools: std::collections::HashMap<String, bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -214,6 +219,10 @@ pub struct NativeConfig {
     pub active: Option<Selection>,
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// 工具开关：只记"被显式改过"的工具，没记录的一律按来源取默认
+    /// （内置开、自写/插件关）。见 `tools::EnabledTools`。
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub tools: std::collections::HashMap<String, bool>,
 }
 
 /// 落盘结构：兼容旧版单端点字段（`baseUrl` / `model` / `apiKey`）。
@@ -226,6 +235,8 @@ struct StoredConfig {
     active: Option<Selection>,
     #[serde(default)]
     max_turns: Option<u32>,
+    #[serde(default)]
+    tools: std::collections::HashMap<String, bool>,
     #[serde(default)]
     base_url: String,
     #[serde(default)]
@@ -251,7 +262,8 @@ impl NativeConfig {
         if let Some(active) = &self.active {
             if let Some(provider) = self.find(&active.provider) {
                 if provider.usable() {
-                    if let Some(model) = provider.models.iter().find(|item| item.id == active.model) {
+                    if let Some(model) = provider.models.iter().find(|item| item.id == active.model)
+                    {
                         return Some((provider, model));
                     }
                 }
@@ -268,7 +280,10 @@ impl NativeConfig {
     }
 
     pub fn model_count(&self) -> usize {
-        self.providers.iter().map(|provider| provider.models.len()).sum()
+        self.providers
+            .iter()
+            .map(|provider| provider.models.len())
+            .sum()
     }
 
     /// 选中项失效时把它校正到一个真实存在的模型。
@@ -306,6 +321,7 @@ impl NativeConfig {
             max_turns: self.max_turns(),
             ready: self.ready(),
             model_count: self.model_count(),
+            tools: self.tools.clone(),
         }
     }
 }
@@ -453,11 +469,7 @@ pub fn apply_provider(config: &mut NativeConfig, input: ProviderInput) -> Result
             );
             config.providers.push(ProviderConfig {
                 id: id.clone(),
-                label: if label.is_empty() {
-                    id.clone()
-                } else {
-                    label
-                },
+                label: if label.is_empty() { id.clone() } else { label },
                 protocol: default_protocol(),
                 base_url,
                 api_key: key,
@@ -533,6 +545,7 @@ fn from_stored(stored: StoredConfig) -> NativeConfig {
             .collect(),
         active: stored.active,
         max_turns: stored.max_turns,
+        tools: stored.tools,
     };
 
     // 旧版单端点配置：迁移成一个服务，id / 模型都沿用原值。
@@ -619,6 +632,17 @@ pub fn select_model(provider: &str, model: &str) -> Result<NativeConfigView, Str
     Ok(config.view())
 }
 
+/// 开关一个工具（落盘）。
+///
+/// 只记"显式改过"的值：关掉的工具不进 schema（省 token），执行侧也会兜底
+/// 拦一道（不依赖模型听话）。把记录删掉即回到该来源的默认档。
+pub fn set_tool(name: &str, enabled: bool) -> Result<NativeConfigView, String> {
+    let mut config = load();
+    config.tools.insert(name.to_string(), enabled);
+    save(&config)?;
+    Ok(config.view())
+}
+
 /// 只改运行参数（最大轮次）。
 pub fn update_limits(input: LimitsInput) -> Result<NativeConfigView, String> {
     let mut config = load();
@@ -668,7 +692,9 @@ mod tests {
     #[test]
     fn view_hides_key_but_keeps_hint() {
         let mut config = NativeConfig::default();
-        config.providers.push(provider("deepseek", &["deepseek-chat"]));
+        config
+            .providers
+            .push(provider("deepseek", &["deepseek-chat"]));
         config.active = Some(Selection {
             provider: "deepseek".to_string(),
             model: "deepseek-chat".to_string(),
@@ -825,7 +851,11 @@ mod tests {
         ]);
         assert_eq!(
             models,
-            vec![ModelEntry::new("a"), ModelEntry::with_label("b", "B"), ModelEntry::new("c")]
+            vec![
+                ModelEntry::new("a"),
+                ModelEntry::with_label("b", "B"),
+                ModelEntry::new("c")
+            ]
         );
     }
 }

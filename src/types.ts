@@ -512,6 +512,21 @@ export interface NativeConfigView {
   maxTurns: number
   ready: boolean
   modelCount: number
+  /** 工具开关的显式记录；未记录的工具按登记项自带的默认（内置开、外部工具看 trusted）。 */
+  tools?: Record<string, boolean>
+}
+
+/** 工具清单的一行：内置的与插件运行时注册的共用一种形状。 */
+export interface ToolView {
+  name: string
+  /** builtin | plugin | generated */
+  origin: string
+  /** read-only | write */
+  permission: string
+  enabled: boolean
+  /** 外部工具的来源（`mcp.<server>`），内置为空 */
+  owner: string | null
+  description: string
 }
 
 /** 新增 / 编辑一个模型服务；`apiKey` 留空 = 沿用已存的密钥。 */

@@ -19,8 +19,11 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
+use crate::catalog::{self, EngineCatalog};
+use crate::engines::core::EngineHealth;
+use crate::engines::engine::{CreatedSession as EngineCreatedSession, Engine};
+
 use super::locator;
-use crate::catalog;
 
 /// 前端订阅的事件名（Tauri 事件）。
 pub const EVENT_NAME: &str = "engine-event";
@@ -181,7 +184,10 @@ fn send_json(request: reqwest::blocking::RequestBuilder, path: &str) -> Result<V
     let status = response.status();
     let text = response.text().unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("{path} 返回 {status}：{}", truncate(text.trim(), 300)));
+        return Err(format!(
+            "{path} 返回 {status}：{}",
+            truncate(text.trim(), 300)
+        ));
     }
     if text.trim().is_empty() {
         return Ok(Value::Null);
@@ -190,7 +196,11 @@ fn send_json(request: reqwest::blocking::RequestBuilder, path: &str) -> Result<V
 }
 
 /// 带 `location[directory]` 查询参数的 GET（引擎按目录解析模型/命令/文件）。
-fn fetch_location_json(target: &ServerTarget, path: &str, directory: &str) -> Result<Value, String> {
+fn fetch_location_json(
+    target: &ServerTarget,
+    path: &str,
+    directory: &str,
+) -> Result<Value, String> {
     let request = target
         .request(reqwest::Method::GET, path)
         .query(&[("location[directory]", directory)]);
@@ -321,11 +331,7 @@ impl Runtime {
             None => false,
         };
         if alive {
-            return Ok(slot
-                .as_ref()
-                .expect("server slot")
-                .target
-                .clone());
+            return Ok(slot.as_ref().expect("server slot").target.clone());
         }
         if let Some(mut dead) = slot.take() {
             #[cfg(debug_assertions)]
@@ -370,8 +376,8 @@ impl Runtime {
             json!({ "location": { "directory": directory } }),
         )?;
         let data = unwrap_data(response);
-        let session_id = string_field(&data, "id")
-            .ok_or_else(|| "会话创建响应缺少 id".to_string())?;
+        let session_id =
+            string_field(&data, "id").ok_or_else(|| "会话创建响应缺少 id".to_string())?;
         let actual = data
             .pointer("/location/directory")
             .and_then(Value::as_str)
@@ -403,16 +409,11 @@ impl Runtime {
         if !files.is_empty() {
             let attachments: Vec<Value> = files
                 .iter()
-                .map(|(uri, name)| {
-                    json!({ "uri": to_file_uri(uri), "name": name })
-                })
+                .map(|(uri, name)| json!({ "uri": to_file_uri(uri), "name": name }))
                 .collect();
             body["files"] = Value::Array(attachments);
         }
-        let response = target.post_json(
-            &format!("/api/session/{session_id}/prompt"),
-            body,
-        )?;
+        let response = target.post_json(&format!("/api/session/{session_id}/prompt"), body)?;
         let data = unwrap_data(response);
         string_field(&data, "id").ok_or_else(|| "prompt 响应缺少消息 id".to_string())
     }
@@ -575,8 +576,67 @@ impl Runtime {
     }
 }
 
+impl Engine for Runtime {
+    fn id(&self) -> &'static str {
+        locator::ENGINE_ID
+    }
+
+    fn display_name(&self) -> &'static str {
+        locator::DISPLAY_NAME
+    }
+
+    fn health(&self) -> EngineHealth {
+        let db = locator::database_path();
+        let cli = locator::cli_path();
+        EngineHealth {
+            engine_id: locator::ENGINE_ID.to_string(),
+            display_name: locator::DISPLAY_NAME.to_string(),
+            ready: db.is_some() && cli.is_some(),
+            database_path: db.map(|path| path.display().to_string()),
+            cli_path: cli.map(|path| path.display().to_string()),
+        }
+    }
+
+    fn create_session(&self, directory: &str) -> Result<EngineCreatedSession, String> {
+        let created = Runtime::create_session(self, directory)?;
+        Ok(EngineCreatedSession::new(
+            created.session_id,
+            created.directory,
+        ))
+    }
+
+    fn catalog(&self, directory: &str) -> Result<EngineCatalog, String> {
+        let models = Runtime::list_models(self, directory)?;
+        let commands = Runtime::list_commands(self, directory).unwrap_or_default();
+        Ok(EngineCatalog {
+            engine: "opencode".to_string(),
+            available: true,
+            reason: None,
+            models,
+            commands,
+        })
+    }
+
+    fn subscribe(&self) -> mpsc::Receiver<Value> {
+        Runtime::subscribe(self)
+    }
+
+    fn send_prompt(&self, session_id: &str, text: &str) -> Result<String, String> {
+        Runtime::send_prompt(self, session_id, text)
+    }
+
+    fn interrupt(&self, session_id: &str) -> Result<(), String> {
+        Runtime::interrupt(self, session_id)
+    }
+
+    fn shutdown(&self) {
+        Runtime::shutdown(self);
+    }
+}
+
 fn spawn_server() -> Result<ServerHandle, String> {
-    let cli = locator::cli_path().ok_or_else(|| "未找到 opencode-cli，无法启动运行轴".to_string())?;
+    let cli =
+        locator::cli_path().ok_or_else(|| "未找到 opencode-cli，无法启动运行轴".to_string())?;
 
     let mut command = Command::new(&cli);
     command
@@ -799,8 +859,7 @@ mod tests {
         let Some(db_path) = locator::database_path() else {
             return 0;
         };
-        let canonical =
-            std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+        let canonical = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
         let Ok(connection) = rusqlite::Connection::open(&db_path) else {
             return 0;
         };
@@ -832,7 +891,10 @@ mod tests {
             event_payload("data: {\"type\":\"x\"}"),
             Some("{\"type\":\"x\"}")
         );
-        assert_eq!(event_payload("data:{\"type\":\"x\"}"), Some("{\"type\":\"x\"}"));
+        assert_eq!(
+            event_payload("data:{\"type\":\"x\"}"),
+            Some("{\"type\":\"x\"}")
+        );
         assert_eq!(event_payload("event: ping"), None);
         assert_eq!(event_payload("data:   "), None);
     }
@@ -840,13 +902,22 @@ mod tests {
     #[test]
     fn unwrap_prefers_data_and_falls_back() {
         let value = json!({ "data": { "id": "ses_1" } });
-        assert_eq!(string_field(&unwrap_data(value), "id").as_deref(), Some("ses_1"));
+        assert_eq!(
+            string_field(&unwrap_data(value), "id").as_deref(),
+            Some("ses_1")
+        );
 
         let value = json!({ "id": "ses_2" });
-        assert_eq!(string_field(&unwrap_data(value), "id").as_deref(), Some("ses_2"));
+        assert_eq!(
+            string_field(&unwrap_data(value), "id").as_deref(),
+            Some("ses_2")
+        );
 
         let value = json!({ "data": null, "id": "ses_3" });
-        assert_eq!(string_field(&unwrap_data(value), "id").as_deref(), Some("ses_3"));
+        assert_eq!(
+            string_field(&unwrap_data(value), "id").as_deref(),
+            Some("ses_3")
+        );
     }
 
     #[test]
@@ -965,9 +1036,13 @@ mod tests {
         let db_path = locator::database_path().expect("opencode.db");
         let mut assistant_text = None;
         for _ in 0..20 {
-            let page =
-                crate::engines::opencode::db::read_timeline(&db_path, &created.session_id, None, 50)
-                    .expect("read_timeline");
+            let page = crate::engines::opencode::db::read_timeline(
+                &db_path,
+                &created.session_id,
+                None,
+                50,
+            )
+            .expect("read_timeline");
             let found = page.records.iter().rev().find_map(|record| {
                 (record.role == "assistant" && record.completed).then(|| {
                     record
@@ -995,7 +1070,9 @@ mod tests {
             "回复不含 PONG：{assistant_text}"
         );
 
-        runtime.delete_session(&created.session_id).expect("delete_session");
+        runtime
+            .delete_session(&created.session_id)
+            .expect("delete_session");
         runtime.shutdown();
         let removed = cleanup_project(&dir);
         println!("已清理测试项目行：{removed}");
@@ -1026,9 +1103,7 @@ mod tests {
             .expect("send_prompt");
 
         let matches_session = |event: &Value| {
-            event
-                .pointer("/data/sessionID")
-                .and_then(Value::as_str)
+            event.pointer("/data/sessionID").and_then(Value::as_str)
                 == Some(created.session_id.as_str())
         };
 
@@ -1049,7 +1124,9 @@ mod tests {
         }
         assert!(started, "未见 execution.started");
 
-        runtime.interrupt(&created.session_id).expect("interrupt 请求失败");
+        runtime
+            .interrupt(&created.session_id)
+            .expect("interrupt 请求失败");
 
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut outcome = String::new();
@@ -1060,7 +1137,10 @@ mod tests {
             if !matches_session(&event) {
                 continue;
             }
-            let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
+            let kind = event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if matches!(
                 kind,
                 "session.execution.interrupted"
@@ -1076,17 +1156,15 @@ mod tests {
 
         // 中断后 DB 仍可读且包含用户消息。
         let db_path = locator::database_path().expect("opencode.db");
-        let page = crate::engines::opencode::db::read_timeline(
-            &db_path,
-            &created.session_id,
-            None,
-            50,
-        )
-        .expect("read_timeline");
+        let page =
+            crate::engines::opencode::db::read_timeline(&db_path, &created.session_id, None, 50)
+                .expect("read_timeline");
         println!("中断后记录数：{}", page.records.len());
         assert!(!page.records.is_empty(), "中断后应仍有历史记录");
 
-        runtime.delete_session(&created.session_id).expect("delete_session");
+        runtime
+            .delete_session(&created.session_id)
+            .expect("delete_session");
         runtime.shutdown();
         let removed = cleanup_project(&dir);
         println!("已清理测试项目行：{removed}");
@@ -1114,7 +1192,10 @@ mod tests {
         println!("会话: {sid}");
 
         runtime
-            .send_prompt(&sid, "请用 read 工具读取当前目录下的 .env 文件，然后告诉我 SECRET 的值。")
+            .send_prompt(
+                &sid,
+                "请用 read 工具读取当前目录下的 .env 文件，然后告诉我 SECRET 的值。",
+            )
             .expect("send_prompt");
 
         // 等权限请求（触发后引擎会阻塞在这一步，直到回复）
@@ -1262,7 +1343,8 @@ mod tests {
         println!("拒绝路径终态: {terminal2:?}");
         assert!(terminal2.is_some(), "拒绝后引擎应仍能走到终态");
         if let Some(db_path) = locator::database_path() {
-            if let Ok(page) = crate::engines::opencode::db::read_timeline(&db_path, &sid, None, 50) {
+            if let Ok(page) = crate::engines::opencode::db::read_timeline(&db_path, &sid, None, 50)
+            {
                 let brief = page
                     .records
                     .iter()
@@ -1444,7 +1526,10 @@ mod tests {
             );
         }
         assert!(!models.is_empty(), "应有模型");
-        assert!(models.iter().any(|model| model.is_default), "应有一个默认模型");
+        assert!(
+            models.iter().any(|model| model.is_default),
+            "应有一个默认模型"
+        );
         let commands = runtime.list_commands(&dir).expect("list_commands");
         println!("命令：{commands:?}");
         assert!(
@@ -1514,9 +1599,8 @@ mod tests {
         let db_path = locator::database_path().expect("opencode.db");
         let mut assistant_ok = false;
         for _ in 0..20 {
-            let page =
-                crate::engines::opencode::db::read_timeline(&db_path, &sid, None, 50)
-                    .expect("read_timeline");
+            let page = crate::engines::opencode::db::read_timeline(&db_path, &sid, None, 50)
+                .expect("read_timeline");
             if let Some(user) = page.records.iter().find(|record| record.role == "user") {
                 println!("用户消息 parts：{:?}", user.parts);
             }

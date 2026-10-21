@@ -4,12 +4,15 @@
 //! 所有路径先做词法归一 + 前缀校验，禁止越出会话工作目录；命令有超时和输出上限。
 
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
+use super::store::StoredTokens;
 use crate::tasks::{SpawnRequest, TaskInfo, TasksState};
 
 /// 单次工具输出的字符上限（超出截断，避免一轮就把上下文撑爆）。
@@ -29,8 +32,18 @@ const RUN_POLL: Duration = Duration::from_millis(40);
 const PIPE_KEEP_BYTES: usize = 512 * 1024;
 /// 遍历时永远跳过的目录。
 const SKIP_DIRS: &[&str] = &[
-    ".git", "node_modules", "target", "dist", "build", ".next", ".nuxt", ".venv", "__pycache__",
-    ".turbo", ".cache", "vendor",
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".venv",
+    "__pycache__",
+    ".turbo",
+    ".cache",
+    "vendor",
 ];
 /// 遍历时的文件数上限：到顶就在结论里说明，不能装成「都看过了」。
 const WALK_MAX_FILES: usize = 4000;
@@ -93,119 +106,694 @@ impl ToolOutcome {
     }
 }
 
-/// 发给模型的工具声明（OpenAI function schema）。
-pub fn specs() -> Vec<Value> {
-    vec![
-        json!({
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "读取工作目录里的一个文本文件，带行号。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "相对工作目录的路径" },
-                        "offset": { "type": "integer", "description": "起始行（1 开始），默认 1" },
-                        "limit": { "type": "integer", "description": "最多读多少行，默认 2000" }
-                    },
-                    "required": ["path"]
+// ---------------------------------------------------------------- 注册表类型
+
+/// 工具来源：决定信任级别与失效行为。
+///
+/// 目前只有 `Builtin`（编译进二进制、完全信任）。后两个变体是给
+/// "模型自写工具复用"和"MCP / 插件工具"预留的位——它们的共同点是
+/// **不可完全信任**，接进来时必须过沙箱与审批，不能和内置工具
+/// 混在同一信任级别里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOrigin {
+    /// 开发期写死、编译进二进制。
+    Builtin,
+    /// 模型运行时生成、校验通过后入库复用（尚未启用）。
+    #[allow(dead_code)]
+    RuntimeGenerated,
+    /// 外部插件 / MCP server 提供：由插件在运行时注册，可撤销。
+    Plugin,
+}
+
+impl ToolOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolOrigin::Builtin => "builtin",
+            ToolOrigin::RuntimeGenerated => "generated",
+            ToolOrigin::Plugin => "plugin",
+        }
+    }
+}
+
+/// 权限等级：决定"能不能直接跑"和"子代理能不能拿到"。
+///
+/// 越界写入、任意命令这类更危险的动作没有单列一档，而是由审批闸门
+/// （`approval::action_of`）按工具动作升级处理——那一层才是真正拦人的地方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Permission {
+    /// 无副作用，可直接执行。
+    ReadOnly,
+    /// 会写会话工作目录（写文件 / 改文件 / 跑命令 / 停任务）。
+    WriteWorkspace,
+}
+
+impl Permission {
+    /// 在 `max` 这一档权限内是否放行（子代理白名单用它）。
+    fn within(self, max: Permission) -> bool {
+        match max {
+            Permission::ReadOnly => self == Permission::ReadOnly,
+            Permission::WriteWorkspace => true,
+        }
+    }
+}
+
+/// 工具开关集合。
+///
+/// 只记"被显式改过"的工具；没记录的按**登记项自带的默认值**走。内置工具
+/// 默认开，MCP / 插件工具默认关（除非配置里显式标了 trusted）——这个区分是
+/// 刻意的：外部工具不该因为"装了就顺手能用"而在用户不知情下拿到执行权。
+#[derive(Debug, Clone, Default)]
+pub struct EnabledTools {
+    overrides: std::collections::HashMap<String, bool>,
+    /// 是否连"默认关"的外部工具一起放行。只有测试和显式信任场景用得到。
+    allow_untrusted: bool,
+}
+
+impl EnabledTools {
+    /// 全开：测试与"完全信任"场景用（含外部工具）。
+    pub fn all() -> Self {
+        EnabledTools {
+            overrides: std::collections::HashMap::new(),
+            allow_untrusted: true,
+        }
+    }
+
+    /// 从配置里的显式记录构造。
+    pub fn from_map(overrides: std::collections::HashMap<String, bool>) -> Self {
+        EnabledTools {
+            overrides,
+            allow_untrusted: false,
+        }
+    }
+
+    /// 读当前配置里的开关。
+    pub fn from_config() -> Self {
+        EnabledTools::from_map(super::config::load().tools)
+    }
+
+    /// 这个工具此刻是否可用：显式记录优先，否则看登记项自带的默认。
+    pub fn is_on(&self, def: &ToolDef) -> bool {
+        self.overrides
+            .get(def.name.as_ref())
+            .copied()
+            .unwrap_or(def.enabled_by_default || self.allow_untrusted)
+    }
+}
+
+/// 一次工具调用的上下文。
+///
+/// 普通工具只用 `directory` + `should_stop`；`task_status` 还要 `app` /
+/// `session_id`；子代理（`task`）还要 `call_id` / 模型 / 权限档。
+/// 全部收进一个结构，是为了让**所有工具共享同一个签名**——有了统一签名，
+/// 一张表才装得下它们。
+pub struct ToolContext<'a> {
+    /// 无 Tauri 上下文时为空（单测直接跑工具走这条），此时后台任务不可用。
+    pub app: Option<&'a tauri::AppHandle>,
+    pub session_id: &'a str,
+    pub directory: &'a str,
+    /// 本次调用的 id（子代理事件按它归属到工具卡）。
+    pub call_id: &'a str,
+    /// 当前模型服务（只有子代理用得上，普通工具不碰）。
+    pub provider: Option<&'a super::config::ProviderConfig>,
+    pub model: Option<&'a str>,
+    /// 权限档的原始值（read-only / ask / full），子代理据此构造
+    /// `approval::Mode`——这里刻意存字符串而不是 `Mode`，免得工具层反过来
+    /// 依赖审批层（审批层要查这张表，方向不能反）。
+    pub permission: Option<&'a str>,
+    /// 当前生效的工具开关：执行前兜底校验，不依赖模型"听话"。
+    pub enabled: &'a EnabledTools,
+    pub should_stop: &'a dyn Fn() -> bool,
+}
+
+/// 工具执行结果。
+///
+/// `meta` 与 `tokens` 原本只有 `task`（子代理）会带，所以旧的分发处不得不
+/// 为它开一个 `call.name == "task"` 的特判。把这两项提升成结果的常规部分后，
+/// 特判就消失了——这是"用一个签名装下所有工具"的直接收益。
+pub struct ToolResult {
+    pub outcome: ToolOutcome,
+    /// 附加给前端的进度元数据（子代理的步骤轨迹）。
+    pub meta: Option<Value>,
+    /// 折叠进会话总量的 token（子代理烧的）。
+    pub tokens: Option<StoredTokens>,
+}
+
+impl ToolResult {
+    /// 普通工具：只有文本结果。
+    fn plain(outcome: ToolOutcome) -> Self {
+        ToolResult {
+            outcome,
+            meta: None,
+            tokens: None,
+        }
+    }
+
+    pub fn fail(text: impl Into<String>) -> Self {
+        ToolResult::plain(ToolOutcome::fail(text))
+    }
+
+    /// 带元数据与 token 的结果（子代理回填走这条）。
+    pub fn with_parts(
+        outcome: ToolOutcome,
+        meta: Option<Value>,
+        tokens: Option<StoredTokens>,
+    ) -> Self {
+        ToolResult {
+            outcome,
+            meta,
+            tokens,
+        }
+    }
+}
+
+/// 工具执行体：统一签名，内置工具因此能直接存成函数指针。
+pub type ToolRun = fn(&ToolContext<'_>, &Value) -> ToolResult;
+
+/// 动态工具的执行体：要捕获客户端句柄（MCP 连接），函数指针装不下。
+pub type BoxedRun = dyn for<'a> Fn(&ToolContext<'a>, &Value) -> ToolResult + Send + Sync;
+
+/// schema 的来源。
+///
+/// 内置工具用生成器（只在真要发给模型时 `json!` 一遍，省得启动就构造一堆
+/// `Value`）；外部工具拿到的是服务器给的原样 schema，没有"生成"这一步。
+pub enum ToolSchema {
+    Build(fn() -> Value),
+    Fixed(Value),
+}
+
+impl ToolSchema {
+    fn render(&self) -> Value {
+        match self {
+            ToolSchema::Build(build) => build(),
+            ToolSchema::Fixed(value) => value.clone(),
+        }
+    }
+}
+
+/// 执行体的两种形态。
+pub enum ToolImpl {
+    Fn(ToolRun),
+    Boxed(Arc<BoxedRun>),
+}
+
+/// 一条工具登记项：声明 + 权限 + 审批信息 + 执行体，全在一处。
+///
+/// 加一个内置工具 = 往 `builtin_tools()` 加一条；加一类外部工具 = 插件调
+/// [`ToolRegistry::register`] 登记，撤的时候 [`ToolRegistry::release`]。
+/// schema、模型可见清单、分发、审批卡片、子代理白名单全部从登记项推导，
+/// 不再"改一处漏三处"。
+pub struct ToolDef {
+    /// 稳定工具名。内置的是静态串；外部工具带服务器命名空间（`srv__tool`），
+    /// 所以用 `Cow` 装。
+    pub name: Cow<'static, str>,
+    /// schema 生成器。
+    pub schema: ToolSchema,
+    pub origin: ToolOrigin,
+    pub permission: Permission,
+    /// 审批动作（None = 无需授权，如只读工具）。
+    pub action: Option<&'static str>,
+    /// 权限卡片里"动了什么"取哪个入参（None = 不展示资源）。
+    pub resource_key: Option<&'static str>,
+    /// 权限卡片标题（`action` 为 Some 时才有意义）。
+    pub summary: &'static str,
+    /// 设置页里给**人**看的一句简介。
+    ///
+    /// 和 `summary`（审批标题）、schema 里给模型看的长描述都不是一回事：
+    /// 它只占据一个小格子的第二行，超过十来个字就会被省略号吃掉。
+    pub blurb: Cow<'static, str>,
+    /// 能否被委派给子代理（扁平编排：`task` 自己永远不行）。
+    pub delegable: bool,
+    /// 没被开关覆盖时的默认状态。
+    pub enabled_by_default: bool,
+    pub run: ToolImpl,
+}
+
+impl ToolDef {
+    /// 发给模型的声明。
+    pub fn schema_value(&self) -> Value {
+        self.schema.render()
+    }
+
+    pub fn call(&self, ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+        match &self.run {
+            ToolImpl::Fn(run) => run(ctx, args),
+            ToolImpl::Boxed(run) => run(ctx, args),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 工具声明
+
+fn read_file_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "读取工作目录里的一个文本文件，带行号。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "相对工作目录的路径" },
+                    "offset": { "type": "integer", "description": "起始行（1 开始），默认 1" },
+                    "limit": { "type": "integer", "description": "最多读多少行，默认 2000" }
+                },
+                "required": ["path"]
+            }
+        }
+    })
+}
+
+fn list_files_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "列出目录下的文件，最多下探六层。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "相对路径，默认工作目录根" },
+                    "pattern": { "type": "string", "description": "简单的通配过滤，如 *.rs" }
                 }
             }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "list_files",
-                "description": "列出目录下的文件，最多下探六层。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "相对路径，默认工作目录根" },
-                        "pattern": { "type": "string", "description": "简单的通配过滤，如 *.rs" }
-                    }
+        }
+    })
+}
+
+fn grep_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": "在文件内容里搜子串，返回 文件:行号:内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "要搜的文本" },
+                    "path": { "type": "string", "description": "搜索起点，默认工作目录根" },
+                    "ignore_case": { "type": "boolean", "description": "忽略大小写" }
+                },
+                "required": ["pattern"]
+            }
+        }
+    })
+}
+
+fn write_file_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "写文件（新建或整体覆盖）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            }
+        }
+    })
+}
+
+fn edit_file_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "把文件里的 old_string 精确替换成 new_string；old_string 必须唯一，或显式 replace_all。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "old_string": { "type": "string", "description": "要替换的原文（含缩进）" },
+                    "new_string": { "type": "string" },
+                    "replace_all": { "type": "boolean" }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }
+        }
+    })
+}
+
+fn run_command_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "在工作目录里跑一条 shell 命令，返回退出码和输出。长命令（构建 / 全量测试 / dev server / 预计超过 ~30 秒）把 background 设成 true：立即返回任务 id，进程进「后台任务」坞继续跑，你不需要干等，之后用 task_status 看进度。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "timeout_ms": { "type": "integer", "description": "前台执行的超时毫秒，默认 120000（background=true 时不生效）" },
+                    "background": { "type": "boolean", "description": "true = 转后台：立即返回，输出进任务坞 / 终端页，用 task_status 查" }
+                },
+                "required": ["command"]
+            }
+        }
+    })
+}
+
+fn task_status_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "task_status",
+            "description": "查看本会话的后台任务（run_command background=true 起的，以及用户新建的终端任务）。不传 id：列出全部；传 id：返回该任务最近输出；stop=true：停止它。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "任务 id；省略则列出全部" },
+                    "lines": { "type": "integer", "description": "看多少行尾部输出，默认 120，最多 400" },
+                    "stop": { "type": "boolean", "description": "true = 停止这个任务（需要 id）" }
                 }
             }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "grep",
-                "description": "在文件内容里搜子串，返回 文件:行号:内容。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": { "type": "string", "description": "要搜的文本" },
-                        "path": { "type": "string", "description": "搜索起点，默认工作目录根" },
-                        "ignore_case": { "type": "boolean", "description": "忽略大小写" }
-                    },
-                    "required": ["pattern"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "写文件（新建或整体覆盖）。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "content": { "type": "string" }
-                    },
-                    "required": ["path", "content"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "edit_file",
-                "description": "把文件里的 old_string 精确替换成 new_string；old_string 必须唯一，或显式 replace_all。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "old_string": { "type": "string", "description": "要替换的原文（含缩进）" },
-                        "new_string": { "type": "string" },
-                        "replace_all": { "type": "boolean" }
-                    },
-                    "required": ["path", "old_string", "new_string"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "run_command",
-                "description": "在工作目录里跑一条 shell 命令，返回退出码和输出。长命令（构建 / 全量测试 / dev server / 预计超过 ~30 秒）把 background 设成 true：立即返回任务 id，进程进「后台任务」坞继续跑，你不需要干等，之后用 task_status 看进度。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string" },
-                        "timeout_ms": { "type": "integer", "description": "前台执行的超时毫秒，默认 120000（background=true 时不生效）" },
-                        "background": { "type": "boolean", "description": "true = 转后台：立即返回，输出进任务坞 / 终端页，用 task_status 查" }
-                    },
-                    "required": ["command"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "task_status",
-                "description": "查看本会话的后台任务（run_command background=true 起的，以及用户新建的终端任务）。不传 id：列出全部；传 id：返回该任务最近输出；stop=true：停止它。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string", "description": "任务 id；省略则列出全部" },
-                        "lines": { "type": "integer", "description": "看多少行尾部输出，默认 120，最多 400" },
-                        "stop": { "type": "boolean", "description": "true = 停止这个任务（需要 id）" }
-                    }
-                }
-            }
-        }),
-    ]
+        }
+    })
+}
+
+// ---------------------------------------------------------------- 注册表
+
+/// 内置工具的登记项。懒构建一次，之后所有查询共享同一批 `Arc`。
+///
+/// 顺序即模型看到的顺序：只读在前，写类在后，`task`（子代理）最后。
+pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
+    static BUILTINS: OnceLock<Vec<Arc<ToolDef>>> = OnceLock::new();
+    BUILTINS.get_or_init(|| {
+        vec![
+            builtin(
+                "read_file",
+                "读取文件",
+                read_file_schema,
+                Permission::ReadOnly,
+                None,
+                None,
+                "",
+                true,
+                run_read_file,
+            ),
+            builtin(
+                "list_files",
+                "列出目录",
+                list_files_schema,
+                Permission::ReadOnly,
+                None,
+                None,
+                "",
+                true,
+                run_list_files,
+            ),
+            builtin(
+                "grep",
+                "按内容搜索",
+                grep_schema,
+                Permission::ReadOnly,
+                None,
+                None,
+                "",
+                true,
+                run_grep,
+            ),
+            builtin(
+                "write_file",
+                "写入文件",
+                write_file_schema,
+                Permission::WriteWorkspace,
+                Some("edit"),
+                Some("path"),
+                "写文件需要授权",
+                true,
+                run_write_file,
+            ),
+            builtin(
+                "edit_file",
+                "局部改文件",
+                edit_file_schema,
+                Permission::WriteWorkspace,
+                Some("edit"),
+                Some("path"),
+                "修改文件需要授权",
+                true,
+                run_edit_file,
+            ),
+            builtin(
+                "run_command",
+                "执行命令",
+                run_command_schema,
+                Permission::WriteWorkspace,
+                Some("run"),
+                Some("command"),
+                "运行命令需要授权",
+                true,
+                run_run_command,
+            ),
+            builtin(
+                "task_status",
+                "查看后台任务",
+                task_status_schema,
+                Permission::WriteWorkspace,
+                None,
+                None,
+                "",
+                true,
+                run_task_status,
+            ),
+            // 子代理：声明与执行都在 subagent 模块，这里只做登记。
+            // `delegable: false` 是扁平编排的保证——子代理开不出孙代理。
+            builtin(
+                "task",
+                "委派给子代理",
+                super::subagent::spec,
+                Permission::WriteWorkspace,
+                None,
+                None,
+                "",
+                false,
+                super::subagent::run_as_tool,
+            ),
+        ]
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn builtin(
+    name: &'static str,
+    blurb: &'static str,
+    schema: fn() -> Value,
+    permission: Permission,
+    action: Option<&'static str>,
+    resource_key: Option<&'static str>,
+    summary: &'static str,
+    delegable: bool,
+    run: ToolRun,
+) -> Arc<ToolDef> {
+    Arc::new(ToolDef {
+        name: Cow::Borrowed(name),
+        schema: ToolSchema::Build(schema),
+        origin: ToolOrigin::Builtin,
+        permission,
+        action,
+        resource_key,
+        summary,
+        blurb: Cow::Borrowed(blurb),
+        delegable,
+        enabled_by_default: true,
+        run: ToolImpl::Fn(run),
+    })
+}
+
+/// 运行时工具注册表：只装**外部**工具（插件 / MCP），内置工具另有静态表。
+///
+/// 分开存不是洁癖，是为了让"撤销"有明确边界：撤销外部工具绝不能碰到内置的。
+/// 注册表是进程级单例——工具本来就属于整个宿主，不属于某个会话。
+pub struct ToolRegistry {
+    owned: RwLock<Vec<OwnedTool>>,
+}
+
+struct OwnedTool {
+    /// 谁注册的（插件 id / MCP server 名）。撤销按它成批删除。
+    owner: String,
+    def: Arc<ToolDef>,
+}
+
+impl ToolRegistry {
+    pub fn global() -> &'static ToolRegistry {
+        static REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
+        REGISTRY.get_or_init(|| ToolRegistry {
+            owned: RwLock::new(Vec::new()),
+        })
+    }
+
+    /// 登记一个外部工具。重名（含与内置撞名）一律拒绝：模型只认名字，
+    /// 允许覆盖就等于允许插件顶掉 `write_file`。
+    pub fn register(&self, owner: &str, def: Arc<ToolDef>) -> Result<(), String> {
+        let name = def.name.to_string();
+        if builtin_tools().iter().any(|builtin| builtin.name == def.name) {
+            return Err(format!("工具名 {name} 与内置工具重名，拒绝注册"));
+        }
+        let mut owned = self.write();
+        if let Some(existing) = owned.iter().find(|entry| entry.def.name == def.name) {
+            return Err(format!("工具名 {name} 已被 {} 注册", existing.owner));
+        }
+        owned.push(OwnedTool {
+            owner: owner.to_string(),
+            def,
+        });
+        Ok(())
+    }
+
+    /// 撤销某个所有者登记的全部工具，返回撤掉的条数。
+    ///
+    /// 插件关停、MCP 服务器断开时调。撤掉的工具立刻从 schema 里消失，
+    /// 模型下一次拿到的清单里就没有它了。
+    pub fn release(&self, owner: &str) -> usize {
+        let mut owned = self.write();
+        let before = owned.len();
+        owned.retain(|entry| entry.owner != owner);
+        before - owned.len()
+    }
+
+    /// 当前登记的外部工具（注册顺序）。
+    pub fn dynamic(&self) -> Vec<Arc<ToolDef>> {
+        self.read().iter().map(|entry| entry.def.clone()).collect()
+    }
+
+    /// 外部工具的所有者（供状态展示）。
+    pub fn owner_of(&self, name: &str) -> Option<String> {
+        self.read()
+            .iter()
+            .find(|entry| entry.def.name == name)
+            .map(|entry| entry.owner.clone())
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<OwnedTool>> {
+        // 中毒的锁里数据仍然是一致的（只是某个读者 panic 过），照常用。
+        self.owned
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<OwnedTool>> {
+        self.owned
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// 按名字取登记项：先内置，后外部。
+pub fn find(name: &str) -> Option<Arc<ToolDef>> {
+    if let Some(def) = builtin_tools().iter().find(|tool| tool.name == name) {
+        return Some(def.clone());
+    }
+    ToolRegistry::global()
+        .dynamic()
+        .into_iter()
+        .find(|tool| tool.name == name)
+}
+
+/// 全部登记项（内置在前，外部在后）。
+fn all_tools() -> Vec<Arc<ToolDef>> {
+    let mut tools: Vec<Arc<ToolDef>> = builtin_tools().to_vec();
+    tools.extend(ToolRegistry::global().dynamic());
+    tools
+}
+
+/// 发给模型的工具声明（受当前开关约束）。
+///
+/// 关掉的工具不进 schema：模型看不到就不会调，也省一份 schema 的 token。
+pub fn specs(enabled: &EnabledTools) -> Vec<Value> {
+    all_tools()
+        .into_iter()
+        .filter(|tool| enabled.is_on(tool))
+        .map(|tool| tool.schema_value())
+        .collect()
+}
+
+/// 按权限等级筛出的声明（子代理白名单）：权限档 + 开关双重过滤。
+///
+/// 取代了原来按工具名硬编码的 `AgentType::tool_names()`：只读子代理天然
+/// 拿不到写类工具，而新增的只读工具会自动进入探索子代理的能力集。
+pub fn specs_for(enabled: &EnabledTools, max: Permission) -> Vec<Value> {
+    all_tools()
+        .into_iter()
+        .filter(|tool| tool.delegable && tool.permission.within(max) && enabled.is_on(tool))
+        .map(|tool| tool.schema_value())
+        .collect()
+}
+
+/// 解析入参并执行一次工具调用。
+pub fn execute(ctx: &ToolContext<'_>, name: &str, arguments: &str) -> ToolResult {
+    let args: Value = if arguments.trim().is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_str(arguments) {
+            Ok(value) => value,
+            Err(error) => return ToolResult::fail(format!("入参不是合法 JSON：{error}")),
+        }
+    };
+    run_with_args(ctx, name, &args)
+}
+
+/// 已解析好入参的执行入口（子代理内部复用，避免二次解析）。
+pub fn run_with_args(ctx: &ToolContext<'_>, name: &str, args: &Value) -> ToolResult {
+    let Some(tool) = find(name) else {
+        return ToolResult::fail(format!("没有这个工具：{name}"));
+    };
+    // 开关的第二道防线：schema 里已经去掉了，但模型可能从历史里翻出旧调用，
+    // 或者干脆幻觉一个被禁的工具名——不能指望它"看不见就不调"。
+    if !ctx.enabled.is_on(&tool) {
+        return ToolResult::fail(format!("工具 {name} 已被关闭，如需使用请在设置里打开"));
+    }
+    tool.call(ctx, args)
+}
+
+// ---------------------------------------------------------------- 执行体适配
+//
+// 各工具的真实实现都收 (root, args) 这组参数；这里把它们套进注册表要求的
+// 统一签名。每一层都薄得只有一次转接，但正是它让"一张表装下所有工具"成立
+// ——包括原来需要特判的 `task`。
+
+fn run_read_file(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    ToolResult::plain(read_file(Path::new(ctx.directory), args))
+}
+
+fn run_list_files(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    ToolResult::plain(list_files(Path::new(ctx.directory), args))
+}
+
+fn run_grep(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    ToolResult::plain(grep(Path::new(ctx.directory), args))
+}
+
+fn run_write_file(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    ToolResult::plain(write_file(Path::new(ctx.directory), args))
+}
+
+fn run_edit_file(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    ToolResult::plain(edit_file(Path::new(ctx.directory), args))
+}
+
+fn run_run_command(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    let runtime = ctx.app.map(|app| ToolRuntime {
+        app,
+        session_id: ctx.session_id,
+    });
+    ToolResult::plain(run_command(
+        Path::new(ctx.directory),
+        args,
+        ctx.should_stop,
+        runtime.as_ref(),
+    ))
+}
+
+fn run_task_status(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    let runtime = ctx.app.map(|app| ToolRuntime {
+        app,
+        session_id: ctx.session_id,
+    });
+    ToolResult::plain(task_status(args, runtime.as_ref()))
 }
 
 /// 工具执行时的运行时上下文：后台任务要 AppHandle 才能进注册表 / 发事件。
@@ -215,7 +803,10 @@ pub struct ToolRuntime<'a> {
     pub session_id: &'a str,
 }
 
-/// 执行一次工具调用（无运行时上下文：单测走这条，后台任务不可用）。
+/// 无运行时上下文执行（单测走这条）：后台任务不可用。
+///
+/// 保留这个薄壳是因为工具实现的纯逻辑（读文件、搜内容、路径越界拦截）
+/// 本就不需要 `AppHandle`，单测要能直接跑。
 /// 带一个「该停手了吗」的探针：跑命令时每轮都问一次，命中就连同命令拉起的
 /// 子进程一起收掉（停止按钮不该等命令自己跑完）。
 #[cfg_attr(not(test), allow(dead_code))]
@@ -225,51 +816,25 @@ pub fn execute_with_stop(
     arguments: &str,
     should_stop: &dyn Fn() -> bool,
 ) -> ToolOutcome {
-    dispatch(directory, name, arguments, should_stop, None)
-}
-
-/// 带运行时上下文执行：`run_command` 的 background 模式与 `task_status`，
-/// 靠它接进 `TasksState`（和用户在终端页起的任务是同一条通道）。
-pub fn execute_with_runtime(
-    runtime: ToolRuntime<'_>,
-    directory: &str,
-    name: &str,
-    arguments: &str,
-    should_stop: &dyn Fn() -> bool,
-) -> ToolOutcome {
-    dispatch(directory, name, arguments, should_stop, Some(&runtime))
-}
-
-fn dispatch(
-    directory: &str,
-    name: &str,
-    arguments: &str,
-    should_stop: &dyn Fn() -> bool,
-    runtime: Option<&ToolRuntime<'_>>,
-) -> ToolOutcome {
-    let args: Value = if arguments.trim().is_empty() {
-        json!({})
-    } else {
-        match serde_json::from_str(arguments) {
-            Ok(value) => value,
-            Err(error) => return ToolOutcome::fail(format!("入参不是合法 JSON：{error}")),
-        }
+    let enabled = EnabledTools::all();
+    let ctx = ToolContext {
+        app: None,
+        session_id: "",
+        directory,
+        call_id: "",
+        provider: None,
+        model: None,
+        permission: None,
+        enabled: &enabled,
+        should_stop,
     };
-    let root = Path::new(directory);
-    match name {
-        "read_file" => read_file(root, &args),
-        "list_files" => list_files(root, &args),
-        "grep" => grep(root, &args),
-        "write_file" => write_file(root, &args),
-        "edit_file" => edit_file(root, &args),
-        "run_command" => run_command(root, &args, should_stop, runtime),
-        "task_status" => task_status(&args, runtime),
-        other => ToolOutcome::fail(format!("没有这个工具：{other}")),
-    }
+    execute(&ctx, name, arguments).outcome
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(Value::as_str).filter(|value| !value.is_empty())
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
 }
 
 fn int_arg(args: &Value, key: &str) -> Option<u64> {
@@ -302,9 +867,7 @@ fn resolve(root: &Path, raw: &str) -> Result<PathBuf, String> {
             other => normalized.push(other.as_os_str()),
         }
     }
-    let root_abs = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf());
+    let root_abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let base = normalized
         .ancestors()
         .find(|path| path.exists())
@@ -331,7 +894,9 @@ fn read_file(root: &Path, args: &Value) -> ToolOutcome {
         return ToolOutcome::fail(format!("读不到 {}", target.display()));
     };
     let offset = int_arg(args, "offset").unwrap_or(1).max(1) as usize;
-    let limit = int_arg(args, "limit").unwrap_or(READ_LINES as u64).clamp(1, 5000) as usize;
+    let limit = int_arg(args, "limit")
+        .unwrap_or(READ_LINES as u64)
+        .clamp(1, 5000) as usize;
     let mut out = String::new();
     for (index, line) in text.lines().enumerate().skip(offset - 1).take(limit) {
         out.push_str(&format!("{:>5}→{}\n", index + 1, line));
@@ -360,7 +925,10 @@ fn list_files(root: &Path, args: &Value) -> ToolOutcome {
     for file in files {
         let text = file.display().to_string();
         if let Some(pattern) = &pattern {
-            let name = file.file_name().map(|v| v.to_string_lossy().to_string()).unwrap_or_default();
+            let name = file
+                .file_name()
+                .map(|v| v.to_string_lossy().to_string())
+                .unwrap_or_default();
             if !wildcard_match(pattern, &name) {
                 continue;
             }
@@ -403,7 +971,9 @@ fn grep(root: &Path, args: &Value) -> ToolOutcome {
     let mut out = String::new();
     let mut hits = 0;
     for file in files {
-        let Ok(meta) = std::fs::metadata(&file) else { continue };
+        let Ok(meta) = std::fs::metadata(&file) else {
+            continue;
+        };
         if meta.len() > GREP_MAX_BYTES {
             continue;
         }
@@ -666,7 +1236,11 @@ fn spawn_background_task(
     let Some(runtime) = runtime else {
         return ToolOutcome::fail("当前上下文不支持后台任务（background 只能在本机会话里用）");
     };
-    let tasks = runtime.app.state::<TasksState>();
+    let Some(tasks) = runtime.app.try_state::<TasksState>() else {
+        return ToolOutcome::fail(
+            "后台任务插件未启用：background 用不了。改成前台执行，或让用户先启用 tasks 插件。",
+        );
+    };
     match tasks.spawn(
         runtime.app.clone(),
         SpawnRequest {
@@ -691,7 +1265,9 @@ fn task_status(args: &Value, runtime: Option<&ToolRuntime<'_>>) -> ToolOutcome {
     let Some(runtime) = runtime else {
         return ToolOutcome::fail("当前上下文不能查后台任务");
     };
-    let tasks = runtime.app.state::<TasksState>();
+    let Some(tasks) = runtime.app.try_state::<TasksState>() else {
+        return ToolOutcome::fail("后台任务插件未启用，查不到任何任务");
+    };
     // 只认这个会话起的任务：别的会话的命令不该从工具里漏出来。
     let mine = |task: &TaskInfo| task.session_id.as_deref() == Some(runtime.session_id);
 
@@ -706,7 +1282,11 @@ fn task_status(args: &Value, runtime: Option<&ToolRuntime<'_>>) -> ToolOutcome {
     }
 
     if let Some(id) = str_arg(args, "id") {
-        let Some(info) = tasks.list().into_iter().find(|task| task.id == id && mine(task)) else {
+        let Some(info) = tasks
+            .list()
+            .into_iter()
+            .find(|task| task.id == id && mine(task))
+        else {
             return ToolOutcome::fail(format!("找不到任务 {id}（只能看本会话起的任务）"));
         };
         let lines = int_arg(args, "lines").unwrap_or(120).clamp(1, 400) as usize;
@@ -853,7 +1433,9 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> WalkCut {
     for entry in items {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        let Ok(file_type) = entry.file_type() else { continue };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if file_type.is_symlink() {
             continue;
         }
@@ -932,9 +1514,15 @@ mod tests {
 
     #[test]
     fn specs_cover_builtin_tools() {
-        let names: Vec<String> = specs()
+        // 注册表现在连 `task`（子代理）一起给出——原来它是 agent 层单独 push 的，
+        // 模型看到的清单没变，但"事实来源"只有一个。
+        //
+        // 只比前 8 项：内置工具永远排在前面，后面可能跟着插件在别的用例里
+        // 注册进来的外部工具（注册表是进程级的，测试并行跑）。
+        let names: Vec<String> = specs(&EnabledTools::all())
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str().map(str::to_string))
+            .take(8)
             .collect();
         assert_eq!(
             names,
@@ -945,8 +1533,49 @@ mod tests {
                 "write_file",
                 "edit_file",
                 "run_command",
-                "task_status"
+                "task_status",
+                "task"
             ]
+        );
+    }
+
+    /// 关掉的工具要从 schema 里消失（省 token，也不诱导模型调用）。
+    #[test]
+    fn disabled_tool_disappears_from_specs_and_is_rejected() {
+        let mut off = std::collections::HashMap::new();
+        off.insert("run_command".to_string(), false);
+        let enabled = EnabledTools::from_map(off);
+
+        let all = specs(&enabled);
+        let names: Vec<&str> = all
+            .iter()
+            .filter_map(|spec| spec["function"]["name"].as_str())
+            .collect();
+        assert!(
+            !names.contains(&"run_command"),
+            "关掉的工具不该进 schema：{names:?}"
+        );
+        assert!(names.contains(&"read_file"), "没动的内置工具应当保持开启");
+
+        // 执行侧兜底：模型硬调被禁工具也要被拦下。
+        // 用 `super::` 是因为测试模块里有同名的本地辅助函数。
+        let ctx = ToolContext {
+            app: None,
+            session_id: "",
+            directory: ".",
+            call_id: "",
+            provider: None,
+            model: None,
+            permission: None,
+            enabled: &enabled,
+            should_stop: &|| false,
+        };
+        let result = super::execute(&ctx, "run_command", r#"{"command":"echo hi"}"#);
+        assert!(result.outcome.error.is_some(), "被禁工具不该真的执行");
+        assert!(
+            result.outcome.text.contains("已被关闭"),
+            "{}",
+            result.outcome.text
         );
     }
 
@@ -954,7 +1583,10 @@ mod tests {
     fn read_write_round_trip_has_line_numbers() {
         let dir = temp_dir("rw");
         let root = dir.to_string_lossy().to_string();
-        write_file(&dir, &json!({ "path": "a.txt", "content": "第一行\n第二行\n" }));
+        write_file(
+            &dir,
+            &json!({ "path": "a.txt", "content": "第一行\n第二行\n" }),
+        );
         let outcome = execute(&root, "read_file", r#"{"path":"a.txt"}"#);
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert!(outcome.text.contains("1→第一行"), "{}", outcome.text);
@@ -1028,10 +1660,7 @@ mod tests {
             r#"{"path":"d.txt","old_string":"alpha\r\nbeta","new_string":"one\r\ntwo"}"#,
         );
         assert!(outcome.error.is_none(), "{}", outcome.text);
-        assert_eq!(
-            fs::read_to_string(dir.join("d.txt")).unwrap(),
-            "one\ntwo\n"
-        );
+        assert_eq!(fs::read_to_string(dir.join("d.txt")).unwrap(), "one\ntwo\n");
     }
 
     /// 真的找不到时要把行尾这件事说出来，别让模型反复试错。
@@ -1068,7 +1697,11 @@ mod tests {
             cwd: "/tmp".to_string(),
             state: state.to_string(),
             started_at: 1_000,
-            ended_at: if state == "running" { None } else { Some(73_000) },
+            ended_at: if state == "running" {
+                None
+            } else {
+                Some(73_000)
+            },
             exit_code,
             session_id: Some("s1".to_string()),
             title: None,
@@ -1087,7 +1720,10 @@ mod tests {
 
         assert_eq!(exit_suffix(&sample_task("running", None)), "");
         assert_eq!(exit_suffix(&sample_task("done", Some(0))), "（exit 0）");
-        assert_eq!(exit_suffix(&sample_task("failed", Some(128))), "（exit 128）");
+        assert_eq!(
+            exit_suffix(&sample_task("failed", Some(128))),
+            "（exit 128）"
+        );
         assert_eq!(exit_suffix(&sample_task("stopped", None)), "（已停止）");
 
         assert_eq!(elapsed_label(&sample_task("done", Some(0))), "01:12");
@@ -1101,7 +1737,11 @@ mod tests {
     /// 后台模式必须在有运行时上下文时才能用：单测里没有，要明确报错而不是悄悄前台跑。
     #[test]
     fn background_command_needs_runtime() {
-        let outcome = execute(&std::env::temp_dir().to_string_lossy(), "run_command", r#"{"command":"echo hi","background":true}"#);
+        let outcome = execute(
+            &std::env::temp_dir().to_string_lossy(),
+            "run_command",
+            r#"{"command":"echo hi","background":true}"#,
+        );
         assert!(outcome.error.is_some());
         assert!(outcome.error.unwrap().contains("不支持后台任务"));
     }
@@ -1115,7 +1755,7 @@ mod tests {
     /// 声明里必须有 background 开关和 task_status，否则模型根本不知道这条通道。
     #[test]
     fn specs_expose_background_and_task_status() {
-        let specs = specs();
+        let specs = specs(&EnabledTools::all());
         let run = specs
             .iter()
             .find(|spec| spec["function"]["name"] == "run_command")
@@ -1178,7 +1818,10 @@ mod tests {
         );
         assert!(outcome.error.is_some());
         assert!(outcome.text.contains("命令超时"), "{}", outcome.text);
-        assert!(started.elapsed() < Duration::from_secs(10), "超时要及时收手");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "超时要及时收手"
+        );
     }
 
     /// 停止按钮要能打断正在跑的命令（不是等命令自己跑完）。
@@ -1254,7 +1897,11 @@ mod tests {
         let outcome = execute(&root, "grep", r#"{"pattern":"needle"}"#);
         assert!(outcome.text.contains("没有命中"), "{}", outcome.text);
         assert!(outcome.text.contains("截断"), "{}", outcome.text);
-        assert!(outcome.text.contains("path"), "要说清怎么缩小范围：{}", outcome.text);
+        assert!(
+            outcome.text.contains("path"),
+            "要说清怎么缩小范围：{}",
+            outcome.text
+        );
     }
 
     /// 文件数到顶也一样：只能保证「扫过的那部分」。
@@ -1279,5 +1926,143 @@ mod tests {
         assert!(!wildcard_match("*.rs", "main.ts"));
         assert!(wildcard_match("a?c", "abc"));
         assert!(wildcard_match("*", "anything"));
+    }
+
+    // ------------------------------------------------------------ 外部工具
+
+    /// 造一个外部工具：跑起来只回 `echo:<入参>`，足够验证"注册 → 可查 → 可跑 → 可撤"。
+    fn plugin_tool(name: &str, trusted: bool) -> Arc<ToolDef> {
+        let run: Arc<BoxedRun> = Arc::new(|_ctx, args| {
+            ToolResult::plain(ToolOutcome::ok(format!("echo:{args}")))
+        });
+        Arc::new(ToolDef {
+            name: Cow::Owned(name.to_string()),
+            schema: ToolSchema::Fixed(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": "外部工具",
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            })),
+            origin: ToolOrigin::Plugin,
+            permission: Permission::WriteWorkspace,
+            action: Some("mcp"),
+            resource_key: None,
+            summary: "调用外部工具需要授权",
+            blurb: Cow::Borrowed("测试用外部工具"),
+            delegable: false,
+            enabled_by_default: trusted,
+            run: ToolImpl::Boxed(run),
+        })
+    }
+
+    /// 注册后能被查到、能列出、能执行；撤销后三样一起消失。
+    #[test]
+    fn external_tool_registers_runs_and_releases() {
+        let name = "test__echo_cycle";
+        let owner = "test.cycle";
+        let registry = ToolRegistry::global();
+        registry.register(owner, plugin_tool(name, true)).expect("注册");
+
+        assert!(find(name).is_some(), "注册后应当能按名字查到");
+        assert!(specs(&EnabledTools::all())
+            .iter()
+            .any(|spec| spec["function"]["name"] == name));
+        assert_eq!(registry.owner_of(name).as_deref(), Some(owner));
+
+        let enabled = EnabledTools::all();
+        let ctx = ToolContext {
+            app: None,
+            session_id: "",
+            directory: ".",
+            call_id: "",
+            provider: None,
+            model: None,
+            permission: None,
+            enabled: &enabled,
+            should_stop: &|| false,
+        };
+        let result = run_with_args(&ctx, name, &json!({ "text": "hi" }));
+        assert!(result.outcome.error.is_none(), "{:?}", result.outcome.error);
+        assert!(result.outcome.text.starts_with("echo:"), "{}", result.outcome.text);
+
+        assert_eq!(registry.release(owner), 1);
+        assert!(find(name).is_none(), "撤销后不该还查得到");
+        assert!(registry.owner_of(name).is_none());
+    }
+
+    /// 外部工具不能顶掉内置工具的名字——模型只认名字，能覆盖就等于能劫持。
+    #[test]
+    fn external_tool_cannot_shadow_builtin() {
+        let error = ToolRegistry::global()
+            .register("test.shadow", plugin_tool("write_file", true))
+            .unwrap_err();
+        assert!(error.contains("重名"), "{error}");
+    }
+
+    /// 同名第二个注册者被拒，且不影响第一个。
+    #[test]
+    fn external_tool_duplicate_is_rejected() {
+        let name = "test__echo_dup";
+        let registry = ToolRegistry::global();
+        registry.register("test.dup_a", plugin_tool(name, true)).expect("第一个");
+        let error = registry
+            .register("test.dup_b", plugin_tool(name, true))
+            .unwrap_err();
+        assert!(error.contains("已被 test.dup_a 注册"), "{error}");
+        assert_eq!(registry.owner_of(name).as_deref(), Some("test.dup_a"));
+        registry.release("test.dup_a");
+    }
+
+    /// 默认信任级别决定默认开关：没标 trusted 的外部工具不进模型清单，
+    /// 但仍能被显式打开。
+    #[test]
+    fn untrusted_external_tool_is_off_by_default() {
+        let name = "test__echo_untrusted";
+        let registry = ToolRegistry::global();
+        registry.register("test.untrusted", plugin_tool(name, false)).expect("注册");
+
+        // 生产路径：默认配置（没有这条工具的显式记录）。
+        let configured = EnabledTools::from_config();
+        assert!(!configured.is_on(&find(name).expect("查得到")));
+        assert!(!specs(&configured)
+            .iter()
+            .any(|spec| spec["function"]["name"] == name));
+
+        // 显式打开之后就能用。
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(name.to_string(), true);
+        let opened = EnabledTools::from_map(overrides);
+        assert!(opened.is_on(&find(name).expect("查得到")));
+
+        registry.release("test.untrusted");
+    }
+
+    /// 被禁的外部工具连直接调用都要拦住（注册表撤销与开关是两道独立的门）。
+    #[test]
+    fn disabled_external_tool_refuses_to_run() {
+        let name = "test__echo_disabled";
+        let registry = ToolRegistry::global();
+        registry.register("test.disabled", plugin_tool(name, true)).expect("注册");
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(name.to_string(), false);
+        let enabled = EnabledTools::from_map(overrides);
+        let ctx = ToolContext {
+            app: None,
+            session_id: "",
+            directory: ".",
+            call_id: "",
+            provider: None,
+            model: None,
+            permission: None,
+            enabled: &enabled,
+            should_stop: &|| false,
+        };
+        let result = run_with_args(&ctx, name, &json!({}));
+        assert!(result.outcome.error.unwrap().contains("已被关闭"));
+
+        registry.release("test.disabled");
     }
 }

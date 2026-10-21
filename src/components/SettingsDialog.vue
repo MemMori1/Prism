@@ -8,7 +8,7 @@ import { getVersion } from '@tauri-apps/api/app'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type Update } from '@tauri-apps/plugin-updater'
 import { api } from '../api'
-import type { AssetItem, AssetKind, EngineHealth, McpServer, RuntimeStatus } from '../types'
+import type { AssetItem, AssetKind, EngineHealth, McpServer, RuntimeStatus, ToolView } from '../types'
 import type { AppView } from '../nav'
 import {
   SETTINGS_SECTIONS,
@@ -40,6 +40,12 @@ const errorText = ref<string | null>(null)
 const workshopAssets = ref<AssetItem[]>([])
 const workshopMcp = ref<McpServer[]>([])
 const workshopError = ref(false)
+
+/** 工具清单：内置的 + 插件运行时注册的（MCP）。 */
+const tools = ref<ToolView[]>([])
+const toolError = ref<string | null>(null)
+/** 正在保存开关的工具名：只锁那一行，别的行照常可点。 */
+const toolSaving = ref<string | null>(null)
 
 type UpdatePhase = 'idle' | 'checking' | 'latest' | 'available' | 'downloading' | 'ready' | 'error'
 const updatePhase = ref<UpdatePhase>('idle')
@@ -114,6 +120,30 @@ const assetKindList = computed(() =>
 )
 
 const workshopMcpCount = computed(() => workshopMcp.value.length)
+
+/**
+ * 工具分组：内置 / 外部。
+ *
+ * 分组的理由不是排版，是信任：内置工具编译进二进制、默认开；外部工具由
+ * 插件运行时注册、默认关，打开等于给一段第三方代码执行权。把它们混在一张
+ * 清单里，用户会以为开关的是同一类东西。
+ */
+const toolGroups = computed(() => [
+  {
+    id: 'builtin',
+    label: '系统内置',
+    hint: '随 Prism 编译 · 点击关闭',
+    items: tools.value.filter(tool => tool.origin === 'builtin'),
+    empty: '没有内置工具——工具插件可能被关掉了。',
+  },
+  {
+    id: 'external',
+    label: '后续新增',
+    hint: 'MCP / 插件提供 · 点击开启',
+    items: tools.value.filter(tool => tool.origin !== 'builtin'),
+    empty: '还没有新增工具。在 ~/.prism/mcp.json 里配置后重启 Prism。',
+  },
+])
 
 const updateText = computed(() => {
   switch (updatePhase.value) {
@@ -198,6 +228,50 @@ async function loadWorkshop() {
     assetsResult.status === 'rejected' || mcpResult.status === 'rejected'
 }
 
+async function loadTools() {
+  toolError.value = null
+  try {
+    tools.value = await api.toolList()
+  } catch (cause) {
+    toolError.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+/**
+ * 翻一个工具的开关。
+ *
+ * 写的是"显式记录"，下一轮生效：已开着的会话不受影响，新的一轮才拿到新清单。
+ * 保存后重新拉一次清单——后端可能因为插件没起来而少了几项，界面得跟着变。
+ */
+async function toggleTool(tool: ToolView) {
+  if (toolSaving.value) return
+  toolSaving.value = tool.name
+  toolError.value = null
+  try {
+    await api.nativeToolToggle(tool.name, !tool.enabled)
+    await loadTools()
+  } catch (cause) {
+    toolError.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    toolSaving.value = null
+  }
+}
+
+/**
+ * 芯片上只放得下名字，其余信息进原生 tooltip。
+ *
+ * 一行四五个格子意味着每个格子只有 100 来像素，描述和来源挤进去只会互相
+ * 截断；不如把它们留在"停一下"就能看到的地方，让扫视时只面对名字和状态。
+ */
+function toolTitle(tool: ToolView) {
+  const parts = [tool.name]
+  if (tool.description) parts.push(tool.description)
+  parts.push(tool.owner ? `来自 ${tool.owner}` : '随 Prism 编译')
+  parts.push(tool.permission === 'read-only' ? '只读' : '可写工作目录')
+  parts.push(tool.enabled ? '已开启' : '已关闭')
+  return parts.join(' · ')
+}
+
 async function checkForUpdate() {
   updatePhase.value = 'checking'
   updateError.value = null
@@ -272,6 +346,7 @@ onMounted(() => {
   void load()
   void loadPrismVersion()
   void loadWorkshop()
+  void loadTools()
   window.addEventListener('keydown', onKeydown)
 })
 
@@ -645,6 +720,49 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
                     <div class="settings-row-desc">在工坊中查看命令、环境变量键名与来源文件。</div>
                   </div>
                   <button class="settings-action" @click="openView('workshop')">查看 MCP</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <header class="settings-card-head">
+                <div class="settings-card-title">工具</div>
+                <div class="settings-card-hint">关闭后不进模型清单，下一轮生效。</div>
+              </header>
+
+              <div v-if="toolError" class="settings-error">{{ toolError }}</div>
+
+              <div class="tool-sheet">
+                <div v-for="group in toolGroups" :key="group.id" class="tool-group">
+                  <div class="tool-group-head">
+                    <span class="tool-group-title">{{ group.label }}</span>
+                    <span class="tool-group-count">{{ group.items.length }}</span>
+                    <span class="tool-group-hint">{{ group.hint }}</span>
+                  </div>
+
+                  <div v-if="!group.items.length" class="tool-empty">{{ group.empty }}</div>
+
+                  <div v-else class="tool-grid">
+                    <button
+                      v-for="tool in group.items"
+                      :key="tool.name"
+                      type="button"
+                      class="tool-chip"
+                      :class="{ 'is-off': !tool.enabled }"
+                      role="switch"
+                      :aria-checked="tool.enabled"
+                      :aria-label="`${tool.name}：${tool.enabled ? '已开启，点击关闭' : '已关闭，点击开启'}`"
+                      :disabled="toolSaving !== null"
+                      :title="toolTitle(tool)"
+                      @click="toggleTool(tool)"
+                    >
+                      <span class="tool-chip-top">
+                        <span class="tool-chip-name">{{ tool.name }}</span>
+                        <span class="tool-chip-dot" />
+                      </span>
+                      <span class="tool-chip-blurb">{{ tool.description || '—' }}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

@@ -14,13 +14,15 @@ use crate::engines::core::{
 };
 use crate::engines::native;
 use crate::engines::opencode;
-use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, Runtime, RuntimeStatus};
+use crate::engines::opencode::runtime::{
+    CreatedSession, PermissionRequest, Runtime, RuntimeStatus,
+};
 use crate::engines::quota;
 use crate::engines::usage::{self, UsageSummary};
 use crate::engines::{mcp, workshop};
 use crate::files::{self, FileHit, GitBranches, GitSnapshot};
-use crate::routines::{runner, scheduler::RoutinesState, store};
 use crate::routines::store::{RoutineDefinition, RoutineLogEntry, RoutineView};
+use crate::routines::{runner, scheduler::RoutinesState, store};
 use crate::tasks::{SpawnRequest, TaskInfo, TasksState};
 
 fn opencode_db_path() -> Result<PathBuf, String> {
@@ -71,53 +73,22 @@ fn is_codex_session(session_id: &str) -> bool {
 }
 
 /// 全部引擎的健康状态：历史（数据文件）与运行时（CLI）分别探测。
+///
+/// 数据源是引擎注册表——加一个引擎只需在 `lib.rs` 注册一行，
+/// 这里不用再补一段 `EngineHealth { ... }`。
 #[tauri::command]
-pub async fn engine_health() -> Result<Vec<EngineHealth>, String> {
-    let opencode_db = opencode::locator::database_path();
-    let opencode_cli = opencode::locator::cli_path();
-    let codex_db = codex::locator::state_db();
-    let codex_cli = codex::locator::cli_path();
-    // Claude 的历史数据是目录（存在才算就绪）；CLI 决定运行轴（后置）。
-    let claude_root = claude::locator::projects_dir().filter(|path| path.is_dir());
-    let claude_cli = claude::locator::cli_path();
+pub async fn engine_health(
+    registry: tauri::State<'_, crate::engines::engine::RegistryState>,
+) -> Result<Vec<EngineHealth>, String> {
+    let health = registry.lock().map_err(|cause| cause.to_string())?.health();
     #[cfg(debug_assertions)]
-    println!(
-        "[prism] engine_health: opencode db={:?} cli={:?} / codex db={:?} cli={:?} / claude dir={:?} cli={:?}",
-        opencode_db, opencode_cli, codex_db, codex_cli, claude_root, claude_cli
-    );
-    Ok(vec![
-        EngineHealth {
-            engine_id: opencode::locator::ENGINE_ID.to_string(),
-            display_name: opencode::locator::DISPLAY_NAME.to_string(),
-            ready: opencode_db.is_some() && opencode_cli.is_some(),
-            database_path: opencode_db.map(|path| path.display().to_string()),
-            cli_path: opencode_cli.map(|path| path.display().to_string()),
-        },
-        EngineHealth {
-            engine_id: codex::locator::ENGINE_ID.to_string(),
-            display_name: codex::locator::DISPLAY_NAME.to_string(),
-            // 浏览历史只要求状态库存在；CLI 决定能否运行（运行轴开发中）。
-            ready: codex_db.is_some(),
-            database_path: codex_db.map(|path| path.display().to_string()),
-            cli_path: codex_cli.map(|path| path.display().to_string()),
-        },
-        EngineHealth {
-            engine_id: claude::locator::ENGINE_ID.to_string(),
-            display_name: claude::locator::DISPLAY_NAME.to_string(),
-            // 浏览历史只要求档案目录存在；CLI 决定运行轴（后置里程碑）。
-            ready: claude_root.is_some(),
-            database_path: claude_root.map(|path| path.display().to_string()),
-            cli_path: claude_cli.map(|path| path.display().to_string()),
-        },
-        // 原生引擎：没有 CLI，也没有别人的数据库——配好 API 就算就绪。
-        EngineHealth {
-            engine_id: native::ENGINE_ID.to_string(),
-            display_name: "Prism 原生".to_string(),
-            ready: native::config::load().ready(),
-            database_path: native::config::dir().map(|path| path.display().to_string()),
-            cli_path: None,
-        },
-    ])
+    for item in &health {
+        println!(
+            "[prism] engine_health: {} ready={} db={:?} cli={:?}",
+            item.engine_id, item.ready, item.database_path, item.cli_path
+        );
+    }
+    Ok(health)
 }
 
 // ---------------------------------------------------------------- 原生引擎
@@ -154,11 +125,74 @@ pub async fn native_model_select(
     provider: String,
     model: String,
 ) -> Result<native::config::NativeConfigView, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        native::config::select_model(&provider, &model)
-    })
-    .await
-    .map_err(|cause| cause.to_string())?
+    tauri::async_runtime::spawn_blocking(move || native::config::select_model(&provider, &model))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 开关一个原生引擎工具（落盘，下一轮生效）。
+///
+/// 关掉的工具不进 schema（模型看不到、也不占 token），执行侧还会兜底拦一道。
+/// 只记显式值：没动过的工具按登记项自带的默认（内置开、外部工具看 trusted）。
+#[tauri::command]
+pub async fn native_tool_toggle(
+    name: String,
+    enabled: bool,
+) -> Result<native::config::NativeConfigView, String> {
+    tauri::async_runtime::spawn_blocking(move || native::config::set_tool(&name, enabled))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 工具清单：内置的 + 插件运行时注册的，统一一份视图。
+///
+/// `owner` 是外部工具的来源（`mcp.<server>`），内置工具为空——设置页据此
+/// 分区显示，也让"这个工具是谁塞进来的"有答案。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolView {
+    pub name: String,
+    pub origin: String,
+    pub permission: String,
+    pub enabled: bool,
+    pub owner: Option<String>,
+    pub description: String,
+}
+
+#[tauri::command]
+pub async fn tool_list() -> Result<Vec<ToolView>, String> {
+    let enabled = native::tools::EnabledTools::from_config();
+    let mut views: Vec<ToolView> = Vec::new();
+
+    for def in native::tools::builtin_tools() {
+        views.push(tool_view(def, &enabled, None));
+    }
+    for def in native::tools::ToolRegistry::global().dynamic() {
+        let owner = native::tools::ToolRegistry::global().owner_of(&def.name);
+        views.push(tool_view(&def, &enabled, owner));
+    }
+    Ok(views)
+}
+
+fn tool_view(
+    def: &native::tools::ToolDef,
+    enabled: &native::tools::EnabledTools,
+    owner: Option<String>,
+) -> ToolView {
+    ToolView {
+        name: def.name.to_string(),
+        origin: def.origin.as_str().to_string(),
+        permission: match def.permission {
+            native::tools::Permission::ReadOnly => "read-only",
+            native::tools::Permission::WriteWorkspace => "write",
+        }
+        .to_string(),
+        enabled: enabled.is_on(def),
+        owner,
+        // 给设置页的一行简介，不是 schema 里给模型看的长描述：
+        // 一格只有一百来像素，那句"读取工作目录里的一个文本文件，带行号"放不下。
+        description: def.blurb.to_string(),
+    }
 }
 
 /// 只改运行参数（最大工具往返次数）。
@@ -270,7 +304,8 @@ pub async fn native_probe(
 
 /// 项目列表：各引擎合并（任一引擎缺数据不拖垮另一个），按最近活动排序。
 #[tauri::command]
-pub async fn list_projects() -> Result<Vec<ProjectItem>, String> {    let opencode_db = opencode::locator::database_path();
+pub async fn list_projects() -> Result<Vec<ProjectItem>, String> {
+    let opencode_db = opencode::locator::database_path();
     let codex_db = codex::locator::state_db();
     let claude_root = claude::locator::projects_dir();
     let items = tauri::async_runtime::spawn_blocking(move || {
@@ -387,11 +422,9 @@ pub async fn session_summary(session_id: String) -> Result<Option<SessionSummary
     }
 
     let db_path = opencode_db_path()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        opencode::db::get_session(&db_path, &session_id)
-    })
-    .await
-    .map_err(|cause| cause.to_string())?
+    tauri::async_runtime::spawn_blocking(move || opencode::db::get_session(&db_path, &session_id))
+        .await
+        .map_err(|cause| cause.to_string())?
 }
 
 #[tauri::command]
@@ -554,41 +587,32 @@ pub async fn runtime_status(runtime: tauri::State<'_, Runtime>) -> Result<Runtim
 }
 
 /// 在指定目录新建会话（首次调用会拉起对应引擎的运行轴，可能稍慢）。
+///
+/// 走引擎注册表分发：不再按引擎名写 match 分支。`opencode` 是缺省引擎，
+/// 保持与旧行为一致（`engine` 为 None 时用它）。
 #[tauri::command]
 pub async fn session_create(
-    runtime: tauri::State<'_, Runtime>,
-    codex_runtime: tauri::State<'_, CodexRuntime>,
+    registry: tauri::State<'_, crate::engines::engine::RegistryState>,
     directory: String,
     engine: Option<String>,
 ) -> Result<CreatedSession, String> {
+    let engine_id = engine.unwrap_or_else(|| "opencode".to_string());
     #[cfg(debug_assertions)]
-    println!("[prism] session_create -> {directory}（engine={:?}）", engine);
-    match engine.as_deref() {
-        None | Some("opencode") => {
-            let runtime = runtime.inner().clone();
-            tauri::async_runtime::spawn_blocking(move || runtime.create_session(&directory))
-                .await
-                .map_err(|cause| cause.to_string())?
-        }
-        Some("codex") => {
-            let codex_runtime = codex_runtime.inner().clone();
-            tauri::async_runtime::spawn_blocking(move || codex_runtime.create_session(&directory))
-                .await
-                .map_err(|cause| cause.to_string())?
-        }
-        // 原生引擎：不拉起任何进程，只在自己的库里建一条会话。
-        Some("native") => {
-            let meta =
-                tauri::async_runtime::spawn_blocking(move || native::store::create(&directory))
-                    .await
-                    .map_err(|cause| cause.to_string())??;
-            Ok(CreatedSession {
-                session_id: native::session_id_of(&meta.id),
-                directory: Some(meta.directory),
-            })
-        }
-        Some(other) => Err(format!("该引擎（{other}）的运行轴尚在开发，暂不能新建会话")),
-    }
+    println!("[prism] session_create -> {directory}（engine={engine_id}）");
+
+    let target = registry
+        .lock()
+        .map_err(|cause| cause.to_string())?
+        .get(&engine_id)
+        .ok_or_else(|| format!("该引擎（{engine_id}）的运行轴尚在开发，暂不能新建会话"))?;
+
+    let created = tauri::async_runtime::spawn_blocking(move || target.create_session(&directory))
+        .await
+        .map_err(|cause| cause.to_string())??;
+    Ok(CreatedSession {
+        session_id: created.session_id,
+        directory: created.directory,
+    })
 }
 
 /// 组合器发送的可选项（不传 = 普通纯文本消息）。
@@ -692,18 +716,17 @@ pub async fn session_send(
     }
     let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if let Some(model) = options.model.as_deref().filter(|value| !value.trim().is_empty()) {
+        if let Some(model) = options
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
             let provider = options
                 .provider
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| "指定 OpenCode 模型时缺少提供方".to_string())?;
-            runtime.set_session_model(
-                &session_id,
-                provider,
-                model,
-                options.variant.as_deref(),
-            )?;
+            runtime.set_session_model(&session_id, provider, model, options.variant.as_deref())?;
         }
         let files: Vec<(String, String)> = options
             .files
@@ -717,89 +740,25 @@ pub async fn session_send(
 }
 
 /// 引擎能力目录：模型（含推理档位）+ 斜杠命令（组合器数据源）。
+///
+/// 同样走注册表分发——每个引擎自己能拿到什么目录，由它的 `Engine::catalog`
+/// 决定；未知引擎落回"不可用"而不是报错（前端组合器按 available 降级）。
 #[tauri::command]
 pub async fn engine_catalog(
-    runtime: tauri::State<'_, Runtime>,
-    codex_runtime: tauri::State<'_, CodexRuntime>,
+    registry: tauri::State<'_, crate::engines::engine::RegistryState>,
     engine: String,
     directory: String,
 ) -> Result<EngineCatalog, String> {
-    match engine.as_str() {
-        "opencode" => {
-            let runtime = runtime.inner().clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let models = runtime.list_models(&directory)?;
-                let commands = runtime.list_commands(&directory).unwrap_or_default();
-                Ok(EngineCatalog {
-                    engine: "opencode".to_string(),
-                    available: true,
-                    reason: None,
-                    models,
-                    commands,
-                })
-            })
-            .await
-            .map_err(|cause| cause.to_string())?
-        }
-        "native" => {
-            // 原生引擎的模型目录就是设置里勾过的模型，按服务分组（provider 字段）。
-            let config = native::config::load();
-            let ready = config.ready();
-            let active = config
-                .selection()
-                .map(|(provider, model)| (provider.id.clone(), model.id.clone()));
-            let mut models = Vec::new();
-            for provider in &config.providers {
-                for model in &provider.models {
-                    let is_default = active
-                        .as_ref()
-                        .map(|(provider_id, model_id)| {
-                            provider_id == &provider.id && model_id == &model.id
-                        })
-                        .unwrap_or(false);
-                    models.push(catalog::EngineModel {
-                        id: model.id.clone(),
-                        label: model.display().to_string(),
-                        provider: Some(provider.id.clone()),
-                        variants: Vec::new(),
-                        default_variant: None,
-                        is_default,
-                    });
-                }
-            }
-            Ok(EngineCatalog {
-                engine: "native".to_string(),
-                available: ready,
-                reason: if ready {
-                    None
-                } else {
-                    Some("还没配置模型服务".to_string())
-                },
-                models,
-                commands: Vec::new(),
-            })
-        }
-        "codex" => {
-            let codex_runtime = codex_runtime.inner().clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let models = codex_runtime.list_models()?;
-                Ok(EngineCatalog {
-                    engine: "codex".to_string(),
-                    available: true,
-                    reason: None,
-                    models,
-                    commands: Vec::new(),
-                })
-            })
-            .await
-            .map_err(|cause| cause.to_string())?
-        }
-        "claude" => Ok(catalog::unavailable(
-            "claude",
-            "未检测到 Claude Code CLI（运行轴后置），先用 OpenCode / Codex 开工",
-        )),
-        other => Ok(catalog::unavailable(other, format!("未知引擎：{other}"))),
-    }
+    let target = registry
+        .lock()
+        .map_err(|cause| cause.to_string())?
+        .get(&engine);
+    let Some(target) = target else {
+        return Ok(catalog::unavailable(&engine, format!("未知引擎：{engine}")));
+    };
+    tauri::async_runtime::spawn_blocking(move || target.catalog(&directory))
+        .await
+        .map_err(|cause| cause.to_string())?
 }
 
 /// 在会话里直接跑一条 shell 命令（不发给模型）。
@@ -843,11 +802,9 @@ pub async fn session_command(
         return Err("Codex 暂不支持斜杠命令（可直接输入自然语言指令）".to_string());
     }
     let runtime = runtime.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        runtime.session_command(&session_id, &name, &text)
-    })
-    .await
-    .map_err(|cause| cause.to_string())?
+    tauri::async_runtime::spawn_blocking(move || runtime.session_command(&session_id, &name, &text))
+        .await
+        .map_err(|cause| cause.to_string())?
 }
 
 /// 项目文件索引（@ 补全）：query 为空时按路径序给首批。
@@ -1175,9 +1132,11 @@ pub async fn context_stats(
     if !native::is_native_session(&session_id) {
         return Ok(None);
     }
-    tauri::async_runtime::spawn_blocking(move || crate::engines::native::context::stats(&session_id))
-        .await
-        .map_err(|cause| cause.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::engines::native::context::stats(&session_id)
+    })
+    .await
+    .map_err(|cause| cause.to_string())
 }
 
 /// 这个目录现在还在不在（历史会话可能指向已经删掉 / 移动的目录）。
@@ -1188,14 +1147,12 @@ pub async fn dir_exists(path: String) -> Result<bool, String> {
 
 /// 保存文本文件（编辑器用；只允许会话目录 / 仓库根之内的已存在文件）。
 #[tauri::command]
-pub async fn write_text(
-    path: String,
-    text: String,
-    directory: String,
-) -> Result<u64, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::changes::write_text(&path, &text, &directory))
-        .await
-        .map_err(|cause| cause.to_string())?
+pub async fn write_text(path: String, text: String, directory: String) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::changes::write_text(&path, &text, &directory)
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
 }
 
 /// 在文件管理器里显示这个文件（Finder / 资源管理器 / xdg-open）。
@@ -1351,7 +1308,9 @@ fn routines_store_path() -> Result<PathBuf, String> {
 
 /// 任务列表（含派生字段：下次触发、是否运行中）。
 #[tauri::command]
-pub async fn routines_list(state: tauri::State<'_, RoutinesState>) -> Result<Vec<RoutineView>, String> {
+pub async fn routines_list(
+    state: tauri::State<'_, RoutinesState>,
+) -> Result<Vec<RoutineView>, String> {
     let definitions = store::load_all(&routines_store_path()?)?;
     let now = runner::now_ms();
     Ok(definitions
@@ -1387,7 +1346,10 @@ pub async fn routine_create(
     definitions.push(definition.clone());
     store::save_all(&path, &definitions)?;
     #[cfg(debug_assertions)]
-    println!("[prism] routine_create -> {}（{}）", definition.name, definition.id);
+    println!(
+        "[prism] routine_create -> {}（{}）",
+        definition.name, definition.id
+    );
     Ok(store::to_view(&definition, now, false))
 }
 
@@ -1458,7 +1420,10 @@ pub async fn routine_run(app: tauri::AppHandle, id: String) -> Result<(), String
 
 /// 任务执行日志（新到旧）。
 #[tauri::command]
-pub async fn routine_logs(id: String, limit: Option<usize>) -> Result<Vec<RoutineLogEntry>, String> {
+pub async fn routine_logs(
+    id: String,
+    limit: Option<usize>,
+) -> Result<Vec<RoutineLogEntry>, String> {
     let dir = store::logs_dir().ok_or_else(|| "无法定位 ~/.prism 数据目录".to_string())?;
     Ok(store::read_logs(&dir, &id, limit.unwrap_or(20)))
 }

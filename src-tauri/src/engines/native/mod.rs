@@ -14,6 +14,7 @@ pub mod agent;
 pub mod approval;
 pub mod config;
 pub mod context;
+pub mod engine;
 pub mod provider;
 pub mod store;
 pub mod subagent;

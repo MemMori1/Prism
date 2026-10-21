@@ -6,12 +6,16 @@ mod engines;
 mod files;
 mod gitinfo;
 mod ipc;
+mod kernel;
+mod mcp_client;
+mod plugins;
 mod routines;
 mod tasks;
 mod tray;
 
-use engines::codex::runtime::Runtime as CodexRuntime;
-use engines::opencode::runtime::Runtime;
+use std::sync::{Arc, Mutex};
+
+use kernel::{Kernel, KernelState, Plugin};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -76,24 +80,47 @@ pub fn run() {
             ipc::tray_status,
             ipc::native_config,
             ipc::native_config_set,
+            ipc::native_tool_toggle,
             ipc::native_probe,
             ipc::native_provider_save,
             ipc::native_provider_delete,
             ipc::native_model_select,
             ipc::native_models_fetch,
+            ipc::tool_list,
             ipc::task_spawn,
             ipc::task_list,
             ipc::task_stop,
             ipc::task_remove,
         ])
         .setup(|app| {
-            app.manage(Runtime::new(app.handle().clone()));
-            app.manage(CodexRuntime::new(app.handle().clone()));
-            app.manage(engines::quota::QuotaState::new());
-            app.manage(routines::scheduler::RoutinesState::new());
-            app.manage(tasks::TasksState::new());
-            routines::scheduler::start(app.handle().clone());
-            tray::setup(app.handle())?;
+            // 装配：一张清单，顺序即依赖顺序。加能力只改这张表——
+            // 不再往 `setup` 里塞 `app.manage(...)`，也不会漏掉关停。
+            //
+            // 引擎插件都排在 `EngineHost` 之前：它们只把实例登记给内核，
+            // 由宿主统一收成**一份**注册表（谁装了引擎由活动集决定，
+            // 而不是由哪个插件抢先 `new` 出来决定）。
+            let capabilities: Vec<Arc<dyn Plugin>> = vec![
+                Arc::new(plugins::OpencodeEngine::new(app.handle().clone())),
+                Arc::new(plugins::CodexEngine::new(app.handle().clone())),
+                Arc::new(plugins::NativeEnginePlugin),
+                Arc::new(plugins::ClaudeEnginePlugin),
+                Arc::new(plugins::EngineHost),
+                Arc::new(plugins::Tray::new(app.handle().clone())),
+                Arc::new(plugins::Quota),
+                Arc::new(plugins::Tasks),
+                // 外部工具：读 `~/.prism/mcp.json`，没配置就什么都不做。
+                Arc::new(plugins::McpTools),
+                Arc::new(plugins::Routines::new(app.handle().clone())),
+            ];
+
+            let mut kernel = Kernel::new(app.handle().clone());
+            kernel
+                .install(&capabilities)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            // 装配器不留在托管状态里（它持有 AppHandle，留着就是引用环）；
+            // 只留撤销栈，退出时逆序执行。
+            app.manage(Mutex::new(kernel.into_state()));
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -119,14 +146,11 @@ pub fn run() {
                 tray::show_main(app_handle);
             }
             tauri::RunEvent::Exit => {
-                if let Some(runtime) = app_handle.try_state::<Runtime>() {
-                    runtime.shutdown();
-                }
-                if let Some(codex) = app_handle.try_state::<CodexRuntime>() {
-                    codex.shutdown();
-                }
-                if let Some(tasks) = app_handle.try_state::<tasks::TasksState>() {
-                    tasks.shutdown();
+                // 逆序执行撤销栈：后装配的先拆（子进程 / 线程先收，状态后清）。
+                if let Some(kernel) = app_handle.try_state::<Mutex<KernelState>>() {
+                    if let Ok(mut kernel) = kernel.lock() {
+                        kernel.shutdown();
+                    }
                 }
             }
             _ => {}

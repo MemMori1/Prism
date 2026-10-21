@@ -635,3 +635,208 @@
     padding: 10px 18px;
   }
 }
+
+/* ---------- 工具 ---------- */
+
+/* 网格铺开，一行四到五个。
+   芯片只承载「名字 + 状态点」，描述与来源进 title。密度本身就是信息：
+   8 个工具从半屏降到两行，扫一眼就知道哪些亮着。 */
+.tool-sheet {
+  max-height: 248px;
+  padding: 2px 0 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.tool-sheet::-webkit-scrollbar {
+  width: 6px;
+}
+
+.tool-sheet::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+}
+
+.tool-sheet::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--muted) 60%, transparent);
+}
+
+.tool-group {
+  padding: 0 14px;
+}
+
+.tool-group + .tool-group {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.tool-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 0 7px;
+}
+
+.tool-group-title {
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.tool-group-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tool-group-count {
+  flex: none;
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* 134 是试出来的：常见窗口宽下正好 5 列，再宽一点变 6 列也不挤。
+   小于 130 时 `fs__list_directory` 这类名字会被截成两半。 */
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(134px, 1fr));
+  gap: 6px;
+}
+
+/* 一格两行：上面名字 + 状态点，下面一句简介。
+   高度交给内容，不写死——中文字号一变就露馅。 */
+.tool-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-2) 45%, transparent);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+  transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+}
+
+.tool-chip:hover {
+  border-color: color-mix(in srgb, var(--muted) 40%, var(--border));
+  background: color-mix(in srgb, var(--panel-2) 85%, transparent);
+  transform: translateY(-1px);
+}
+
+.tool-chip:active {
+  transform: translateY(0) scale(0.99);
+}
+
+.tool-chip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 1px;
+}
+
+.tool-chip:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.tool-chip-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tool-chip-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tool-chip-blurb {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 亮着的点带一圈光晕；关掉的点只剩一道细描边。 */
+.tool-chip-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+  transition: background 0.14s ease, box-shadow 0.14s ease;
+}
+
+/* 开着的格子带一点 accent 底色，和关掉后的虚线空框形成对比：
+   扫一眼就知道哪几格是"在位的"，不必逐个读右侧的点。 */
+.tool-chip:not(.is-off) {
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.tool-chip:not(.is-off):hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+/* 关掉的芯片退成虚线框 + 空心点：整块可点，状态用「有没有光」表达，
+   比在每个格子里塞一个 26px 的开关更省地方，也更安静。 */
+.tool-chip.is-off {
+  border-style: dashed;
+  background: transparent;
+}
+
+.tool-chip.is-off .tool-chip-name {
+  color: var(--faint);
+}
+
+.tool-chip.is-off .tool-chip-blurb {
+  color: var(--faint);
+}
+
+.tool-chip.is-off .tool-chip-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--muted) 55%, transparent);
+}
+
+.tool-chip.is-off:hover {
+  border-color: color-mix(in srgb, var(--muted) 40%, var(--border));
+  background: color-mix(in srgb, var(--panel-2) 40%, transparent);
+}
+
+.tool-empty {
+  padding: 0 0 6px;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+

@@ -93,16 +93,21 @@ impl TaskSink for AppHandle {
     }
 }
 
+/// 后台任务表。
+///
+/// `Clone` 是共享同一份状态（两个字段都是 `Arc`），不是复制——插件装配时
+/// 需要"一份交给 Tauri 托管、一份留给关停钩子"，两者必须看到同一批任务。
+#[derive(Clone)]
 pub struct TasksState {
     tasks: Arc<Mutex<HashMap<String, Entry>>>,
-    seq: AtomicU64,
+    seq: Arc<AtomicU64>,
 }
 
 impl TasksState {
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
-            seq: AtomicU64::new(0),
+            seq: Arc::new(AtomicU64::new(0)),
         }
     }
 

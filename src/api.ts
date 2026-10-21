@@ -35,6 +35,7 @@ import type {
   TaskSpawnInput,
   TimelinePage,
   ToolDetail,
+  ToolView,
   UsageSummary,
 } from './types'
 
@@ -181,6 +182,11 @@ export const api = {
     invoke<NativeConfigView>('native_model_select', { provider, model }),
   nativeLimitsSet: (limits: NativeLimitsInput) =>
     invoke<NativeConfigView>('native_config_set', { limits }),
+  /** 开关一个工具：关掉的不进 schema，也不占 token。内置与外部工具同一条命令。 */
+  nativeToolToggle: (name: string, enabled: boolean) =>
+    invoke<NativeConfigView>('native_tool_toggle', { name, enabled }),
+  /** 工具清单：内置 + 插件运行时注册的外部工具。 */
+  toolList: () => invoke<ToolView[]>('tool_list'),
   nativeModelsFetch: (input: {
     providerId?: string | null
     baseUrl?: string | null

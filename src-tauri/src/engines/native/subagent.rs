@@ -57,19 +57,16 @@ impl AgentType {
         }
     }
 
-    /// 这类子代理能用的工具名（永远不含 `task`——扁平编排）。
-    fn tool_names(self) -> &'static [&'static str] {
+    /// 这类子代理的权限上限：探索只能拿只读工具，通用可写。
+    ///
+    /// 原来这里是一份按工具名硬编码的白名单（`&["read_file", ...]`），
+    /// 加工具就得记得改它。改成权限档之后，工具集由工具注册表按
+    /// `Permission` 推导——新加的只读工具会自动进入探索子代理的能力集，
+    /// 写类工具则天然被挡在外面（默认更安全）。
+    fn max_permission(self) -> tools::Permission {
         match self {
-            AgentType::Explore => &["read_file", "list_files", "grep"],
-            AgentType::General => &[
-                "read_file",
-                "list_files",
-                "grep",
-                "write_file",
-                "edit_file",
-                "run_command",
-                "task_status",
-            ],
+            AgentType::Explore => tools::Permission::ReadOnly,
+            AgentType::General => tools::Permission::WriteWorkspace,
         }
     }
 
@@ -115,18 +112,73 @@ pub fn spec() -> Value {
     })
 }
 
-/// 子代理自己的工具清单：全量声明按白名单过滤，`task` 天然落选。
-pub fn specs_for(agent: AgentType) -> Vec<Value> {
-    let allowed = agent.tool_names();
-    tools::specs()
-        .into_iter()
-        .filter(|spec| {
-            spec["function"]["name"]
-                .as_str()
-                .map(|name| name != "task" && allowed.contains(&name))
-                .unwrap_or(false)
+/// 子代理自己的工具清单：由工具注册表按权限档推导，`task` 天然落选
+/// （它 `delegable: false`，扁平编排靠这个保证）。
+/// 子代理的工具清单（测试用；生产路径由 `run` 直接按 `EnabledTools` 推导）。
+#[cfg(test)]
+pub fn specs_for_with(enabled: &tools::EnabledTools, agent: AgentType) -> Vec<Value> {
+    tools::specs_for(enabled, agent.max_permission())
+}
+
+/// `task` 工具的执行入口：从统一的 `ToolContext` 取出子代理需要的全部输入。
+///
+/// 这一层存在的意义是把"子代理"降级成一个普通工具——它有和其他工具
+/// 相同的签名和返回类型，所以能进同一张注册表。原来它走的是分发处的
+/// `call.name == "task"` 特判。
+pub fn run_as_tool(ctx: &tools::ToolContext<'_>, args: &Value) -> tools::ToolResult {
+    let Some(app) = ctx.app else {
+        return tools::ToolResult::fail("子代理需要 Tauri 上下文");
+    };
+    let Some(provider) = ctx.provider else {
+        return tools::ToolResult::fail("子代理缺少模型服务");
+    };
+    let Some(model) = ctx.model else {
+        return tools::ToolResult::fail("子代理缺少模型");
+    };
+    let outcome = run(
+        SubagentContext {
+            app,
+            session_id: ctx.session_id,
+            call_id: ctx.call_id,
+            directory: ctx.directory,
+        },
+        SubagentRequest {
+            provider,
+            model,
+            input: args,
+            permission: approval::parse(ctx.permission),
+            should_stop: ctx.should_stop,
+        },
+    );
+    fold(outcome)
+}
+
+/// 把一次子代理的产出收成工具结果：报告转正 / 失败转红，token 折进消息。
+///
+/// 抽成纯函数是因为它正对「task 调用 → 子代理结果 → 回填」这条最该有测试
+/// 的路径——`run_turns` 里嵌着的话，`provider::chat` 没法 mock，这条路就永远
+/// 没有单测。这里只看 outcome，不碰网络。
+pub fn fold(outcome: SubagentOutcome) -> tools::ToolResult {
+    let tokens = if outcome.tokens_input == 0 && outcome.tokens_output == 0 {
+        None
+    } else {
+        Some(crate::engines::native::store::StoredTokens {
+            input: outcome.tokens_input,
+            output: outcome.tokens_output,
         })
-        .collect()
+    };
+    let result = match &outcome.error {
+        Some(error) => tools::ToolOutcome::fail(format!(
+            "{error}{}",
+            if outcome.report.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n已产出的部分报告：\n{}", outcome.report)
+            }
+        )),
+        None => tools::ToolOutcome::ok(outcome.report.clone()),
+    };
+    tools::ToolResult::with_parts(result, Some(outcome.metadata()), tokens)
 }
 
 /// 最后一轮要不要收掉工具、逼模型交报告。
@@ -310,7 +362,8 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
         }
     };
 
-    let specs = specs_for(agent);
+    let enabled = tools::EnabledTools::from_config();
+    let specs = tools::specs_for(&enabled, agent.max_permission());
     let mut messages = vec![
         json!({ "role": "system", "content": agent.system_prompt(ctx.directory) }),
         json!({ "role": "user", "content": prompt }),
@@ -432,8 +485,7 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
                 outcome.error = Some("已被用户停止，子代理没有跑完".to_string());
                 break;
             }
-            let arguments: Value =
-                serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+            let arguments: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
             // 与主代理同一套权限闸门：explore 没有写工具，天然不触发。
             let denied = approval::action_of(&call.name).and_then(|action| {
                 let verdict = approval::gate(
@@ -453,22 +505,34 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
             });
             let result = match denied {
                 Some(reason) => tools::ToolOutcome::fail(reason),
-                None => tools::execute_with_runtime(
-                    tools::ToolRuntime {
-                        app: ctx.app,
-                        session_id: ctx.session_id,
-                    },
-                    ctx.directory,
-                    &call.name,
-                    &call.arguments,
-                    stop,
-                ),
+                None => {
+                    tools::execute(
+                        &tools::ToolContext {
+                            app: Some(ctx.app),
+                            session_id: ctx.session_id,
+                            directory: ctx.directory,
+                            call_id: &call.id,
+                            provider: Some(req.provider),
+                            model: Some(req.model),
+                            permission: Some(req.permission.as_str()),
+                            enabled: &enabled,
+                            should_stop: stop,
+                        },
+                        &call.name,
+                        &call.arguments,
+                    )
+                    .outcome
+                }
             };
             if steps.len() < MAX_STEPS {
                 steps.push(tool_step(
                     &call.name,
                     summarize(&arguments),
-                    if result.error.is_some() { "error" } else { "completed" },
+                    if result.error.is_some() {
+                        "error"
+                    } else {
+                        "completed"
+                    },
                 ));
             }
             messages.push(json!({
@@ -515,14 +579,14 @@ mod tests {
 
     #[test]
     fn explore_cannot_write_and_nobody_can_spawn_grandchildren() {
-        let explore = specs_for(AgentType::Explore);
+        let explore = specs_for_with(&tools::EnabledTools::all(), AgentType::Explore);
         let names: Vec<&str> = explore
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str())
             .collect();
         assert_eq!(names, vec!["read_file", "list_files", "grep"]);
 
-        let general = specs_for(AgentType::General);
+        let general = specs_for_with(&tools::EnabledTools::all(), AgentType::General);
         let names: Vec<&str> = general
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str())
@@ -577,10 +641,7 @@ mod tests {
             label: "通用",
             turns: 2,
             forced: false,
-            steps: vec![
-                text_step("看一下"),
-                tool_step("grep", None, "completed"),
-            ],
+            steps: vec![text_step("看一下"), tool_step("grep", None, "completed")],
         };
         let outcome = SubagentOutcome {
             report: String::new(),
@@ -618,11 +679,13 @@ mod tests {
 
     #[test]
     fn missing_prompt_fails_fast() {
-        let error = parse_request(&json!({ "description": "空任务" })).expect_err("缺 prompt 要失败");
+        let error =
+            parse_request(&json!({ "description": "空任务" })).expect_err("缺 prompt 要失败");
         assert!(error.contains("prompt"), "{error}");
         // 有 prompt 就能解析出类型（认不出的类型默认「探索」）。
-        let (agent, prompt) = parse_request(&json!({ "prompt": " 查一下登录流程 ", "agent_type": "general" }))
-            .expect("合法入参");
+        let (agent, prompt) =
+            parse_request(&json!({ "prompt": " 查一下登录流程 ", "agent_type": "general" }))
+                .expect("合法入参");
         assert_eq!(agent, AgentType::General);
         assert_eq!(prompt, "查一下登录流程");
     }
@@ -636,7 +699,7 @@ mod tests {
 
     #[test]
     fn final_turn_strips_tools_and_appends_a_wrap_up_prompt() {
-        let specs = specs_for(AgentType::Explore);
+        let specs = specs_for_with(&tools::EnabledTools::all(), AgentType::Explore);
         assert!(!specs.is_empty(), "探索子代理至少该有读类工具");
 
         // 非末轮：工具原样发。

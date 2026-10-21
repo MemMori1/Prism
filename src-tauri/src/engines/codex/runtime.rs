@@ -33,8 +33,11 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
+use crate::catalog::{self, EngineCatalog};
+use crate::engines::core::EngineHealth;
+use crate::engines::engine::{CreatedSession as EngineCreatedSession, Engine};
+
 use super::locator;
-use crate::catalog;
 use crate::engines::opencode::runtime::{CreatedSession, PermissionRequest, RuntimeStatus};
 
 /// 前端订阅的事件名（Tauri 事件），与 OpenCode 运行轴共用。
@@ -491,7 +494,12 @@ impl Runtime {
             let alive = conn
                 .child
                 .lock()
-                .map(|mut child| child.try_wait().map(|status| status.is_none()).unwrap_or(false))
+                .map(|mut child| {
+                    child
+                        .try_wait()
+                        .map(|status| status.is_none())
+                        .unwrap_or(false)
+                })
                 .unwrap_or(false);
             if alive {
                 return Ok(conn.clone());
@@ -583,6 +591,63 @@ impl Runtime {
                 Err(format!("{method} 中断：app-server 连接已重置"))
             }
         }
+    }
+}
+
+impl Engine for Runtime {
+    fn id(&self) -> &'static str {
+        locator::ENGINE_ID
+    }
+
+    fn display_name(&self) -> &'static str {
+        locator::DISPLAY_NAME
+    }
+
+    fn health(&self) -> EngineHealth {
+        let db = locator::state_db();
+        let cli = locator::cli_path();
+        EngineHealth {
+            engine_id: locator::ENGINE_ID.to_string(),
+            display_name: locator::DISPLAY_NAME.to_string(),
+            ready: db.is_some(),
+            database_path: db.map(|path| path.display().to_string()),
+            cli_path: cli.map(|path| path.display().to_string()),
+        }
+    }
+
+    fn create_session(&self, directory: &str) -> Result<EngineCreatedSession, String> {
+        let created = Runtime::create_session(self, directory)?;
+        Ok(EngineCreatedSession::new(
+            created.session_id,
+            created.directory,
+        ))
+    }
+
+    fn catalog(&self, _directory: &str) -> Result<EngineCatalog, String> {
+        let models = Runtime::list_models(self)?;
+        Ok(EngineCatalog {
+            engine: "codex".to_string(),
+            available: true,
+            reason: None,
+            models,
+            commands: Vec::new(),
+        })
+    }
+
+    fn subscribe(&self) -> mpsc::Receiver<Value> {
+        Runtime::subscribe(self)
+    }
+
+    fn send_prompt(&self, session_id: &str, text: &str) -> Result<String, String> {
+        Runtime::send_prompt(self, session_id, text)
+    }
+
+    fn interrupt(&self, session_id: &str) -> Result<(), String> {
+        Runtime::interrupt(self, session_id)
+    }
+
+    fn shutdown(&self) {
+        Runtime::shutdown(self);
     }
 }
 
@@ -888,7 +953,12 @@ fn approval_request(
     };
     let message = reason.or_else(|| {
         (action == "exec")
-            .then(|| params.get("command").and_then(Value::as_str).map(str::to_string))
+            .then(|| {
+                params
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .flatten()
     });
     Some((
@@ -1008,10 +1078,14 @@ fn apply_notification(
                 .unwrap_or("completed");
             match status {
                 "completed" => {
-                    vec![json!({ "type": "session.execution.succeeded", "data": { "sessionID": session } })]
+                    vec![
+                        json!({ "type": "session.execution.succeeded", "data": { "sessionID": session } }),
+                    ]
                 }
                 "interrupted" => {
-                    vec![json!({ "type": "session.execution.interrupted", "data": { "sessionID": session } })]
+                    vec![
+                        json!({ "type": "session.execution.interrupted", "data": { "sessionID": session } }),
+                    ]
                 }
                 _ => {
                     let message = params
@@ -1077,10 +1151,11 @@ fn apply_notification(
             let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
             match item.get("type").and_then(Value::as_str) {
                 Some("commandExecution") => {
-                    state
-                        .item_output
-                        .insert(item_id.to_string(), String::new());
-                    let command = item.get("command").and_then(Value::as_str).unwrap_or_default();
+                    state.item_output.insert(item_id.to_string(), String::new());
+                    let command = item
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     let cwd = item.get("cwd").and_then(Value::as_str).unwrap_or_default();
                     vec![
                         json!({
@@ -1294,7 +1369,10 @@ mod tests {
     use super::*;
 
     fn event_type(value: &Value) -> &str {
-        value.get("type").and_then(Value::as_str).unwrap_or_default()
+        value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
     }
 
     fn data_str<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -1456,7 +1534,9 @@ mod tests {
         apply_notification(
             &mut state,
             "item/started",
-            Some(&json!({ "threadId": "t1", "item": { "type": "commandExecution", "id": "call_2" } })),
+            Some(
+                &json!({ "threadId": "t1", "item": { "type": "commandExecution", "id": "call_2" } }),
+            ),
         );
         apply_notification(
             &mut state,
@@ -1538,8 +1618,8 @@ mod tests {
             "itemId": "patch_1",
             "grantRoot": "/Users/me/project",
         });
-        let (request, kind) =
-            approval_request(&raw_id, "item/fileChange/requestApproval", &params).expect("审批解析");
+        let (request, kind) = approval_request(&raw_id, "item/fileChange/requestApproval", &params)
+            .expect("审批解析");
         assert_eq!(kind, ApprovalKind::FileChange);
         assert_eq!(request.action, "edit");
         assert_eq!(request.resources, vec!["/Users/me/project"]);
@@ -1552,7 +1632,10 @@ mod tests {
         });
         let (request, _) =
             approval_request(&raw_id, "execCommandApproval", &params).expect("审批解析");
-        assert_eq!(request.message.as_deref(), Some("/bin/zsh -lc 'npm install'"));
+        assert_eq!(
+            request.message.as_deref(),
+            Some("/bin/zsh -lc 'npm install'")
+        );
     }
 
     #[test]
@@ -1723,8 +1806,13 @@ mod tests {
         runtime
             .send_prompt(&created.session_id, "请回复 PONG")
             .expect("发送第一轮");
-        let collected = collect_until(&events, &created.session_id, "session.execution.succeeded", Duration::from_secs(120))
-            .expect("第一轮应完成");
+        let collected = collect_until(
+            &events,
+            &created.session_id,
+            "session.execution.succeeded",
+            Duration::from_secs(120),
+        )
+        .expect("第一轮应完成");
         assert!(
             collected.iter().any(|event| {
                 event.get("type").and_then(Value::as_str) == Some("session.text.ended")
@@ -1743,8 +1831,13 @@ mod tests {
         runtime
             .send_prompt(&created.session_id, "TOOL 任务：请执行命令")
             .expect("发送第二轮");
-        let collected = collect_until(&events, &created.session_id, "session.execution.succeeded", Duration::from_secs(120))
-            .expect("第二轮应完成");
+        let collected = collect_until(
+            &events,
+            &created.session_id,
+            "session.execution.succeeded",
+            Duration::from_secs(120),
+        )
+        .expect("第二轮应完成");
         assert!(
             collected.iter().any(|event| {
                 event.get("type").and_then(Value::as_str) == Some("session.tool.success")
@@ -1759,16 +1852,17 @@ mod tests {
 
         // 第三轮：升级权限命令 → 审批卡 → once 放行 → 命令真实执行。
         let marker = cwd.join("escalated-ok");
-        let prompt = format!(
-            "TOOL 任务：ESCALATE TOOLCMD=touch {}",
-            marker.display()
-        );
+        let prompt = format!("TOOL 任务：ESCALATE TOOLCMD=touch {}", marker.display());
         runtime
             .send_prompt(&created.session_id, &prompt)
             .expect("发送第三轮");
-        let collected =
-            collect_until(&events, &created.session_id, "permission.asked", Duration::from_secs(120))
-                .expect("应收到审批请求");
+        let collected = collect_until(
+            &events,
+            &created.session_id,
+            "permission.asked",
+            Duration::from_secs(120),
+        )
+        .expect("应收到审批请求");
         let request_id = collected
             .last()
             .and_then(|event| event.pointer("/data/id"))
@@ -1788,8 +1882,13 @@ mod tests {
         runtime
             .permission_reply(&created.session_id, &request_id, "once")
             .expect("回复审批");
-        let collected = collect_until(&events, &created.session_id, "session.execution.succeeded", Duration::from_secs(120))
-            .expect("第三轮应完成");
+        let collected = collect_until(
+            &events,
+            &created.session_id,
+            "session.execution.succeeded",
+            Duration::from_secs(120),
+        )
+        .expect("第三轮应完成");
         assert!(
             marker.exists(),
             "放行后命令应写入标记文件；事件：{collected:#?}"
@@ -1825,10 +1924,7 @@ mod tests {
         for model in &models {
             println!(
                 "  {} 档位={:?} 默认档={:?} 默认模型={}",
-                model.id,
-                model.variants,
-                model.default_variant,
-                model.is_default
+                model.id, model.variants, model.default_variant, model.is_default
             );
         }
         assert!(!models.is_empty(), "应返回模型目录");
@@ -2071,8 +2167,8 @@ mod tests {
         }
 
         if last_user_text.contains("ESCALATE") {
-            let cmd =
-                extract_marker(&last_user_text, "TOOLCMD=").unwrap_or_else(|| "echo escalated".to_string());
+            let cmd = extract_marker(&last_user_text, "TOOLCMD=")
+                .unwrap_or_else(|| "echo escalated".to_string());
             push_event(&mut out, created);
             push_event(
                 &mut out,
@@ -2225,9 +2321,8 @@ mod tests {
                             header_end = Some(pos + 4);
                             let headers = String::from_utf8_lossy(&raw[..pos]).to_string();
                             for line in headers.lines() {
-                                if let Some(value) = line
-                                    .to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
+                                if let Some(value) =
+                                    line.to_ascii_lowercase().strip_prefix("content-length:")
                                 {
                                     content_length = value.trim().parse().unwrap_or(0);
                                 }

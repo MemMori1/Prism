@@ -8,13 +8,13 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::mpsc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::scheduler::RoutinesState;
 use super::store::{self, RoutineDefinition, RoutineLogEntry};
-use crate::engines::codex::runtime::Runtime as CodexRuntime;
-use crate::engines::opencode::runtime::Runtime as OpencodeRuntime;
+use crate::engines::engine::{Engine, EngineRegistry};
 use crate::engines::opencode::search::prism_dir;
 
 /// 单次运行的兜底时长；超时先打断再按 timeout 收口。
@@ -55,8 +55,13 @@ fn workspace_dir() -> Result<String, String> {
 }
 
 /// 触发一次运行（后台线程）；同一任务已在跑则报错。
+///
+/// 状态用 `try_state` 取：`routines` 插件没装配时这里是「功能不可用」，
+/// 而不是 `state()` 直接 panic。插件装配是可配置的，取状态就得是可失败的。
 pub fn run_in_background(app: &AppHandle, routine: RoutineDefinition) -> Result<(), String> {
-    let state = app.state::<RoutinesState>();
+    let Some(state) = app.try_state::<RoutinesState>() else {
+        return Err("定时任务插件未启用".to_string());
+    };
     if !state.try_mark_running(&routine.id) {
         return Err("该任务正在运行中".to_string());
     }
@@ -66,8 +71,10 @@ pub fn run_in_background(app: &AppHandle, routine: RoutineDefinition) -> Result<
     let _ = tauri::async_runtime::spawn_blocking(move || {
         let mut outcome = execute(&app, &routine);
         outcome.finished_at = now_ms();
-        let state = app.state::<RoutinesState>();
-        state.unmark_running(&routine.id);
+        // 收尾也要容错：跑到一半插件被卸了，至少别让"运行中"标记永远挂着。
+        if let Some(state) = app.try_state::<RoutinesState>() {
+            state.unmark_running(&routine.id);
+        }
         finalize(&app, &routine, &outcome);
     });
     Ok(())
@@ -100,20 +107,48 @@ fn execute(app: &AppHandle, routine: &RoutineDefinition) -> RunOutcome {
         }
     };
     outcome.directory = directory.clone();
-    match routine.engine.as_str() {
-        "opencode" => run_opencode(app, routine, &directory, &mut outcome),
-        "codex" => run_codex(app, routine, &directory, &mut outcome),
-        other => {
-            outcome.error = Some(format!("该引擎（{other}）的运行轴尚在开发，暂不能跑定时任务"));
-        }
-    }
+    // 引擎从注册表取，不再按名字 match：加一个引擎不用回来补分支，
+    // 而且"能不能跑定时任务"直接由该引擎有没有实现 trait 的方法决定。
+    let target = {
+        let Some(registry) = app.try_state::<Mutex<EngineRegistry>>() else {
+            outcome.error = Some("引擎插件未装配，定时任务无法开工".to_string());
+            return outcome;
+        };
+        let guard = match registry.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                outcome.error = Some(format!("引擎注册表不可用：{error}"));
+                return outcome;
+            }
+        };
+        // 取出来的是一份 owned 句柄（Arc），锁可以立即释放。
+        guard.get(&routine.engine)
+    };
+    let Some(engine) = target else {
+        outcome.error = Some(format!(
+            "该引擎（{}）的运行轴尚在开发，暂不能跑定时任务",
+            routine.engine
+        ));
+        return outcome;
+    };
+    run_engine(app, routine, &directory, &mut outcome, engine.as_ref());
     outcome
 }
 
-fn run_opencode(app: &AppHandle, routine: &RoutineDefinition, directory: &str, outcome: &mut RunOutcome) {
-    let runtime = app.state::<OpencodeRuntime>().inner().clone();
-    let events = runtime.subscribe();
-    let created = match runtime.create_session(directory) {
+/// 跑一轮：新建会话 → 发提示词 → 等终态。
+///
+/// 原来 `run_opencode` / `run_codex` 是两份几乎逐行相同的函数，唯一差别是
+/// 各自 `app.state::<…Runtime>()` 的类型。trait 补齐 `subscribe` /
+/// `send_prompt` / `interrupt` 之后，两份合并成一份。
+fn run_engine(
+    app: &AppHandle,
+    routine: &RoutineDefinition,
+    directory: &str,
+    outcome: &mut RunOutcome,
+    engine: &dyn Engine,
+) {
+    let events = engine.subscribe();
+    let created = match engine.create_session(directory) {
         Ok(created) => created,
         Err(error) => {
             outcome.error = Some(format!("新建会话失败：{error}"));
@@ -121,34 +156,18 @@ fn run_opencode(app: &AppHandle, routine: &RoutineDefinition, directory: &str, o
         }
     };
     outcome.session_id = Some(created.session_id.clone());
-    if let Err(error) = runtime.send_prompt(&created.session_id, &routine.prompt) {
+    if let Err(error) = engine.send_prompt(&created.session_id, &routine.prompt) {
         outcome.error = Some(format!("发送提示词失败：{error}"));
         return;
     }
-    let terminal = wait_terminal(app, routine, &created.session_id, directory, events, |session| {
-        runtime.interrupt(session)
-    });
-    apply_terminal(terminal, outcome);
-}
-
-fn run_codex(app: &AppHandle, routine: &RoutineDefinition, directory: &str, outcome: &mut RunOutcome) {
-    let runtime = app.state::<CodexRuntime>().inner().clone();
-    let events = runtime.subscribe();
-    let created = match runtime.create_session(directory) {
-        Ok(created) => created,
-        Err(error) => {
-            outcome.error = Some(format!("新建会话失败：{error}"));
-            return;
-        }
-    };
-    outcome.session_id = Some(created.session_id.clone());
-    if let Err(error) = runtime.send_prompt(&created.session_id, &routine.prompt) {
-        outcome.error = Some(format!("发送提示词失败：{error}"));
-        return;
-    }
-    let terminal = wait_terminal(app, routine, &created.session_id, directory, events, |session| {
-        runtime.interrupt(session)
-    });
+    let terminal = wait_terminal(
+        app,
+        routine,
+        &created.session_id,
+        directory,
+        events,
+        |session| engine.interrupt(session),
+    );
     apply_terminal(terminal, outcome);
 }
 
@@ -170,8 +189,13 @@ fn wait_terminal(
 ) -> Terminal {
     let deadline = Instant::now() + RUN_TIMEOUT;
     while Instant::now() < deadline {
-        let Ok(event) = events.recv_timeout(Duration::from_millis(500)) else {
-            continue;
+        let event = match events.recv_timeout(Duration::from_millis(500)) {
+            Ok(event) => event,
+            // 只是这半秒没事件，继续等。
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            // 事件源断开：这轮不会再有终态事件了（比如引擎没有事件流），
+            // 直接收口，别空转到 15 分钟。
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         if event.pointer("/data/sessionID").and_then(Value::as_str) != Some(session_id) {
             continue;

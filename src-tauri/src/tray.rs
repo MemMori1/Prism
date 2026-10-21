@@ -63,7 +63,11 @@ pub fn show_main(app: &AppHandle) {
 }
 
 /// 应用启动时装配托盘：图标（单色模板）+ 状态行 + 打开/退出。
-pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// 返回状态行句柄而不是自己 `app.manage`：交给谁托管由装配方（`Tray` 插件）
+/// 决定。这样"应用状态是从哪儿来的"只有一条路径，不会在某个模块深处冒出
+/// 一处裸 `manage`。
+pub fn setup(app: &AppHandle) -> Result<StatusItem, Box<dyn std::error::Error>> {
     let status_item = MenuItem::with_id(app, STATUS_ITEM_ID, "空闲", false, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "tray-open", "打开 Prism", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "tray-quit", "退出 Prism", true, None::<&str>)?;
@@ -83,8 +87,7 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
-    app.manage(StatusItem(status_item));
-    Ok(())
+    Ok(StatusItem(status_item))
 }
 
 /// 前端每次「执行中 / 待审批」变化时调用：刷新菜单文案、菜单栏数字与 tooltip。

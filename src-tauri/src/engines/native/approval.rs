@@ -15,6 +15,8 @@ use tauri::AppHandle;
 
 use crate::engines::opencode::runtime::PermissionRequest;
 
+use super::tools;
+
 /// 三档权限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -35,18 +37,33 @@ pub fn parse(raw: Option<&str>) -> Mode {
     }
 }
 
-/// 工具 → 动作类别；None＝不需要授权（读类）。
-pub fn action_of(tool: &str) -> Option<&'static str> {
-    match tool {
-        "write_file" | "edit_file" => Some("edit"),
-        "run_command" => Some("run"),
-        _ => None,
+impl Mode {
+    /// 回到前端用的档位字符串（`parse` 的逆）。
+    ///
+    /// 工具上下文存字符串而不是 `Mode`，是为了让工具层不必反过来依赖
+    /// 审批层——审批层要查工具注册表，方向不能反。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::ReadOnly => "read-only",
+            Mode::Ask => "ask",
+            Mode::Full => "full",
+        }
     }
+}
+
+/// 工具 → 动作类别；None＝不需要授权（读类）。
+///
+/// 三个查询函数都改成查工具注册表：加工具时不必再回来补 match，
+/// 权限信息跟着工具登记项一起走。
+pub fn action_of(tool: &str) -> Option<&'static str> {
+    tools::find(tool).and_then(|def| def.action)
 }
 
 /// 权限卡片上「动了什么」：写 / 改给路径，跑命令给命令本身。
 pub fn resources_of(tool: &str, input: &Value) -> Vec<String> {
-    let key = if tool == "run_command" { "command" } else { "path" };
+    let Some(key) = tools::find(tool).and_then(|def| def.resource_key) else {
+        return Vec::new();
+    };
     match input.get(key).and_then(Value::as_str) {
         Some(text) if !text.trim().is_empty() => vec![text.to_string()],
         _ => Vec::new(),
@@ -55,12 +72,11 @@ pub fn resources_of(tool: &str, input: &Value) -> Vec<String> {
 
 /// 权限卡片的标题。
 pub fn message_of(tool: &str) -> String {
-    match tool {
-        "write_file" => "写文件需要授权".to_string(),
-        "edit_file" => "修改文件需要授权".to_string(),
-        "run_command" => "运行命令需要授权".to_string(),
-        other => format!("{other} 需要授权"),
-    }
+    tools::find(tool)
+        .map(|def| def.summary)
+        .filter(|summary| !summary.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{tool} 需要授权"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,10 +155,7 @@ fn always_allowed() -> &'static Mutex<HashMap<String, HashSet<String>>> {
 fn is_always(session_id: &str, action: &str) -> bool {
     always_allowed()
         .lock()
-        .map(|map| {
-            map.get(session_id)
-                .is_some_and(|set| set.contains(action))
-        })
+        .map(|map| map.get(session_id).is_some_and(|set| set.contains(action)))
         .unwrap_or(false)
 }
 

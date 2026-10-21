@@ -68,6 +68,11 @@ pub fn start(app: AppHandle) {
 }
 
 fn check_and_fire(app: &AppHandle, from_ms: i64, to_ms: i64) {
+    // 调度线程比插件活得久：`routines` 被卸掉后线程还在转，这里必须能
+    // "什么都不做"地返回，而不是 `state()` panic。没插件就没主意要执行。
+    let Some(state) = app.try_state::<RoutinesState>() else {
+        return;
+    };
     let Some(path) = store::store_path() else {
         return;
     };
@@ -89,7 +94,6 @@ fn check_and_fire(app: &AppHandle, from_ms: i64, to_ms: i64) {
         if !due {
             continue;
         }
-        let state = app.state::<RoutinesState>();
         if state.is_running(&routine.id) {
             continue;
         }
