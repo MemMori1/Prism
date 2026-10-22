@@ -1,6 +1,7 @@
-//! 安全研究线的本机工具：`bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract`。
+//! 安全研究线的本机工具：`bin.meta.identify` / `bin.hash.compute` /
+//! `bin.strings.extract` / `bin.pack.detect`。
 //!
-//! 三个工具都只读文件、都不联网、都不需要外部依赖——装好就能用。
+//! 四个工具都只读文件、都不联网、都不需要外部依赖——装好就能用。
 //! 这是"工具矩阵"的第一批真实现：先把标签体系、制品落盘、参数上限跑通，
 //! 再接 Ghidra / 沙箱这类要外部环境的工具。
 //!
@@ -33,61 +34,38 @@ const STRINGS_MAX: usize = 2000;
 
 pub fn tools() -> Vec<std::sync::Arc<ToolDef>> {
     vec![
-        builtin_full(
-            "bin.meta.identify",
-            "样本格式识别",
-            meta_schema,
-            Permission::ReadOnly,
-            None,
-            None,
-            "",
-            true,
-            ToolMeta {
-                tags: &["bin:static"],
-                risk: Risk::Read,
-                network: Network::None,
-                sandbox: None,
-                scope: ToolScope::Any,
-            },
-            run_meta,
-        ),
-        builtin_full(
-            "bin.hash.compute",
-            "三哈希",
-            hash_schema,
-            Permission::ReadOnly,
-            None,
-            None,
-            "",
-            true,
-            ToolMeta {
-                tags: &["bin:static"],
-                risk: Risk::Read,
-                network: Network::None,
-                sandbox: None,
-                scope: ToolScope::Any,
-            },
-            run_hash,
-        ),
-        builtin_full(
-            "bin.strings.extract",
-            "字符串提取",
-            strings_schema,
-            Permission::ReadOnly,
-            None,
-            None,
-            "",
-            true,
-            ToolMeta {
-                tags: &["bin:static"],
-                risk: Risk::Read,
-                network: Network::None,
-                sandbox: None,
-                scope: ToolScope::Any,
-            },
-            run_strings,
-        ),
+        static_tool("bin.meta.identify", "样本格式识别", meta_schema, run_meta),
+        static_tool("bin.hash.compute", "三哈希", hash_schema, run_hash),
+        static_tool("bin.strings.extract", "字符串提取", strings_schema, run_strings),
+        static_tool("bin.pack.detect", "加壳识别", pack_schema, run_pack),
     ]
+}
+
+/// 四个工具共用同一份元信息：静态、只读、不出网、不限作用域。
+fn static_tool(
+    name: &'static str,
+    blurb: &'static str,
+    schema: fn() -> Value,
+    run: super::tools::ToolRun,
+) -> std::sync::Arc<ToolDef> {
+    builtin_full(
+        name,
+        blurb,
+        schema,
+        Permission::ReadOnly,
+        None,
+        None,
+        "",
+        true,
+        ToolMeta {
+            tags: &["bin:static"],
+            risk: Risk::Read,
+            network: Network::None,
+            sandbox: None,
+            scope: ToolScope::Any,
+        },
+        run,
+    )
 }
 
 // ---------------------------------------------------------------- 声明
@@ -397,9 +375,9 @@ fn elf(head: &[u8], mut out: Value) -> Value {
     if let Some(offset) = shoff {
         out["sectionHeaderOffset"] = json!(format!("0x{offset:x}"));
     }
-    if head.windows(4).any(|chunk| chunk == b"UPX!") {
-        out["packerHint"] = json!("upx");
-    }
+    // 壳判断不在这里：`bin.pack.detect` 才是唯一口径（节表 + 特征串 + 结构信号）。
+    // 早先这里有一个只认 ELF `UPX!` 的 packerHint，PE 样本永远拿不到，
+    // 两个入口给同一件事两套答案，比没有更糟。
     out
 }
 
@@ -765,6 +743,789 @@ fn looks_like_domain(text: &str) -> bool {
     )
 }
 
+// ---------------------------------------------------------------- 壳识别
+
+/// 默认只读前 8 MiB：PE 节表、UPX stub、.NET 元数据都在这个范围里。
+const PACK_HEAD: u64 = 8 * 1024 * 1024;
+/// `deep` 模式的上限。再大就不是"看壳"而是全盘扫描了。
+const PACK_SCAN: u64 = 64 * 1024 * 1024;
+/// 熵超过这条线，基本可以认定内容被压缩或加密过（普通代码约 6.0–6.6）。
+const ENTROPY_PACKED: f64 = 7.2;
+/// 节区标志位：可执行 / 可写。
+const SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+const SCN_MEM_WRITE: u32 = 0x8000_0000;
+
+/// 特征强度。
+///
+/// `Low` 只说明"像"，`High` 是业界公认的独有标记，`Certain` 是专有节名——
+/// 节名在 PE 头里，是结构事实；特征串可能只是编译器内嵌的字符串，永远到不了 Certain。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Strength {
+    Low,
+    High,
+    Certain,
+}
+
+impl Strength {
+    fn as_str(self) -> &'static str {
+        match self {
+            Strength::Certain => "certain",
+            Strength::High => "high",
+            Strength::Low => "low",
+        }
+    }
+}
+
+/// 一条可匹配的特征。
+///
+/// 统一用 `&'static str` 而不是字节串：表里全是 ASCII，扫描时再编码即可，
+/// 宽字符标记当场插零字节——省掉一堆 `b"..."` 的类型转换噪音。
+///
+/// `Weak*` 是**共享标记**：`.adata` 这类节名好几个壳都在用，单独见到只能说"像"。
+/// 不加这一档，`ASProtect` 就会因为一个 `.adata` 节被判成 high，那是误报。
+enum Mark {
+    /// 节名，忽略大小写。
+    Section(&'static str),
+    /// ASCII 特征串。
+    Ascii(&'static str),
+    /// UTF-16LE 特征串（.NET 与部分混淆器的字符串常量是宽字符）。
+    Wide(&'static str),
+    /// 共享节名：只把置信度抬到 low。
+    WeakSection(&'static str),
+}
+
+struct Packer {
+    name: &'static str,
+    strength: Strength,
+    /// 认出来之后该往哪走。写具体动作，不写"建议脱壳"这种废话。
+    hint: &'static str,
+    marks: &'static [Mark],
+}
+
+/// 壳 / 保护器 / 打包器特征表。
+///
+/// 顺序有意义：同级命中按表序返回，UPX 排第一是因为它最常见。
+/// 表里只放**能落到证据上**的标记——不放"熵高"这类推测，那是结构信号的事。
+const PACKERS: &[Packer] = &[
+    Packer {
+        name: "UPX",
+        strength: Strength::Certain,
+        hint: "先 `upx -d`：UPX 会自己重建 IAT 与节表，成功率远高于手工 dump；失败再找 OEP 落地后 dump + 修导入表。",
+        marks: &[
+            Mark::Section("UPX0"),
+            Mark::Section("UPX1"),
+            Mark::Section("UPX2"),
+            Mark::Section(".UPX"),
+            Mark::Ascii("UPX!"),
+            Mark::Ascii("$Info: This file is packed with the UPX"),
+        ],
+    },
+    Packer {
+        name: "VMProtect",
+        strength: Strength::Certain,
+        hint: "VM 保护。别指望静态全量还原：先在 xref 里定位 handler 表与校验分支，只对关键判断做动态跟踪。",
+        marks: &[
+            Mark::Section(".vmp0"),
+            Mark::Section(".vmp1"),
+            Mark::Section(".vmp2"),
+            Mark::Ascii("VMProtect"),
+            Mark::Ascii(".vmp"),
+        ],
+    },
+    Packer {
+        name: "Themida / WinLicense",
+        strength: Strength::Certain,
+        hint: "带反调试与代码虚拟化。先确认有没有硬件断点/时序检测，静态侧只取字符串与资源证据，别急着跑。",
+        marks: &[
+            Mark::Section(".themida"),
+            Mark::Section(".winlic"),
+            Mark::Ascii("Themida"),
+            Mark::Ascii("WinLicense"),
+        ],
+    },
+    Packer {
+        name: "ASProtect",
+        strength: Strength::High,
+        hint: "找 pushad/popad 对，单步到 OEP 后 dump；IAT 一般被加密，需要重建。",
+        marks: &[
+            Mark::Section(".aspr"),
+            Mark::WeakSection(".adata"),
+            Mark::Ascii("ASProtect"),
+        ],
+    },
+    Packer {
+        name: "ASPack",
+        strength: Strength::High,
+        hint: "入口在 .aspack 段。走到 OEP 再 dump，压缩段可以直接丢弃。",
+        marks: &[Mark::Section(".aspack"), Mark::Ascii("ASPack")],
+    },
+    Packer {
+        name: "PECompact",
+        strength: Strength::High,
+        hint: "入口跳板很浅，通常单步几十条指令就到 OEP；dump 后修 IAT。",
+        marks: &[
+            Mark::Ascii("PECompact2"),
+            Mark::Ascii("PECompact"),
+            Mark::Ascii("PEC2"),
+        ],
+    },
+    Packer {
+        name: "MPRESS",
+        strength: Strength::High,
+        hint: "LZMA 压缩壳。`mpress -d` 只对自家产物有效，其余情况走 OEP dump。",
+        marks: &[
+            Mark::Section(".MPRESS1"),
+            Mark::Section(".MPRESS2"),
+            Mark::Ascii("MPRESS"),
+        ],
+    },
+    Packer {
+        name: "FSG",
+        strength: Strength::High,
+        hint: "老式压缩壳，特征极短。走到 OEP 后 dump，注意原程序可能只有一两个节。",
+        marks: &[Mark::Ascii("FSG!")],
+    },
+    Packer {
+        name: "Petite",
+        strength: Strength::High,
+        hint: "入口在最后一个节。dump 时注意把原节表恢复回去。",
+        marks: &[Mark::Section(".petite"), Mark::Ascii("petite")],
+    },
+    Packer {
+        name: "Armadillo",
+        strength: Strength::High,
+        hint: "有 Nanomites 变种（int3 回填）。先判断版本，再决定是脱壳还是只在动态侧观察。",
+        marks: &[
+            Mark::Ascii("Armadillo"),
+            Mark::WeakSection(".text1"),
+        ],
+    },
+    Packer {
+        name: "Obsidium",
+        strength: Strength::High,
+        hint: "多层代码变形。静态反汇编会被带偏，优先动态记录真实执行路径。",
+        marks: &[Mark::Ascii("Obsidium")],
+    },
+    Packer {
+        name: "Enigma Protector",
+        strength: Strength::Certain,
+        hint: "带授权与虚拟化。先看授权校验分支（通常是一个返回布尔的小函数），再谈脱壳。",
+        marks: &[
+            Mark::Section(".enigma1"),
+            Mark::Section(".enigma2"),
+            Mark::Ascii("EnigmaProtector"),
+        ],
+    },
+    Packer {
+        name: "EXECryptor",
+        strength: Strength::High,
+        hint: "入口被搬到壳段，IAT 加密。dump 后必须重建导入表才能静态读。",
+        marks: &[Mark::Ascii("EXECryptor")],
+    },
+    Packer {
+        name: "tElock",
+        strength: Strength::High,
+        hint: "反调试较重（多重 SEH）。先在受控环境里跑，再考虑脱壳。",
+        marks: &[Mark::Ascii("tElock")],
+    },
+    Packer {
+        name: "MoleBox",
+        strength: Strength::High,
+        hint: "单文件打包器，运行时释放到临时目录。别脱壳——直接监控临时目录里落地的文件。",
+        marks: &[Mark::Ascii("MoleBox")],
+    },
+    Packer {
+        name: "Xenocode",
+        strength: Strength::High,
+        hint: "文件与注册表都虚拟化。重点看虚拟文件系统描述表，而不是代码段。",
+        marks: &[Mark::Ascii("Xenocode")],
+    },
+    Packer {
+        name: "PELock",
+        strength: Strength::High,
+        hint: "授权 + 反调试。先定位授权检查点，再看壳本身。",
+        marks: &[Mark::Ascii("PELock")],
+    },
+    Packer {
+        name: "Yoda's Crypter",
+        strength: Strength::High,
+        hint: "老式加密壳，反调试靠 SEH 链。走 OEP 后 dump。",
+        marks: &[Mark::Ascii("Yoda's Crypter"), Mark::Ascii("YodaCrypter")],
+    },
+    Packer {
+        name: "WWPack32",
+        strength: Strength::High,
+        hint: "压缩壳，节名被抹掉。按入口点落段判断，走到 OEP 再 dump。",
+        marks: &[Mark::Ascii("WWPACK32")],
+    },
+    Packer {
+        name: "NeoLite",
+        strength: Strength::High,
+        hint: "老式压缩壳。dump 后检查重定位表是否被破坏。",
+        marks: &[Mark::Ascii("NeoLite")],
+    },
+    Packer {
+        name: "kkrunchy",
+        strength: Strength::High,
+        hint: "极小体积壳，常出现在恶意样本里。带 CRC 校验，改动样本会导致自毁。",
+        marks: &[Mark::Ascii("kkrunchy")],
+    },
+    Packer {
+        name: ".NET Reactor",
+        strength: Strength::High,
+        hint: "方法体加密 + 反调试。先用 de4dot 试一遍，剩余的按调用代理逐步还原。",
+        marks: &[
+            Mark::Ascii("NETReactor"),
+            Mark::Ascii(".reactor"),
+            Mark::Ascii("Reactored"),
+        ],
+    },
+    Packer {
+        name: "ConfuserEx",
+        strength: Strength::High,
+        hint: "常量与字符串加密，方法体替换成代理调用。先 de4dot，再针对残留的 switch 混淆还原。",
+        marks: &[
+            Mark::Ascii("ConfuserEx"),
+            Mark::Wide("ConfuserEx"),
+            Mark::Ascii("ConfusedByAttribute"),
+            Mark::Ascii(".confuser"),
+        ],
+    },
+    Packer {
+        name: "SmartAssembly",
+        strength: Strength::High,
+        hint: "字符串压缩 + 控制流混淆。de4dot 能解大部分，剩下去看资源里的字符串解压器。",
+        marks: &[Mark::Ascii("SmartAssembly")],
+    },
+    Packer {
+        name: "Dotfuscator",
+        strength: Strength::High,
+        hint: "以重命名与字符串加密为主，方法体基本完整。还原符号比脱壳更有价值。",
+        marks: &[Mark::Ascii("DotfuscatorAttribute"), Mark::Ascii("Dotfuscator")],
+    },
+    Packer {
+        name: "Babel Obfuscator",
+        strength: Strength::High,
+        hint: "字符串加密 + 资源保护。de4dot 支持有限，重点找解密函数。",
+        marks: &[Mark::Ascii("BabelObfuscatorAttribute")],
+    },
+    Packer {
+        name: "Eazfuscator",
+        strength: Strength::High,
+        hint: "常量加密 + 控制流扁平化。找 <PrivateImplementationDetails> 里的解密桩。",
+        marks: &[Mark::Ascii("Eazfuscator")],
+    },
+    Packer {
+        name: "PyInstaller",
+        strength: Strength::High,
+        hint: "不是壳，是打包器。用 pyinstxtractor 拆出 PYZ，再按 pyc magic 对应的 Python 版本反编译。",
+        marks: &[
+            Mark::Ascii("MEI\u{000c}\u{000b}\u{000a}\u{000b}\u{000e}"),
+            Mark::Ascii("PyInstaller"),
+            Mark::Ascii("pyi-"),
+        ],
+    },
+    Packer {
+        name: "py2exe",
+        strength: Strength::High,
+        hint: "拆出 PYZ 后反编译；pyc magic 必须和 Python 版本对上，否则全是乱码。",
+        marks: &[Mark::Ascii("PYTHONSCRIPT")],
+    },
+    Packer {
+        name: "Nuitka",
+        strength: Strength::High,
+        hint: "编译成 C 再打包，没有字节码可反编译。只能按 native 二进制分析，别找 pyc。",
+        marks: &[Mark::Ascii("Nuitka")],
+    },
+    Packer {
+        name: "Enigma Virtual Box",
+        strength: Strength::High,
+        hint: "文件虚拟化，运行时把内嵌文件映射进进程。看 .enigma 目录与运行时释放路径。",
+        marks: &[Mark::Ascii("Enigma Virtual Box")],
+    },
+    Packer {
+        name: "360 加固",
+        strength: Strength::High,
+        hint: "libjiagu* 是特征。壳入口在 Application.attachBaseContext 之后，脱壳点通常在它调用完 dex 加载之后。",
+        marks: &[
+            Mark::Ascii("libjiagu"),
+            Mark::Ascii("libjiagu_art"),
+            Mark::Ascii("libjiagu_x86"),
+        ],
+    },
+    Packer {
+        name: "腾讯加固",
+        strength: Strength::High,
+        hint: "libshell* 是特征。先看壳的 dex 抽取时机，再找内存里完整的 dex。",
+        marks: &[
+            Mark::Ascii("libshella"),
+            Mark::Ascii("libshellx"),
+            Mark::Ascii("libshell-super"),
+        ],
+    },
+    Packer {
+        name: "梆梆加固",
+        strength: Strength::High,
+        hint: "libsec* 与 libDexHelper 是特征。脱壳点在 dex 被完整加载进内存之后。",
+        marks: &[
+            Mark::Ascii("libsecexe"),
+            Mark::Ascii("libsecmain"),
+            Mark::Ascii("libDexHelper"),
+        ],
+    },
+    Packer {
+        name: "阿里加固",
+        strength: Strength::High,
+        hint: "libmobisec 是特征。先确认是整体加固还是仅 dex 加密。",
+        marks: &[Mark::Ascii("libmobisec")],
+    },
+    Packer {
+        name: "百度加固",
+        strength: Strength::High,
+        hint: "libbaiduprotect 是特征。注意它有反调试与完整性校验，改动前先备份。",
+        marks: &[Mark::Ascii("libbaiduprotect")],
+    },
+    Packer {
+        name: "娜迦加固",
+        strength: Strength::High,
+        hint: "libchaosvmp 是特征。VM 保护，优先找 dex 完整落地的时机。",
+        marks: &[Mark::Ascii("libchaosvmp")],
+    },
+    Packer {
+        name: "爱加密",
+        strength: Strength::High,
+        hint: "libexecmain 是特征。先看 attachBaseContext 链，再找内存 dex。",
+        marks: &[Mark::Ascii("libexecmain"), Mark::Ascii("ijiami")],
+    },
+];
+
+fn pack_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "bin.pack.detect",
+            "description": "判断样本是否加壳/混淆：按节名、stub 特征串、入口点所在节、可写可执行节、导入表缺失、overlay、熵值综合打分，给出壳名、置信度、证据偏移与下一步动作。只读，不执行样本。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "相对工作目录的样本路径" },
+                    "deep": { "type": "boolean", "description": "扫描整个文件找特征串（默认只看前 8 MiB，deep 提到 64 MiB）" }
+                },
+                "required": ["path"]
+            }
+        }
+    })
+}
+
+fn run_pack(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    let (path, size) = match target_of(ctx, args) {
+        Ok(found) => found,
+        Err(failure) => return failure,
+    };
+    let deep = args.get("deep").and_then(Value::as_bool).unwrap_or(false);
+    let blob = match read_head(&path, if deep { PACK_SCAN } else { PACK_HEAD }) {
+        Ok(bytes) => bytes,
+        Err(error) => return ToolResult::fail(error),
+    };
+    let mut payload = detect_pack(&blob, size);
+    payload["path"] = json!(path.display().to_string());
+    payload["size"] = json!(size);
+    payload["scannedBytes"] = json!(blob.len());
+    payload["truncated"] = json!((size as usize) > blob.len());
+    respond(ctx, "pack", payload)
+}
+
+/// PE 节表里我们真正关心的几列。
+struct PeSection {
+    name: String,
+    address: u64,
+    virtual_size: u64,
+    raw_size: u64,
+    raw_offset: u64,
+    characteristics: u32,
+}
+
+struct PeFacts {
+    sections: Vec<PeSection>,
+    entry_rva: u64,
+    /// 为 0 表示没有导入表——这是加壳最硬的结构证据之一。
+    import_rva: u64,
+}
+
+/// 只解析节表与两个地址。导入了什么由 `bin.importexport.list` 负责，不重复。
+fn pe_facts(head: &[u8]) -> Option<PeFacts> {
+    let pe_offset = read_u32(head, 0x3c, true)? as usize;
+    if head.get(pe_offset..pe_offset + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let coff = pe_offset + 4;
+    let count = read_u16(head, coff + 2, true)?;
+    let optional_size = read_u16(head, coff + 16, true)?;
+    let optional = coff + 20;
+    let is_64 = read_u16(head, optional, true)? == 0x20b;
+    let entry_rva = read_u32(head, optional + 16, true).unwrap_or(0) as u64;
+    // DataDirectory 起点：PE32 在 +96，PE32+ 在 +112；[1] 是导入表。
+    let directories = optional + if is_64 { 112 } else { 96 };
+    let import_rva = read_u32(head, directories + 8, true).unwrap_or(0) as u64;
+
+    let table = optional + optional_size as usize;
+    let mut sections = Vec::new();
+    for index in 0..count.min(96) as usize {
+        let at = table + index * 40;
+        let Some(raw) = head.get(at..at + 40) else {
+            break;
+        };
+        sections.push(PeSection {
+            name: String::from_utf8_lossy(&raw[..8])
+                .trim_end_matches('\0')
+                .to_string(),
+            address: read_u32(raw, 12, true).unwrap_or(0) as u64,
+            virtual_size: read_u32(raw, 8, true).unwrap_or(0) as u64,
+            raw_size: read_u32(raw, 16, true).unwrap_or(0) as u64,
+            raw_offset: read_u32(raw, 20, true).unwrap_or(0) as u64,
+            characteristics: read_u32(raw, 36, true).unwrap_or(0),
+        });
+    }
+    Some(PeFacts {
+        sections,
+        entry_rva,
+        import_rva,
+    })
+}
+
+/// 文件偏移落在哪个节的原始数据里。
+fn section_at(sections: &[PeSection], offset: usize) -> Option<&str> {
+    let offset = offset as u64;
+    sections
+        .iter()
+        .find(|section| {
+            offset >= section.raw_offset && offset < section.raw_offset + section.raw_size
+        })
+        .map(|section| section.name.as_str())
+}
+
+/// 预编码的特征串。
+///
+/// 宽字符在这里就展开成字节流，扫描循环里只剩一次 `==`。
+struct Needle {
+    packer: usize,
+    mark: usize,
+    bytes: Vec<u8>,
+}
+
+fn build_needles() -> Vec<Needle> {
+    let mut out = Vec::new();
+    for (packer, entry) in PACKERS.iter().enumerate() {
+        for (mark, item) in entry.marks.iter().enumerate() {
+            match item {
+                Mark::Section(_) | Mark::WeakSection(_) => {}
+                Mark::Ascii(text) => out.push(Needle {
+                    packer,
+                    mark,
+                    bytes: text.as_bytes().to_vec(),
+                }),
+                Mark::Wide(text) => {
+                    let mut encoded = Vec::with_capacity(text.len() * 2);
+                    for byte in text.as_bytes() {
+                        encoded.push(*byte);
+                        encoded.push(0);
+                    }
+                    out.push(Needle {
+                        packer,
+                        mark,
+                        bytes: encoded,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 一遍过完全部特征串，返回 `hits[packer] = [(mark, offset)]`。
+///
+/// 逐个特征各扫一遍在 64 MiB 上要几十秒；这里按首字节建桶，单次遍历即可，
+/// 命中的特征串只在首字节对得上时才做整段比较。
+fn scan_needles(blob: &[u8], needles: &[Needle]) -> Vec<Vec<(usize, usize)>> {
+    let mut hits: Vec<Vec<(usize, usize)>> = vec![Vec::new(); PACKERS.len()];
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    for (index, needle) in needles.iter().enumerate() {
+        if let Some(first) = needle.bytes.first() {
+            buckets[*first as usize].push(index);
+        }
+    }
+    for (offset, byte) in blob.iter().enumerate() {
+        let bucket = &buckets[*byte as usize];
+        if bucket.is_empty() {
+            continue;
+        }
+        for &index in bucket {
+            let needle = &needles[index];
+            if blob.len() - offset < needle.bytes.len() {
+                continue;
+            }
+            if &blob[offset..offset + needle.bytes.len()] != needle.bytes.as_slice() {
+                continue;
+            }
+            let slot = &mut hits[needle.packer];
+            if !slot.iter().any(|(mark, _)| *mark == needle.mark) {
+                slot.push((needle.mark, offset));
+            }
+        }
+    }
+    hits
+}
+
+/// 香农熵（bit/byte）。全零得 0，均匀分布得 8。
+fn entropy(bytes: &[u8]) -> f64 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0u32; 256];
+    for byte in bytes {
+        counts[*byte as usize] += 1;
+    }
+    let total = bytes.len() as f64;
+    counts
+        .iter()
+        .filter(|count| **count > 0)
+        .fold(0.0, |sum, count| {
+            let p = *count as f64 / total;
+            sum - p * p.log2()
+        })
+}
+
+/// 纯函数：给一段内容判壳。`size` 是文件真实大小，只在算 overlay 时用到。
+pub fn detect_pack(blob: &[u8], size: u64) -> Value {
+    let facts = pe_facts(blob);
+    let empty = Vec::new();
+    let sections = facts
+        .as_ref()
+        .map(|item| &item.sections)
+        .unwrap_or(&empty);
+
+    let needles = build_needles();
+    let hits = scan_needles(blob, &needles);
+
+    // ---- 特征串与节名
+    let mut found: Vec<(Strength, Value)> = Vec::new();
+    let mut top: Option<Strength> = None;
+    // 至少有一个壳名只靠特征串命中——结论要附一句人工确认的提醒。
+    let mut string_only = false;
+    for (index, packer) in PACKERS.iter().enumerate() {
+        let mut evidence: Vec<String> = Vec::new();
+        // 只命中共用标记（`.adata` 之类）时，置信度只能算 low。
+        let mut weak = true;
+        // 节名是 PE 头里的结构事实；只命中特征串时最高判到 high。
+        let mut structural = false;
+        for mark in packer.marks {
+            let name = match mark {
+                Mark::Section(name) | Mark::WeakSection(name) => name,
+                _ => continue,
+            };
+            if let Some(section) = sections
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(name))
+            {
+                evidence.push(format!("节名 {}", section.name));
+                if let Mark::Section(_) = mark {
+                    weak = false;
+                    structural = true;
+                }
+            }
+        }
+        for &(mark, offset) in &hits[index] {
+            // 证据要说清命中落在哪个节：字符串可能只是编译器内嵌的常量，
+            // 见到 `.rdata` 里的 "VMProtect" 和见到入口节里的，判断完全不同。
+            let at = match section_at(sections, offset) {
+                Some(name) => format!("0x{offset:x}（{name} 节）"),
+                None => format!("0x{offset:x}"),
+            };
+            match &packer.marks[mark] {
+                Mark::Ascii(text) => {
+                    evidence.push(format!("{at} 出现 \"{text}\""));
+                    weak = false;
+                }
+                Mark::Wide(text) => {
+                    evidence.push(format!("{at} 出现宽字符 \"{text}\""));
+                    weak = false;
+                }
+                Mark::Section(_) | Mark::WeakSection(_) => {}
+            }
+        }
+        if evidence.is_empty() {
+            continue;
+        }
+        let strength = if weak {
+            Strength::Low
+        } else if structural {
+            packer.strength
+        } else {
+            packer.strength.min(Strength::High)
+        };
+        if !structural {
+            string_only = true;
+        }
+        top = Some(top.map_or(strength, |current| current.max(strength)));
+        found.push((
+            strength,
+            json!({
+                "name": packer.name,
+                "confidence": strength.as_str(),
+                "evidence": evidence,
+                "hint": packer.hint,
+            }),
+        ));
+    }
+    found.sort_by(|left, right| right.0.cmp(&left.0));
+    let packers: Vec<Value> = found.into_iter().map(|(_, value)| value).collect();
+
+    // ---- 结构信号
+    let mut rows: Vec<Value> = Vec::new();
+    let mut writable_exec: Vec<String> = Vec::new();
+    let mut virtual_gap: Vec<String> = Vec::new();
+    let mut last_end = 0u64;
+    for section in sections {
+        let executable = section.characteristics & SCN_MEM_EXECUTE != 0;
+        let writable = section.characteristics & SCN_MEM_WRITE != 0;
+        if executable && writable {
+            writable_exec.push(section.name.clone());
+        }
+        if section.virtual_size >= 0x1000
+            && (section.raw_size == 0
+                || section.virtual_size > section.raw_size.saturating_mul(4))
+        {
+            virtual_gap.push(section.name.clone());
+        }
+        last_end = last_end.max(section.raw_offset + section.raw_size);
+
+        // 节内熵只在数据确实读进来了的时候算：截断的节算出来的熵是假的。
+        let start = section.raw_offset as usize;
+        let end = start.saturating_add(section.raw_size as usize).min(blob.len());
+        let usable = section.raw_size >= 512 && start < end;
+        let mut row = json!({
+            "name": section.name,
+            "writable": writable,
+            "executable": executable,
+            "virtualSize": section.virtual_size,
+            "rawSize": section.raw_size,
+        });
+        if usable {
+            let value = entropy(&blob[start..end]);
+            row["entropy"] = json!((value * 100.0).round() / 100.0);
+        }
+        rows.push(row);
+    }
+
+    let entry_rva = facts.as_ref().map(|item| item.entry_rva).unwrap_or(0);
+    let entry_section = facts.as_ref().and_then(|item| {
+        item.sections.iter().find(|section| {
+            let span = section.virtual_size.max(section.raw_size).max(1);
+            entry_rva >= section.address && entry_rva < section.address + span
+        })
+    });
+    let entry_writable_exec = entry_section
+        .map(|section| {
+            section.characteristics & (SCN_MEM_EXECUTE | SCN_MEM_WRITE)
+                == (SCN_MEM_EXECUTE | SCN_MEM_WRITE)
+        })
+        .unwrap_or(false);
+    let imports = facts.as_ref().map(|item| item.import_rva != 0);
+    let overlay = if facts.is_some() && last_end > 0 {
+        size.saturating_sub(last_end)
+    } else {
+        0
+    };
+    let file_entropy = entropy(blob);
+
+    let strong = usize::from(!writable_exec.is_empty())
+        + usize::from(entry_writable_exec)
+        + usize::from(imports == Some(false))
+        + usize::from(!virtual_gap.is_empty());
+    let weak = usize::from(overlay > 0) + usize::from(file_entropy >= ENTROPY_PACKED);
+
+    let packed = match top {
+        Some(Strength::Certain) | Some(Strength::High) => true,
+        Some(Strength::Low) => strong + weak > 0,
+        None => strong >= 2 || (strong >= 1 && weak >= 2),
+    };
+    let confidence = match top {
+        Some(strength) => strength.as_str(),
+        None if packed => "low",
+        None => "none",
+    };
+    let names: Vec<&str> = packers
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect();
+    let joined = names.join(" / ");
+    let verdict = match top {
+        Some(Strength::Certain) => format!("确认被 {joined} 加壳"),
+        Some(Strength::High) => format!("高度疑似 {joined}"),
+        Some(Strength::Low) => format!("疑似 {joined}，但只有弱特征，需要人工确认"),
+        None if packed => {
+            format!("没有匹配到已知壳，但有 {strong} 项结构异常，可能是私有壳或保护器")
+        }
+        None => "未发现加壳特征".to_string(),
+    };
+
+    let mut advice: Vec<String> = Vec::new();
+    if packed {
+        advice.push(
+            "先 cp 一份到 Scratch 工作区再动手：原始样本只读，任何 dump 或修补都写在新文件上。"
+                .to_string(),
+        );
+        for packer in &packers {
+            if let Some(hint) = packer["hint"].as_str() {
+                advice.push(hint.to_string());
+            }
+        }
+    } else {
+        advice.push(
+            "可以直接进 bin.importexport.list 与 bin.strings.extract：未加壳时这两步收益最高。"
+                .to_string(),
+        );
+    }
+    if file_entropy >= ENTROPY_PACKED && packers.is_empty() {
+        advice.push(format!(
+            "整体熵 {file_entropy:.2} 却没有已知壳特征：可能是加密数据段或私有壳，先确认这段数据是不是代码。"
+        ));
+    }
+    if imports == Some(false) {
+        advice.push(
+            "导入表为空：正常程序至少要导入几个系统 DLL，这几乎一定是壳或自举代码。".to_string(),
+        );
+    }
+
+    let mut payload = json!({
+        "format": identify(blob, size)["format"],
+        "packed": packed,
+        "confidence": confidence,
+        "verdict": verdict,
+        "packers": packers,
+        "signals": {
+            "fileEntropy": (file_entropy * 100.0).round() / 100.0,
+            "entropyThreshold": ENTROPY_PACKED,
+            "sections": rows,
+            "entrySection": entry_section.map(|section| section.name.clone()),
+            "entryInWritableExecutable": entry_writable_exec,
+            "writableExecutableSections": writable_exec,
+            "virtualSizeOutweighsRaw": virtual_gap,
+            "importTable": imports,
+            "overlayBytes": overlay,
+            "strongSignals": strong,
+            "weakSignals": weak,
+        },
+        "advice": advice,
+    });
+    if string_only {
+        payload["note"] = json!(
+            "有壳名只靠特征串命中（偏移见 evidence）。编译器内嵌的字符串、其他工具留下的标记都会命中，定案前请按偏移人工确认。"
+        );
+    }
+    payload
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,5 +1700,321 @@ mod tests {
             "{info}"
         );
         assert!(info["bits"].as_u64().is_some(), "{info}");
+    }
+
+    // ------------------------------------------------------------ 壳识别
+
+    struct Spec {
+        name: &'static str,
+        address: u32,
+        virtual_size: u32,
+        raw_size: u32,
+        raw_offset: u32,
+        characteristics: u32,
+    }
+
+    /// 造一个 `pe_facts` 能解析的 PE32。
+    /// 节表固定落在 0x178（SizeOfOptionalHeader = 0xE0），和真实布局一致。
+    fn build_pe(sections: &[Spec], entry: u32, import_rva: u32, total: usize) -> Vec<u8> {
+        let mut bytes = vec![0u8; total.max(0x400)];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        bytes[0x84..0x86].copy_from_slice(&0x014cu16.to_le_bytes());
+        bytes[0x86..0x88].copy_from_slice(&(sections.len() as u16).to_le_bytes());
+        bytes[0x94..0x96].copy_from_slice(&0xe0u16.to_le_bytes());
+        bytes[0x98..0x9a].copy_from_slice(&0x010bu16.to_le_bytes());
+        bytes[0xa8..0xac].copy_from_slice(&entry.to_le_bytes());
+        bytes[0x100..0x104].copy_from_slice(&import_rva.to_le_bytes());
+        for (index, spec) in sections.iter().enumerate() {
+            let at = 0x178 + index * 40;
+            bytes[at..at + spec.name.len()].copy_from_slice(spec.name.as_bytes());
+            bytes[at + 8..at + 12].copy_from_slice(&spec.virtual_size.to_le_bytes());
+            bytes[at + 12..at + 16].copy_from_slice(&spec.address.to_le_bytes());
+            bytes[at + 16..at + 20].copy_from_slice(&spec.raw_size.to_le_bytes());
+            bytes[at + 20..at + 24].copy_from_slice(&spec.raw_offset.to_le_bytes());
+            bytes[at + 36..at + 40].copy_from_slice(&spec.characteristics.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn pack_confirms_upx_by_section_names() {
+        let bytes = build_pe(
+            &[
+                Spec {
+                    name: "UPX0",
+                    address: 0x1000,
+                    virtual_size: 0x1_0000,
+                    raw_size: 0,
+                    raw_offset: 0,
+                    characteristics: 0xe000_00c0,
+                },
+                Spec {
+                    name: "UPX1",
+                    address: 0x1_1000,
+                    virtual_size: 0x2000,
+                    raw_size: 0x800,
+                    raw_offset: 0x400,
+                    characteristics: 0xe000_00c0,
+                },
+            ],
+            0x1_1100,
+            0,
+            0x1000,
+        );
+        let payload = detect_pack(&bytes, 0x1000);
+        assert_eq!(payload["packed"], json!(true), "{payload}");
+        assert_eq!(payload["confidence"], "certain");
+        assert_eq!(payload["packers"][0]["name"], "UPX");
+        assert_eq!(payload["signals"]["importTable"], json!(false));
+        assert_eq!(payload["signals"]["entrySection"], "UPX1");
+        assert_eq!(payload["signals"]["entryInWritableExecutable"], json!(true));
+        assert_eq!(
+            payload["signals"]["virtualSizeOutweighsRaw"],
+            json!(["UPX0"])
+        );
+        let evidence = payload["packers"][0]["evidence"].as_array().unwrap();
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item.as_str().unwrap().contains("UPX0")),
+            "{payload}"
+        );
+        // 脱壳方向要落到具体动作上，不能只说"建议脱壳"。
+        assert!(payload["advice"][1].as_str().unwrap().contains("upx -d"));
+    }
+
+    #[test]
+    fn pack_clears_a_normal_pe() {
+        let bytes = build_pe(
+            &[Spec {
+                name: ".text",
+                address: 0x1000,
+                virtual_size: 0x1000,
+                raw_size: 0x800,
+                raw_offset: 0x400,
+                characteristics: 0x6000_0020,
+            }],
+            0x1000,
+            0x2000,
+            0x1000,
+        );
+        let payload = detect_pack(&bytes, 0x1000);
+        assert_eq!(payload["packed"], json!(false), "{payload}");
+        assert_eq!(payload["confidence"], "none");
+        assert_eq!(payload["packers"], json!([]));
+        assert_eq!(payload["verdict"], "未发现加壳特征");
+    }
+
+    #[test]
+    fn pack_finds_stub_strings_without_section_names() {
+        let mut bytes = build_pe(
+            &[Spec {
+                name: ".rdata",
+                address: 0x1000,
+                virtual_size: 0x1000,
+                raw_size: 0x800,
+                raw_offset: 0x400,
+                characteristics: 0x4000_0040,
+            }],
+            0x1000,
+            0x2000,
+            0x1000,
+        );
+        bytes[0x600..0x60a].copy_from_slice(b"VMProtect\0");
+        let payload = detect_pack(&bytes, 0x1000);
+        assert_eq!(payload["packers"][0]["name"], "VMProtect", "{payload}");
+        // 只有特征串，没有专有节名：最高判到 high。
+        assert_eq!(payload["confidence"], "high");
+        assert!(payload["note"].as_str().unwrap().contains("人工确认"));
+        assert!(
+            payload["packers"][0]["evidence"][0]
+                .as_str()
+                .unwrap()
+                .contains("0x600"),
+            "{payload}"
+        );
+        // 命中落在哪个节要写清楚：`.rdata` 里的字符串和入口节里的字符串不是一回事。
+        assert!(
+            payload["packers"][0]["evidence"][0]
+                .as_str()
+                .unwrap()
+                .contains(".rdata"),
+            "{payload}"
+        );
+    }
+
+    /// 宽字符特征必须单独走一条路：ASCII 扫描看不见 `C\0o\0n\0f\0...`。
+    #[test]
+    fn pack_matches_wide_character_markers() {
+        let mut bytes = build_pe(
+            &[Spec {
+                name: ".text",
+                address: 0x1000,
+                virtual_size: 0x1000,
+                raw_size: 0x800,
+                raw_offset: 0x400,
+                characteristics: 0x6000_0020,
+            }],
+            0x1000,
+            0x2000,
+            0x1000,
+        );
+        for (index, byte) in b"ConfuserEx".iter().enumerate() {
+            bytes[0x500 + index * 2] = *byte;
+        }
+        let payload = detect_pack(&bytes, 0x1000);
+        assert_eq!(payload["packers"][0]["name"], "ConfuserEx", "{payload}");
+        assert!(
+            payload["packers"][0]["evidence"][0]
+                .as_str()
+                .unwrap()
+                .contains("宽字符"),
+            "{payload}"
+        );
+    }
+
+    #[test]
+    fn pack_flags_structure_without_a_known_name() {
+        // 可写可执行 + 导入表为空 + 内容接近随机，但节名被抹掉。
+        let mut bytes = build_pe(
+            &[Spec {
+                name: "seg0",
+                address: 0x1000,
+                virtual_size: 0x1000,
+                raw_size: 0x800,
+                raw_offset: 0x400,
+                characteristics: 0xe000_0020,
+            }],
+            0x1000,
+            0,
+            0x1000,
+        );
+        let mut state = 0x1234_5678u32;
+        for chunk in bytes[0x400..0xc00].iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *chunk = (state >> 24) as u8;
+        }
+        let payload = detect_pack(&bytes, 0x1000);
+        assert_eq!(payload["packers"], json!([]));
+        assert_eq!(payload["packed"], json!(true), "{payload}");
+        assert_eq!(payload["confidence"], "low");
+        let section_entropy = payload["signals"]["sections"][0]["entropy"].as_f64().unwrap();
+        assert!(section_entropy > 7.0, "节内熵应接近 8：{payload}");
+        assert!(payload["verdict"].as_str().unwrap().contains("结构异常"));
+        assert_eq!(
+            payload["signals"]["writableExecutableSections"],
+            json!(["seg0"])
+        );
+    }
+
+    /// 共用节名单独出现时只能算 low：`.adata` 同时被 ASProtect 与 ASPack 使用。
+    #[test]
+    fn shared_section_name_alone_is_only_a_weak_hit() {
+        let bytes = build_pe(
+            &[Spec {
+                name: ".adata",
+                address: 0x1000,
+                virtual_size: 0x1000,
+                raw_size: 0x800,
+                raw_offset: 0x400,
+                characteristics: 0x4000_0040,
+            }],
+            0x1000,
+            0x2000,
+            // 文件正好收在节尾，不留 overlay：这条用例只想看弱特征会不会被结构信号抬高。
+            0xc00,
+        );
+        let payload = detect_pack(&bytes, 0xc00);
+        assert_eq!(payload["packers"][0]["name"], "ASProtect", "{payload}");
+        assert_eq!(payload["packers"][0]["confidence"], "low");
+        // low 不足以单独定案：结构信号全干净，就不算加壳。
+        assert_eq!(payload["packed"], json!(false));
+        assert!(payload["verdict"].as_str().unwrap().contains("需要人工确认"));
+    }
+
+    /// 真文件回归：系统自带的 /bin/ls 不该被判成加壳。
+    /// 默认忽略（不是每个环境都有这个路径），手动跑：
+    /// `cargo test --lib -- --ignored pack_clears_a_real_executable`.
+    #[test]
+    #[ignore]
+    fn pack_clears_a_real_executable() {
+        let path = Path::new("/bin/ls");
+        if !path.exists() {
+            return;
+        }
+        let size = std::fs::metadata(path).unwrap().len();
+        let bytes = read_head(path, PACK_SCAN).unwrap();
+        let payload = detect_pack(&bytes, size);
+        assert_eq!(payload["packed"], json!(false), "{payload}");
+        assert_eq!(payload["confidence"], "none", "{payload}");
+    }
+
+    #[test]
+    fn pack_reports_trailing_overlay() {
+        let bytes = build_pe(
+            &[Spec {
+                name: ".text",
+                address: 0x1000,
+                virtual_size: 0x1000,
+                raw_size: 0x200,
+                raw_offset: 0x400,
+                characteristics: 0x6000_0020,
+            }],
+            0x1000,
+            0x2000,
+            0x1000,
+        );
+        let payload = detect_pack(&bytes, 0x1000);
+        // 最后一个节收在 0x600，后面 0xA00 字节是附加数据。
+        assert_eq!(payload["signals"]["overlayBytes"], json!(0xa00), "{payload}");
+    }
+
+    #[test]
+    fn entropy_reaches_both_ends() {
+        assert_eq!(entropy(&[]), 0.0);
+        assert_eq!(entropy(&[7u8; 4096]), 0.0);
+        let spread: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        assert!((entropy(&spread) - 8.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn pack_tool_is_registered_read_only() {
+        let tool = tools()
+            .into_iter()
+            .find(|item| item.name == "bin.pack.detect")
+            .expect("应注册 bin.pack.detect");
+        assert_eq!(tool.meta.risk, Risk::Read);
+        assert_eq!(tool.permission, Permission::ReadOnly);
+        assert_eq!(tool.meta.network, Network::None);
+        assert_eq!(tool.meta.scope, ToolScope::Any);
+        assert_eq!(tool.meta.tags, vec!["bin:static"]);
+    }
+
+    #[test]
+    fn pack_tool_reads_from_disk() {
+        let bytes = build_pe(
+            &[Spec {
+                name: "UPX0",
+                address: 0x1000,
+                virtual_size: 0x1_0000,
+                raw_size: 0,
+                raw_offset: 0,
+                characteristics: 0xe000_00c0,
+            }],
+            0x1000,
+            0,
+            0x1000,
+        );
+        let path = temp_file("pack", &bytes);
+        let directory = path.parent().unwrap().display().to_string();
+        let result = run_pack(
+            &context(&directory),
+            &json!({ "path": "sample.bin", "deep": true }),
+        );
+        assert!(result.outcome.error.is_none(), "{}", result.outcome.text);
+        assert!(result.outcome.text.contains("\"packed\": true"));
+        assert!(result.outcome.text.contains("\"scannedBytes\""));
     }
 }

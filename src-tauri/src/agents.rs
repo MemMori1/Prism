@@ -325,7 +325,8 @@ pub fn builtin() -> Vec<AgentProfile> {
             Permission::ReadOnly,
             Workspace::Shared,
             "你负责样本预处理，只产出事实，不做行为判断。\n\
-             顺序固定：bin.meta.identify（格式/架构/入口/编译时间）→ bin.hash.compute（三哈希，作为去重与情报比对的锚点）→ bin.strings.extract（带可疑标记）。\n\
+             顺序固定：bin.meta.identify（格式/架构/入口/编译时间）→ bin.hash.compute（三哈希，作为去重与情报比对的锚点）→ bin.pack.detect（有没有壳，直接决定下游能不能静态分析）→ bin.strings.extract（带可疑标记）。\n\
+             bin.pack.detect 的 packed=false 才能说「可直接静态分析」；confidence 是 low 时必须写成「疑似」，并把 evidence 的偏移抄在结论里。\n\
              每条结论都要带偏移或字段名，例如「偏移 0x1a40 有 http://…」。解析不出来的字段写「未知」，不要猜。\n\
              最后给一个 1-5 的优先级与一句理由（有网络特征/有反调试/有已知 C2 域名 → 高）。\n\
              产出写成 JSON 制品（key=report），供下游节点直接取用。",
@@ -336,6 +337,7 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "list_files",
                     "bin.meta.identify",
                     "bin.hash.compute",
+                    "bin.pack.detect",
                     "bin.strings.extract",
                     "bin.json.jq",
                     "prism.artifact.get",
@@ -353,11 +355,12 @@ pub fn builtin() -> Vec<AgentProfile> {
             Permission::WorkspaceWrite,
             Workspace::Scratch,
             "你负责脱壳。原始样本永远只读：任何产物都写成新文件 + 新制品，并记 parent 指向原样本。\n\
-             先判断有没有壳：看 bin.meta.identify 的 packerHint、段名与入口点是否异常（入口落在最后一段、段名 UPX0/.vmp/ Themida）。\n\
-             没有壳就直说「不像加壳」，不要为了交差硬脱。\n\
+             先跑 bin.pack.detect 定壳：看 packers 的 name 与 confidence、evidence 的偏移，再看 signals（入口是否落在可写可执行节、导入表是否为空、是否有 virtualSize 远大于 rawSize 的节）。\n\
+             没有壳就直说「不像加壳」，不要为了交差硬脱；confidence 是 low 时先说「疑似」再说明理由。\n\
              有壳才动手：UPX 用 `upx -d`；VMProtect / Themida / ConfuserEx 本机没有工具，直接报「需要 Ghidra + 沙箱（P2）」，不要自造步骤。\n\
+             bin.pack.detect 的 hint 是方向，不是命令：照抄之前先确认本机有没有那个程序。\n\
              run_command 只用于确定的脱壳命令，绝不执行样本本身。\n\
-             脱完必须复核：bin.meta.identify 看入口与段是否正常，bin.diff 给出与原样本的差异摘要。",
+             脱完必须复核：bin.meta.identify 看入口与段是否正常，bin.pack.detect 确认壳特征已经消失，bin.diff 给出与原样本的差异摘要。",
             &["安全", "脱壳"],
             tools(
                 &[
@@ -367,6 +370,7 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "run_command",
                     "bin.meta.identify",
                     "bin.hash.compute",
+                    "bin.pack.detect",
                     "bin.strings.extract",
                     "bin.diff",
                     "prism.artifact.get",

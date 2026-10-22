@@ -56,6 +56,13 @@ DeepSeek Harness 走官方 ACP（`dsh --profile acp`，stdio JSON-RPC）：Prism
 | `run_command` | 跑命令，默认 120s 超时；`background: true` 转后台任务 |
 | `task_status` | 查本会话的后台任务 / 看尾部输出 / 停止 |
 | `task` | 子代理：隔离上下文跑子任务（`explore` 只读 / `general` 全开），只带回报告 |
+| `bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract` / `bin.pack.detect` | 样本静态预处理：格式与架构、三哈希、ASCII/UTF-16 字符串与可疑标记、加壳识别（38 条规则 + 节表结构信号 + 熵） |
+| `bin.json.jq` / `bin.xref.search` / `bin.importexport.list` / `bin.crypto.scan` / `bin.diff` | 静态分析：JSON 路径取值、交叉引用、导入导出表与高危 API、密码常量、两样本差异 |
+| `prism.artifact.put` / `prism.artifact.get` | 制品读写；只在 DAG 节点里可见，同 DAG 可读、跨 DAG 拒绝 |
+| `prism.dag.*`（7 个） | 改图：读计划、增删节点与依赖、校验；只在 DAG 节点里可见，校验不过整体回滚 |
+
+`bin.*` 全部是纯 Rust 实现、只读、不出网、不依赖外部程序——装好就能用。需要 Ghidra / 沙箱的工具还没接，
+调用时会明确报「未接入」，不会返回空结果假装成功。
 
 权限三档：**只读**（写与命令直接拒）/ **每次询问**（写文件、跑命令弹审批卡）/ **完全访问**。档位按会话记，闸门在 Rust 侧执行。
 

@@ -585,24 +585,26 @@ mod tests {
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str())
             .collect();
-        // 只读工具自动进探索档：样本识别 / 分析这批 bin.* 全是只读，所以一起出现。
-        // 新增分析工具时这里要跟着加——不是回归，是这条规则的可见账本。
-        assert_eq!(
-            names,
-            vec![
-                "read_file",
-                "list_files",
-                "grep",
-                "bin.meta.identify",
-                "bin.hash.compute",
-                "bin.strings.extract",
-                "bin.json.jq",
-                "bin.xref.search",
-                "bin.importexport.list",
-                "bin.crypto.scan",
-                "bin.diff",
-            ]
-        );
+        // 不对账具体名字：规则是"只读工具才进探索档"，那就直接验规则。
+        // 这样新增只读工具不会假报失败，而写工具一旦漏进来一定会被抓到。
+        let all = tools::builtin_tools();
+        for name in &names {
+            let def = all
+                .iter()
+                .find(|item| item.name == *name)
+                .unwrap_or_else(|| panic!("探索档出现了未注册的工具：{name}"));
+            assert_eq!(
+                def.permission,
+                tools::Permission::ReadOnly,
+                "探索档只该有只读工具，{name} 不是"
+            );
+        }
+        for expected in ["read_file", "grep", "bin.meta.identify", "bin.pack.detect"] {
+            assert!(names.contains(&expected), "探索档缺少 {expected}");
+        }
+        for forbidden in ["write_file", "edit_file", "run_command"] {
+            assert!(!names.contains(&forbidden), "探索档不该有 {forbidden}");
+        }
 
         let general = specs_for_with(&tools::EnabledTools::all(), AgentType::General);
         let names: Vec<&str> = general

@@ -32,12 +32,13 @@ Prism 现在是一套能跑起来的**软工编排底座**（Planner 拆图 → 
 | 编排规划工种 | `dag-planner` preset：在 DAG 节点里调上面七个工具改图 | ✅ |
 | 前端 | `DagPane.vue` 节点卡片展示制品（key / kind / 大小 / sha256 / 引用 id / 查看全文 / 派生血缘）；设置页工具清单带标签与风险色 | ✅ |
 
-验收：`cargo test --lib` 391 passed（含"200 KB 节点输出 → 下游 prompt < 3 KB 且含 `art-`、
-取回长度一致"的端到端用例、PE 导入表遍历、AES 常量命中、单字节 XOR 破译、改图回滚）；
+验收：`cargo test --lib` 401 passed（含"200 KB 节点输出 → 下游 prompt < 3 KB 且含 `art-`、
+取回长度一致"的端到端用例、PE 导入表遍历、AES 常量命中、单字节 XOR 破译、改图回滚、
+UPX 节名定案与 `.adata` 弱特征不定案）；
 `vue-tsc --noEmit` 0 错误；`vitest` 376 passed。
 
 **仍未做**：P2 Ghidra（反编译、函数边界、xref 到函数级）、P3 真实沙箱、
-渗透线 `recon.*` / `exp.*`、`bin.pack.detect`（壳类型规则库）、`bin.crypto.xor_brute` 的多字节版本。
+渗透线 `recon.*` / `exp.*`、`bin.crypto.xor_brute` 的多字节版本。
 
 
 ## 1. 结论先行：差在哪
@@ -45,7 +46,7 @@ Prism 现在是一套能跑起来的**软工编排底座**（Planner 拆图 → 
 | 维度 | 分析时的代码事实 | 目标（清单要求） | 差距（回填后） |
 |---|---|---|---|
 | Agent 工种 | 8 个软工 preset：探索 / 通用 / 前端 / 后端 / 架构 / 文档 / 验证 / DeepSeek 调研 | 样本预处理 / 脱壳 / 静态分析 / 密码 / 动态沙箱 / 控制流 / 辅助 | **已补**：7 个工种全部落地，各自绑定方法论、工具白名单与风险档 |
-| 工具集 | 7 个裸名工具：`read_file` `list_files` `grep` `write_file` `edit_file` `run_command` `task_status` | 60+ 个 `bin.*` / `recon.*` / `exp.*`，带权限 tag | **≈ 25%**：命名空间与 tag 已建，落地 8 个 `bin.*`（3 个样本 + 5 个分析）；渗透线 `recon.*` / `exp.*` 未动 |
+| 工具集 | 7 个裸名工具：`read_file` `list_files` `grep` `write_file` `edit_file` `run_command` `task_status` | 60+ 个 `bin.*` / `recon.*` / `exp.*`，带权限 tag | **≈ 28%**：命名空间与 tag 已建，落地 9 个 `bin.*`（4 个样本 + 5 个分析）；渗透线 `recon.*` / `exp.*` 未动 |
 | 产物传递 | 节点输出 `NodeOutput.text`，下游用 `{{nodes.x.output}}` **整段内联** | artifact 引用 + `input_artifacts` / `output_artifact_key` + 血缘 | **已补**：8 KB 截断 + `{{artifacts.<别名>.*}}` + 显式/隐式别名 |
 | 制品仓库 | `artifact.rs` 只是**交付物预览**（读本地 html/svg/图片给前端看） | `artifact.put/get`，同 DAG 内可读、跨 DAG 隔离 | **已补**：`dag/artifact.rs` + `prism.artifact.*`，配额与隔离齐 |
 | Planner 形态 | UI 弹窗 + `dag_plan` IPC，调一次模型出一张图 | Planner 是可调 `prism.dag.*` 的 Agent，能动态改图 | **已补**：七个 `prism.dag.*` + `dag-planner` 工种；弹窗那条路保留不变 |
@@ -232,7 +233,7 @@ pub struct ArtifactRef {
 | 样本预处理 | `bin.meta.identify` | PE/ELF/Mach-O/DEX/APK 识别、架构、位数、段 | 只读 / 低 | 元信息 JSON | ✅ 已实现 |
 | 样本预处理 | `bin.hash.compute` | md5 / sha1 / sha256 | 只读 / 低 | 哈希清单 | ✅ 已实现 |
 | 样本预处理 | `bin.strings.extract` | ASCII/UTF-16 字符串 + 可疑标记（IP/URL/路径/cmd） | 只读 / 低 | strings JSON | ✅ 已实现 |
-| 样本预处理 | `bin.pack.detect` | UPX / VMProtect / Themida / ConfuserEx | 只读 / 低 | 壳状态 + 置信度 | ⬜ 纯规则匹配，最容易补 |
+| 样本预处理 | `bin.pack.detect` | UPX / VMProtect / Themida / ConfuserEx / 加固厂商等 38 条规则 + 节表结构信号 | 只读 / 低 | 壳名 + 置信度 + 证据偏移 | ✅ 已实现（`forensics.rs::detect_pack`） |
 | 脱壳 | `bin.unpack.upx` | UPX 自动解压 | 写临时区 / 中 | 新二进制 + parent | ⬜ 需本机装 `upx` |
 | 脱壳 | `bin.unpack.dumper` | 沙箱内 dump 脱壳 | `bin:dyn-sandbox` / 高 | 新二进制 + parent | ⬜ 需沙箱 |
 | 脱壳 | `bin.dotnet.deobfuscate` | .NET 反混淆导出 IL | 写 / 中 | IL | ⬜ 需 dnlib / ILSpy |
@@ -258,11 +259,11 @@ pub struct ArtifactRef {
 | 通用支撑 | `bin.yara.rule_gen` | 自动生成 yara 规则 | 写 / 低 | 规则集 | ⬜ P3 |
 | 通用支撑 | `bin.report.rev` | 逆向报告渲染 | 只读 / 低 | 报告 artifact | ⬜ P3（现由 `sec-assist` 工种代劳） |
 
-**这张表 28 行，已实现 10 行**（其中 2 行合并成一个工具）。另外本轮还落地了表里没有的
+**这张表 28 行，已实现 11 行**（其中 2 行合并成一个工具）。另外还落地了表里没有的
 **7 个 Planner 工具**（`prism.dag.*`，见 `engines/native/dag_tools.rs`），
-所以本机可用的领域工具是 **8 个 `bin.*` + 2 个 `prism.artifact.*` + 7 个 `prism.dag.*` = 17 个**。
+所以本机可用的领域工具是 **9 个 `bin.*` + 2 个 `prism.artifact.*` + 7 个 `prism.dag.*` = 18 个**。
 
-剩下 18 行不是"没写"，是**卡在环境依赖**上，分三类：
+剩下 17 行不是"没写"，是**卡在环境依赖**上，分三类：
 
 | 依赖 | 涉及条目 | 说明 |
 |---|---|---|
@@ -290,12 +291,17 @@ pub struct ArtifactRef {
 **验收**：三节点图，研究节点产 200 KB；下游 prompt 中该段 ≤ 2 KB 且带 `art-xxx`；
 `artifact.get` 取回全文长度一致；老计划（无新字段）仍能跑通、单测全绿。
 
-### P0.5 三个真能跑的本机工具
+### P0.5 四个真能跑的本机工具
 
 `bin.meta.identify`（手写 PE/ELF/Mach-O 头解析，不引重型库）、
 `bin.hash.compute`（新增 `sha2` / `sha1` / `md-5`）、
-`bin.strings.extract`（ASCII + UTF-16LE，限条数、可疑标记）。
-三者都走 `ToolDef` 新标签，产物写 artifact，不进上下文。
+`bin.strings.extract`（ASCII + UTF-16LE，限条数、可疑标记）、
+`bin.pack.detect`（38 条壳/保护器/打包器规则 + 节表结构信号 + 熵）。
+四者都走 `ToolDef` 新标签，产物写 artifact，不进上下文。
+
+`bin.pack.detect` 的置信度只有三档，且**纯特征串最高只到 `high`**：
+节名在 PE 头里是结构事实（`certain`），字符串可能只是编译器内嵌的（`high` + `note` 提示按偏移人工确认）。
+`.adata`、`.text1` 这类多壳共用节名单独出现只算 `low`，不单独定案。
 
 **验收**：拿一个真实二进制（如 app 的 Mach-O）跑三个工具，
 返回的 arch / bits / 段数 / 三个哈希与 `file`、`shasum -a 256` 一致；strings 命中 URL 与路径样本。
