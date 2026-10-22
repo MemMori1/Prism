@@ -6,7 +6,7 @@ import { relativeTime } from '../format'
 import { commandLine, engineLabel, groupAssets, groupMcp, kindLabel, scopeLabel } from '../workshop'
 import { assetKindIcon } from '../assetIcons'
 import type { AssetGroup } from '../workshop'
-import type { AssetFile, AssetItem, McpProbeResult, McpServer } from '../types'
+import type { AssetFile, AssetItem, McpProbeResult, McpServer, PluginInfo } from '../types'
 
 const emit = defineEmits<{
   (e: 'error', message: string): void
@@ -22,7 +22,7 @@ const fileLoading = ref(false)
 const fileError = ref('')
 const filterText = ref('')
 
-type PanelMode = 'assets' | 'mcp'
+type PanelMode = 'assets' | 'mcp' | 'plugins'
 const mode = ref<PanelMode>('assets')
 
 // ---- MCP 模式状态 ----
@@ -99,6 +99,90 @@ function report(cause: unknown): void {
   emit('error', cause instanceof Error ? cause.message : String(cause))
 }
 
+// ---- 插件模式 ----
+//
+// 清单来自内核：声明顺序、依赖、这次装没装。开关写 `~/.prism/plugins.json`，
+// **下次启动生效**——装配只在启动时跑一次，这里不假装能热切。
+
+const plugins = ref<PluginInfo[]>([])
+const pluginsLoading = ref(false)
+const pluginsLoaded = ref(false)
+const pluginGroupKey = ref('core')
+const pluginSelected = ref<PluginInfo | null>(null)
+const pluginNotice = ref('')
+
+const PLUGIN_GROUPS: { key: string; label: string; note: string }[] = [
+  { key: 'core', label: '内核与工具', note: '装配器、托管状态、外部工具' },
+  { key: 'engine', label: '引擎', note: '运行轴：拉起子进程或自己跑 turn' },
+  { key: 'dag', label: 'DAG 与 Agent', note: '编排、规划、执行器、Agent 注册表' },
+]
+
+function pluginGroupOf(id: string): string {
+  if (id.startsWith('engine.')) return 'engine'
+  if (id.startsWith('dag.')) return 'dag'
+  return 'core'
+}
+
+const pluginGroups = computed(() =>
+  PLUGIN_GROUPS.map(group => ({
+    ...group,
+    items: plugins.value.filter(item => pluginGroupOf(item.id) === group.key),
+  })).filter(group => group.items.length > 0),
+)
+
+const pluginsInGroup = computed(
+  () => pluginGroups.value.find(group => group.key === pluginGroupKey.value)?.items ?? [],
+)
+
+const activePluginCount = computed(() => plugins.value.filter(item => item.state === 'active').length)
+
+const visiblePlugins = computed(() => {
+  const term = filterText.value.trim().toLowerCase()
+  const list = pluginsInGroup.value
+  return term ? list.filter(item => item.id.toLowerCase().includes(term)) : list
+})
+
+function stateLabel(state: PluginInfo['state']): string {
+  if (state === 'active') return '已启用'
+  if (state === 'disabled') return '已关闭'
+  return '依赖关闭'
+}
+
+async function loadPlugins(force = false): Promise<void> {
+  if (pluginsLoading.value || (pluginsLoaded.value && !force)) return
+  pluginsLoading.value = true
+  try {
+    plugins.value = await api.pluginsList()
+    pluginsLoaded.value = true
+    const first = pluginGroups.value[0]
+    pluginGroupKey.value = first?.key ?? 'core'
+    pluginSelected.value = first?.items[0] ?? null
+  } catch (cause) {
+    report(cause)
+  } finally {
+    pluginsLoading.value = false
+  }
+}
+
+function selectPluginGroup(key: string): void {
+  pluginGroupKey.value = key
+  pluginSelected.value = pluginGroups.value.find(group => group.key === key)?.items[0] ?? null
+  pluginNotice.value = ''
+}
+
+async function togglePlugin(plugin: PluginInfo): Promise<void> {
+  const next = plugin.state !== 'active'
+  try {
+    await api.pluginSetEnabled(plugin.id, next)
+    pluginNotice.value = next ? '已启用，下次启动生效' : '已关闭，下次启动生效'
+    await loadPlugins(true)
+    const updated = plugins.value.find(item => item.id === plugin.id)
+    pluginSelected.value = updated ?? plugin
+  } catch (cause) {
+    report(cause)
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true
   try {
@@ -165,14 +249,19 @@ function switchMode(next: PanelMode): void {
   }
   mode.value = next
   filterText.value = ''
+  pluginNotice.value = ''
   if (next === 'mcp') {
     void loadMcp()
+  } else if (next === 'plugins') {
+    void loadPlugins()
   }
 }
 
 function refresh(): void {
   if (mode.value === 'assets') {
     void load()
+  } else if (mode.value === 'plugins') {
+    void loadPlugins(true)
   } else {
     void loadMcp(true)
   }
@@ -289,6 +378,14 @@ onMounted(load)
           >
             MCP
           </button>
+          <button
+            class="mode-btn"
+            :class="{ active: mode === 'plugins' }"
+            title="插件：内核装配清单与开关（关停下次启动生效）"
+            @click="switchMode('plugins')"
+          >
+            插件
+          </button>
         </div>
         <button
           class="ghost-btn"
@@ -326,7 +423,7 @@ onMounted(load)
             </button>
           </section>
         </template>
-        <template v-else>
+        <template v-else-if="mode === 'mcp'">
           <p v-if="mcpLoading && !mcpLoaded" class="hint">正在读取 MCP 配置…</p>
           <p v-else-if="!mcpGroups.length" class="hint">暂无 MCP 服务</p>
           <section v-for="group in mcpGroups" :key="group.engine" class="nav-section">
@@ -340,6 +437,26 @@ onMounted(load)
               <span class="count">{{ group.items.length }}</span>
             </button>
           </section>
+        </template>
+        <template v-else>
+          <p v-if="pluginsLoading && !pluginsLoaded" class="hint">正在读取插件清单…</p>
+          <p v-else-if="!pluginGroups.length" class="hint">内核没有报告任何插件</p>
+          <template v-else>
+            <p class="plugin-summary">
+              本次装配 <b>{{ activePluginCount }}</b> / {{ plugins.length }} 个插件
+            </p>
+            <section v-for="group in pluginGroups" :key="group.key" class="nav-section">
+              <div class="nav-engine">{{ group.label }}</div>
+              <button
+                class="nav-item"
+                :class="{ active: group.key === pluginGroupKey }"
+                @click="selectPluginGroup(group.key)"
+              >
+                <span>{{ group.note }}</span>
+                <span class="count">{{ group.items.length }}</span>
+              </button>
+            </section>
+          </template>
         </template>
       </div>
     </aside>
@@ -381,7 +498,7 @@ onMounted(load)
             <span v-if="entry.description" class="asset-desc">{{ entry.description }}</span>
           </button>
         </template>
-        <template v-else>
+        <template v-else-if="mode === 'mcp'">
           <p v-if="mcpLoading && !mcpLoaded" class="hint">正在读取 MCP 配置…</p>
           <p v-else-if="!mcpGroups.length" class="hint">
             没有发现 MCP 服务。定义位置：OpenCode <code>opencode.jsonc</code> 的
@@ -409,6 +526,29 @@ onMounted(load)
               </span>
             </button>
           </template>
+        </template>
+        <template v-else>
+          <p v-if="pluginsLoading && !pluginsLoaded" class="hint">正在读取插件清单…</p>
+          <p v-else-if="!visiblePlugins.length" class="hint">
+            {{ filterText ? '没有匹配项' : '这个分组还没有插件' }}
+          </p>
+          <button
+            v-for="plugin in visiblePlugins"
+            :key="plugin.id"
+            class="asset-row"
+            :class="{ active: pluginSelected?.id === plugin.id }"
+            @click="pluginSelected = plugin; pluginNotice = ''"
+          >
+            <span class="asset-name">
+              <span class="plugin-dot" :class="plugin.state" />
+              {{ plugin.id }}
+            </span>
+            <span class="asset-meta">
+              <span class="scope">{{ stateLabel(plugin.state) }}</span>
+              <span v-if="plugin.requires.length">{{ plugin.requires.length }} 依赖</span>
+            </span>
+            <span v-if="plugin.reason" class="asset-desc">{{ plugin.reason }}</span>
+          </button>
         </template>
       </div>
     </aside>
@@ -518,8 +658,58 @@ onMounted(load)
         </div>
       </template>
 
+      <template v-else-if="mode === 'plugins' && pluginSelected">
+        <div class="pane-head detail-head">
+          <div class="detail-titles">
+            <span class="detail-name mono">{{ pluginSelected.id }}</span>
+            <span class="detail-path">
+              {{ PLUGIN_GROUPS.find(group => group.key === pluginGroupOf(pluginSelected!.id))?.label }}
+            </span>
+          </div>
+          <button
+            class="ghost-btn"
+            :title="pluginSelected.state === 'active' ? '关掉它：下次启动生效' : '启用它：下次启动生效'"
+            @click="togglePlugin(pluginSelected)"
+          >
+            {{ pluginSelected.state === 'active' ? '关闭插件' : '启用插件' }}
+          </button>
+        </div>
+        <div class="detail-chips">
+          <span class="chip" :class="`state-${pluginSelected.state}`">
+            {{ stateLabel(pluginSelected.state) }}
+          </span>
+          <span v-if="pluginSelected.requires.length" class="chip">
+            requires {{ pluginSelected.requires.join(', ') }}
+          </span>
+          <span v-else class="chip">无依赖</span>
+        </div>
+        <div class="pane-body detail-body">
+          <p v-if="pluginNotice" class="plugin-notice">{{ pluginNotice }}</p>
+          <div class="mcp-field">
+            <span class="field-label">状态</span>
+            <span :class="pluginSelected.state === 'active' ? 'field-ok' : 'field-warn'">
+              {{ pluginSelected.state === 'active' ? '已装配：启动时成功建立能力' : (pluginSelected.reason ?? '未装配') }}
+            </span>
+          </div>
+          <div v-if="pluginSelected.requires.length" class="mcp-field">
+            <span class="field-label">依赖</span>
+            <span class="field-dim">
+              {{ pluginSelected.requires.join('、') }}
+              —— 依赖被关掉时，这个插件会跟着级联关闭，而不是让应用起不来
+            </span>
+          </div>
+          <div class="mcp-field">
+            <span class="field-label">生效时机</span>
+            <span class="field-dim">
+              装配只在启动时跑一次（Tauri 的 manage 不能撤销），所以开关保存到
+              <code>~/.prism/plugins.json</code>，下次启动才生效。
+            </span>
+          </div>
+        </div>
+      </template>
+
       <p v-else class="hint">
-        {{ mode === 'assets' ? '右侧选择一项资产查看内容' : '左侧选择一项 MCP 服务' }}
+        {{ mode === 'assets' ? '右侧选择一项资产查看内容' : mode === 'mcp' ? '左侧选择一项 MCP 服务' : '左侧选一个插件' }}
       </p>
     </section>
   </div>

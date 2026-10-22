@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  AgentProfile,
   AnnotationStore,
   ArtifactData,
   AssetFile,
@@ -8,6 +9,11 @@ import type {
   ChangeReport,
   ContextStats,
   CreatedSession,
+  DagIssue,
+  DagPlan,
+  DagRun,
+  DagSummary,
+  DshPermissionView,
   EngineCatalog,
   EngineHealth,
   FileDiff,
@@ -23,6 +29,7 @@ import type {
   NativeModel,
   NativeProviderInput,
   PermissionRequest,
+  PluginInfo,
   ProjectItem,
   QuotaSummary,
   RoutineDefinition,
@@ -43,6 +50,10 @@ import type {
 export const api = {
   engineHealth: () => invoke<EngineHealth[]>('engine_health'),
   cliVersion: () => invoke<string | null>('cli_version'),
+  /** dsh 权限档位（进程级，改完会重启 dsh 进程）。 */
+  dshPermission: () => invoke<DshPermissionView>('dsh_permission'),
+  dshSetPermission: (mode: string | null) =>
+    invoke<DshPermissionView>('dsh_set_permission', { mode }),
   listProjects: () => invoke<ProjectItem[]>('list_projects'),
   listSessions: (projectId: string) =>
     invoke<SessionSummary[]>('list_sessions', { projectId }),
@@ -207,4 +218,43 @@ export const api = {
   taskList: () => invoke<BackgroundTask[]>('task_list'),
   taskStop: (id: string) => invoke<void>('task_stop', { id }),
   taskRemove: (id: string) => invoke<void>('task_remove', { id }),
+
+  // ---- Agent 注册表 ----
+  /** 内置 + 自定义（同 id 时自定义覆盖内置）。 */
+  agentsList: () => invoke<AgentProfile[]>('agents_list'),
+  agentSave: (profile: AgentProfile) => invoke<AgentProfile>('agent_save', { profile }),
+  agentDelete: (id: string) => invoke<void>('agent_delete', { id }),
+
+  // ---- DAG 编排 ----
+  dagList: () => invoke<DagSummary[]>('dag_list'),
+  dagGet: (id: string) => invoke<DagPlan>('dag_get', { id }),
+  /** 空白草稿（带新 id）：手动搭图用。 */
+  dagNew: (project: string) => invoke<DagPlan>('dag_new', { project }),
+  dagSave: (plan: DagPlan) => invoke<DagPlan>('dag_save', { plan }),
+  dagDelete: (id: string) => invoke<void>('dag_delete', { id }),
+  dagValidate: (plan: DagPlan) => invoke<DagIssue[]>('dag_validate', { plan }),
+  /** 让 Planner 拆图。不落盘：确认后再 `dagSave`。 */
+  dagPlan: (goal: string, project: string, maxNodes?: number) =>
+    invoke<DagPlan>('dag_plan', { goal, project, maxNodes: maxNodes ?? null }),
+
+  // ---- 运行 ----
+  /**
+   * 起一次运行。**立刻返回**：返回的那一刻图刚开跑，后续进度靠 `dag.run` 事件推。
+   * 校验不过会抛人话（"这张图还不能跑：…"），不会留一个空运行。
+   */
+  dagRun: (id: string) => invoke<DagRun>('dag_run', { id }),
+  /** 停止：正在跑的节点在下次工具/模型调用前收手。 */
+  dagRunCancel: (runId: string) => invoke<DagRun>('dag_run_cancel', { runId }),
+  /** 人工闸门：`allowed=false` 表示别跑了（节点取消、下游跳过）。 */
+  dagRunApprove: (runId: string, nodeId: string, allowed: boolean) =>
+    invoke<DagRun>('dag_run_approve', { runId, nodeId, allowed }),
+  /** 某张计划最近一次运行（进程重启后从磁盘捡回来）。 */
+  dagRunLatest: (planId: string) => invoke<DagRun | null>('dag_run_latest', { planId }),
+  dagRunGet: (runId: string) => invoke<DagRun | null>('dag_run_get', { runId }),
+
+  // ---- 插件清单 ----
+  pluginsList: () => invoke<PluginInfo[]>('plugins_list'),
+  /** 开关插件：**下次启动生效**。 */
+  pluginSetEnabled: (id: string, enabled: boolean) =>
+    invoke<void>('plugin_set_enabled', { id, enabled }),
 }

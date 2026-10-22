@@ -3,7 +3,11 @@
 //! 约定：命令层只做参数整理与线程调度，业务逻辑一律下沉到各引擎适配器。
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use crate::agents::{self, AgentProfile};
+use crate::dag::{self, DagPlan, DagSummary, Issue};
+use crate::kernel::{self, KernelState, PluginInfo};
 use crate::annotations::{self, AnnotationStore};
 use crate::catalog::{self, EngineCatalog};
 use crate::engines::claude;
@@ -96,6 +100,76 @@ pub async fn engine_health(
         );
     }
     Ok(health)
+}
+
+// ---------------------------------------------------------------- dsh 权限
+
+/// dsh 的权限档位视图：`mode` 为 `null` 表示没设过，用 dsh 自己的默认。
+///
+/// 返回可选值的同时把每个档位的说明也带上——设置页要显示"这个档位意味着什么"，
+/// 而档位与 risk 的对应关系属于引擎知识，不该由前端再抄一份。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DshPermissionView {
+    pub mode: Option<String>,
+    pub options: Vec<DshPermissionOption>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DshPermissionOption {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    /// 全盘可写 + 不问，前端要额外提示。
+    pub risky: bool,
+}
+
+fn dsh_permission_view() -> DshPermissionView {
+    let options = [
+        (dsh::permission::Mode::ReadOnly, "仅可查看", false),
+        (dsh::permission::Mode::WorkspaceWrite, "工作区内修改", false),
+        (dsh::permission::Mode::FullAccess, "完全权限", true),
+    ]
+    .into_iter()
+    .map(|(mode, label, risky)| DshPermissionOption {
+        id: mode.as_str().to_string(),
+        label: label.to_string(),
+        description: mode.description().to_string(),
+        risky,
+    })
+    .collect();
+    DshPermissionView {
+        mode: dsh::permission::load().map(|mode| mode.as_str().to_string()),
+        options,
+    }
+}
+
+#[tauri::command]
+pub async fn dsh_permission() -> Result<DshPermissionView, String> {
+    Ok(dsh_permission_view())
+}
+
+/// 改 dsh 的权限档位；`mode` 传 `null` 恢复 dsh 默认。
+///
+/// 必须重启进程才生效：权限挂在 `DSH_PERMISSION_MODE` 上，只在 spawn 时读一次。
+/// 这里直接关掉当前连接，下一次发消息会懒启动一个新的——正在跑的回合会断，
+/// 所以前端要在改之前把"会打断当前对话"说清楚。
+#[tauri::command]
+pub async fn dsh_set_permission(
+    runtime: tauri::State<'_, DshRuntime>,
+    mode: Option<String>,
+) -> Result<DshPermissionView, String> {
+    let mode = match mode {
+        None => None,
+        Some(value) => Some(
+            dsh::permission::Mode::parse(&value)
+                .ok_or_else(|| format!("未知的权限档位：{value}"))?,
+        ),
+    };
+    dsh::permission::save(mode)?;
+    runtime.shutdown();
+    Ok(dsh_permission_view())
 }
 
 // ---------------------------------------------------------------- 原生引擎
@@ -1578,4 +1652,183 @@ pub fn task_stop(tasks: tauri::State<'_, TasksState>, id: String) -> Result<(), 
 #[tauri::command]
 pub fn task_remove(tasks: tauri::State<'_, TasksState>, id: String) -> Result<(), String> {
     tasks.remove(&id)
+}
+
+// ---------------------------------------------------------------- Agent 注册表
+
+/// 全部 Agent：内置 presets + 用户自定义（同 id 时 user 覆盖 builtin）。
+#[tauri::command]
+pub fn agents_list() -> Result<Vec<AgentProfile>, String> {
+    Ok(agents::list())
+}
+
+/// 保存一个 Agent（新建或覆盖）。同 id 的内置 preset 会被覆盖，删掉即还原。
+#[tauri::command]
+pub fn agent_save(profile: AgentProfile) -> Result<AgentProfile, String> {
+    agents::save(profile)
+}
+
+/// 删除自定义 Agent。内置 Agent 没被覆盖时不可删（它不在磁盘上）。
+#[tauri::command]
+pub fn agent_delete(id: String) -> Result<(), String> {
+    agents::delete(&id)
+}
+
+// ---------------------------------------------------------------- DAG 编排
+
+/// 计划列表（最近改过的在前）。
+#[tauri::command]
+pub fn dag_list() -> Result<Vec<DagSummary>, String> {
+    Ok(dag::store::list())
+}
+
+/// 单张计划。
+#[tauri::command]
+pub fn dag_get(id: String) -> Result<DagPlan, String> {
+    dag::store::get(&id)
+}
+
+/// 空白草稿（带一个新 id）。手动搭图从这里开始；Planner 那条路走 `dag_plan`。
+#[tauri::command]
+pub fn dag_new(project: String) -> Result<DagPlan, String> {
+    Ok(dag::planner::blank(&project))
+}
+
+/// 保存计划（草案也允许存：编辑中途的半成品不该被拦）。
+///
+/// 校验是**独立**的一条命令：`dag_validate`。这样"存不下"只代表磁盘问题，
+/// "跑不了"才是图的问题——两者混在一起会让用户不知道该改哪里。
+#[tauri::command]
+pub fn dag_save(plan: DagPlan) -> Result<DagPlan, String> {
+    dag::store::save(plan)
+}
+
+#[tauri::command]
+pub fn dag_delete(id: String) -> Result<(), String> {
+    dag::store::delete(&id)
+}
+
+/// 校验一张（可能还没保存的）计划。
+#[tauri::command]
+pub fn dag_validate(plan: DagPlan) -> Result<Vec<Issue>, String> {
+    let known: Vec<String> = agents::list().into_iter().map(|agent| agent.id).collect();
+    Ok(dag::validate::validate(&plan, &known))
+}
+
+/// 让 Planner 从一句目标生成草案（**不落盘**，确认后再 `dag_save`）。
+///
+/// 模型调用是阻塞的，丢到 blocking 线程池：拆一张图要十几秒，不能占住
+/// Tauri 的主线程，也不该堵 async runtime 的 worker。
+#[tauri::command]
+pub async fn dag_plan(
+    goal: String,
+    project: String,
+    max_nodes: Option<usize>,
+) -> Result<DagPlan, String> {
+    let agents = agents::list();
+    let max = max_nodes.unwrap_or(dag::planner::DEFAULT_MAX_NODES);
+    tauri::async_runtime::spawn_blocking(move || {
+        dag::planner::draft(&goal, &project, &agents, max)
+    })
+    .await
+    .map_err(|error| format!("规划线程异常退出：{error}"))?
+}
+
+// ---------------------------------------------------------------- 执行引擎
+
+/// 开跑一张计划。
+///
+/// 只等"已经开跑"就返回：整张图可能跑几十分钟，IPC 不能挂在那儿。之后
+/// 状态靠 `dag.run` 事件推（载荷是整份快照），前端不用轮询。
+///
+/// 落盘的计划才允许跑：运行记录要能回指到一张固定的图，否则"跑到一半改了
+/// 图"会让结果对不上。
+#[tauri::command]
+pub fn dag_run(
+    app: tauri::AppHandle,
+    hub: tauri::State<'_, dag::DagHub>,
+    id: String,
+) -> Result<dag::DagRun, String> {
+    use tauri::Emitter;
+
+    let plan = dag::store::get(&id)?;
+    let agents = agents::list();
+    // 执行器由插件注册（`dag.executor.native`），这里只确认"装没装"：
+    // 一个都没装就直说，别让用户等一张永远跑不动的图。
+    if dag::runner::installed().is_empty() {
+        return Err("没有节点执行器：在工坊里启用 dag.executor.native（下次启动生效）".to_string());
+    }
+    let notify = std::sync::Arc::new(move |run: &dag::DagRun| {
+        let _ = app.emit(dag::run::EVENT_NAME, run);
+    });
+    hub.start(plan, &agents, None, notify)
+}
+
+/// 停止一次运行。正在跑的节点会在下一次工具/模型调用前收手。
+#[tauri::command]
+pub fn dag_run_cancel(
+    hub: tauri::State<'_, dag::DagHub>,
+    run_id: String,
+) -> Result<dag::DagRun, String> {
+    let handle = hub
+        .get(&run_id)
+        .ok_or_else(|| format!("没有这次运行：{run_id}"))?;
+    handle.cancel()
+}
+
+/// 人工闸门的答复。`allowed=false` 表示"别跑了"，节点标取消、下游标跳过。
+#[tauri::command]
+pub fn dag_run_approve(
+    hub: tauri::State<'_, dag::DagHub>,
+    run_id: String,
+    node_id: String,
+    allowed: bool,
+) -> Result<dag::DagRun, String> {
+    let handle = hub
+        .get(&run_id)
+        .ok_or_else(|| format!("没有这次运行：{run_id}"))?;
+    handle.approve(&node_id, allowed)
+}
+
+/// 某张计划最近一次运行（内存里没有就从磁盘捡）。
+#[tauri::command]
+pub fn dag_run_latest(
+    hub: tauri::State<'_, dag::DagHub>,
+    plan_id: String,
+) -> Result<Option<dag::DagRun>, String> {
+    Ok(hub.latest_run(&plan_id))
+}
+
+/// 按 id 取一次运行（刷新页面 / 重启后仍能看历史）。
+#[tauri::command]
+pub fn dag_run_get(
+    hub: tauri::State<'_, dag::DagHub>,
+    run_id: String,
+) -> Result<Option<dag::DagRun>, String> {
+    Ok(hub.run_by_id(&run_id))
+}
+
+// ---------------------------------------------------------------- 插件清单
+
+/// 本次装配的插件清单（含被配置关掉 / 级联关掉的项）。
+#[tauri::command]
+pub fn plugins_list(kernel: tauri::State<'_, Mutex<KernelState>>) -> Result<Vec<PluginInfo>, String> {
+    let state = kernel.lock().map_err(|_| "内核状态被占用".to_string())?;
+    Ok(state.manifest())
+}
+
+/// 开关一个插件。**下次启动生效**——装配只在启动时跑一次。
+#[tauri::command]
+pub fn plugin_set_enabled(
+    kernel: tauri::State<'_, Mutex<KernelState>>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    {
+        let state = kernel.lock().map_err(|_| "内核状态被占用".to_string())?;
+        if !state.manifest().iter().any(|item| item.id == id) {
+            return Err(format!("没有这个插件：{id}"));
+        }
+    }
+    kernel::set_enabled(&id, enabled)
 }

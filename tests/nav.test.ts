@@ -64,7 +64,8 @@ describe('左侧导航排序', () => {
     expect(top.slice(0, 3)).toEqual(['home', 'race', 'archive'])
 
     const middle = reorderNavItems(defaultOrder, 'archive', 3)
-    expect(middle.slice(0, 4)).toEqual(['home', 'workbench', 'archive', 'race'])
+    // 夹到 index 3：落回 workbench 之后（默认顺序里 index 3 是 agents）
+    expect(middle.slice(0, 4)).toEqual(['home', 'workbench', 'archive', 'agents'])
     expect([...middle].sort()).toEqual([...defaultOrder].sort())
   })
 

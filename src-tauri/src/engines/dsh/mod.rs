@@ -10,16 +10,18 @@
 //!   所以回溯只能读这份日志。
 //!
 //! 分层：
-//! - `locator`  `$DSH_HOME` / sessions 目录 / CLI 可达性
-//! - `acp`      ACP v1 的 JSON-RPC 客户端（进程 + 帧收发 + 服务端请求应答）
-//! - `runtime`  把 ACP 的语义更新翻译成 Prism 的 engine-event
-//! - `history`  zstd JSONL → 会话列表 / 时间线
-//! - `engine`   `Engine` trait 实现
+//! - `locator`    `$DSH_HOME` / sessions 目录 / CLI 可达性
+//! - `acp`        ACP v1 的 JSON-RPC 客户端（进程 + 帧收发 + 服务端请求应答）
+//! - `runtime`    把 ACP 的语义更新翻译成 Prism 的 engine-event
+//! - `history`    zstd JSONL → 会话列表 / 时间线
+//! - `permission` 权限档位（只能靠进程环境传，见模块注释）
+//! - `engine`     `Engine` trait 实现
 
 pub mod acp;
 pub mod engine;
 pub mod history;
 pub mod locator;
+pub mod permission;
 pub mod runtime;
 
 /// 会话 id 与项目 id 共用前缀：ACP 返回的是裸 UUID，不加前缀就会和 codex 的

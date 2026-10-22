@@ -43,6 +43,8 @@ import SessionNav from './components/SessionNav.vue'
 import NewSessionPanel from './components/NewSessionPanel.vue'
 import SearchPane from './components/SearchPane.vue'
 import WorkshopPane from './components/WorkshopPane.vue'
+import AgentsPane from './components/AgentsPane.vue'
+import DagPane from './components/DagPane.vue'
 import AutomationPane from './components/AutomationPane.vue'
 import UsagePane from './components/UsagePane.vue'
 import RacePane from './components/RacePane.vue'
@@ -818,6 +820,8 @@ onBeforeUnmount(() => {
             @error="reportError"
             @open-session="openSessionByLocation"
           />
+          <AgentsPane v-show="view === 'agents'" @error="reportError" />
+          <DagPane v-show="view === 'dag'" :projects="projects" @error="reportError" />
           <UsagePane v-show="view === 'usage'" @error="reportError" />
           <WorkshopPane v-show="view === 'workshop'" @error="reportError" />
           <AutomationPane

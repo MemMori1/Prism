@@ -85,9 +85,11 @@ pnpm dev --port 1521        # 换端口，别和真 app（1520 同源）共用 l
 open "http://localhost:1521/dev-preview.html?view=archive&theme=light"
 ```
 
-URL 参数控制落点：`view=`（归档 / 工作台）、`theme=`（light / dark）、`state=`（bound / fresh / legacy）、
-`settings=6`（开设置第 7 个分类）、`tasks=open|files|terminal|chooser`、`drive=flow`（自驱点一遍并把探针写进
-`<pre id="probe">`，无头 Chrome 读 `--dump-dom` 即可断言）。
+URL 参数控制落点：`view=`（归档 / 工作台 / agents / dag / workshop）、`theme=`（light / dark）、
+`state=`（bound / fresh / legacy）、`settings=6`（开设置第 7 个分类）、
+`tasks=open|files|terminal|chooser`、`dag=run|planner`（在编排页点一次运行 / 打开规划弹窗）、
+`workshop=插件`（切到工坊的插件清单）、`drive=flow`（自驱点一遍并把探针写进 `<pre id="probe">`，
+无头 Chrome 读 `--dump-dom` 即可断言）。
 
 `dev-preview-fake.ts` 是那个假后端，在 `tsconfig.include` 范围内，`pnpm build` 的类型检查会覆盖它。
 真后端新增 `invoke` 命令后要在这里补一条，否则预览会拿到 `null` 并在组件里炸。

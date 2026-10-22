@@ -1,7 +1,9 @@
+mod agents;
 mod annotations;
 mod artifact;
 mod catalog;
 mod changes;
+mod dag;
 mod engines;
 mod files;
 mod gitinfo;
@@ -27,7 +29,26 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             ipc::engine_health,
+            ipc::agents_list,
+            ipc::agent_save,
+            ipc::agent_delete,
+            ipc::dag_list,
+            ipc::dag_get,
+            ipc::dag_new,
+            ipc::dag_save,
+            ipc::dag_delete,
+            ipc::dag_validate,
+            ipc::dag_plan,
+            ipc::dag_run,
+            ipc::dag_run_cancel,
+            ipc::dag_run_approve,
+            ipc::dag_run_latest,
+            ipc::dag_run_get,
+            ipc::plugins_list,
+            ipc::plugin_set_enabled,
             ipc::cli_version,
+            ipc::dsh_permission,
+            ipc::dsh_set_permission,
             ipc::list_projects,
             ipc::list_sessions,
             ipc::session_summary,
@@ -112,6 +133,8 @@ pub fn run() {
                 // 外部工具：读 `~/.prism/mcp.json`，没配置就什么都不做。
                 Arc::new(plugins::McpTools),
                 Arc::new(plugins::Routines::new(app.handle().clone())),
+                // 编排的执行器：往注册表里登记 native，没有它「运行」会直接说不支持。
+                Arc::new(plugins::DagExecutorPlugin::new(app.handle().clone())),
             ];
 
             let mut kernel = Kernel::new(app.handle().clone());
@@ -121,6 +144,9 @@ pub fn run() {
             // 装配器不留在托管状态里（它持有 AppHandle，留着就是引用环）；
             // 只留撤销栈，退出时逆序执行。
             app.manage(Mutex::new(kernel.into_state()));
+            // 编排运行表：进程内共享（运行线程、IPC 命令、事件推送都看它）。
+            // 放进内核之外，是因为它不参与插件装配——它是"用插件"的那一层。
+            app.manage(dag::DagHub::default());
 
             Ok(())
         })

@@ -1,0 +1,1824 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Prism · 编排 × Agent × 插件 · 设计稿</title>
+<style>
+/* ============================================================
+ * Prism 设计稿：一级视图串联（编排 / Agents / 工坊）
+ * 令牌取自 src/styles/tokens.css；页面自包含，无外部依赖。
+ * 与 design/dag-planner.html 共用同一套令牌与 rail 结构。
+ * ============================================================ */
+:root {
+  --bg: #f4f4f7;
+  --panel: #ffffff;
+  --panel-2: #fafafc;
+  --border: #e3e3ea;
+  --border-strong: #d3d3dd;
+  --text: #1b1b23;
+  --muted: #6e6e7b;
+  --faint: #9d9daa;
+
+  --accent: #6d5ae6;
+  --accent-strong: #5947cf;
+  --accent-soft: #efecfe;
+  --accent-text: #5344c9;
+
+  --green: #15803d;
+  --green-soft: #e7f6ec;
+  --amber: #b45309;
+  --amber-soft: #fdf1e0;
+  --red: #b91c1c;
+  --red-soft: #fdeaea;
+  --sky: #0284c7;
+
+  --console-bg: #17161f;
+  --console-text: #d9d6e6;
+  --console-dim: #85819b;
+  --console-line: #272433;
+
+  --radius: 10px;
+  --radius-sm: 7px;
+  --radius-lg: 14px;
+  --shadow-sm: 0 1px 2px rgb(18 16 34 / 0.06);
+  --shadow: 0 1px 2px rgb(18 16 34 / 0.05), 0 6px 20px rgb(18 16 34 / 0.05);
+  --shadow-md: 0 10px 32px rgb(18 16 34 / 0.16);
+  --hover: rgb(127 127 127 / 0.12);
+
+  --page-bg: #e9e8ef;
+  --stage-bg: #f1f0f6;
+  --win-border: #d8d7e1;
+  --grid-dot: #d9d8e3;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
+    'Liberation Mono', monospace;
+
+  --node-w: 200px;
+  --node-h: 96px;
+}
+
+:root[data-theme='dark'] {
+  --bg: #0f0e14;
+  --panel: #16151d;
+  --panel-2: #1a1922;
+  --border: #262430;
+  --border-strong: #34323f;
+  --text: #ececf2;
+  --muted: #9a98a8;
+  --faint: #6d6b7c;
+
+  --accent: #8b7bf0;
+  --accent-strong: #a294f5;
+  --accent-soft: #241f3d;
+  --accent-text: #b6aaf7;
+
+  --green: #4ade80;
+  --green-soft: #14281c;
+  --amber: #fbbf24;
+  --amber-soft: #2c2210;
+  --red: #f87171;
+  --red-soft: #2e1618;
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.45);
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.35);
+  --shadow-md: 0 10px 32px rgb(0 0 0 / 0.4);
+  --hover: rgb(255 255 255 / 0.08);
+
+  --page-bg: #0a0910;
+  --stage-bg: #121118;
+  --win-border: #2a2835;
+  --grid-dot: #2d2a3a;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body {
+  background:
+    radial-gradient(1200px 420px at 50% -120px, #ffffff 0%, transparent 70%),
+    var(--page-bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+:root[data-theme='dark'] body {
+  background:
+    radial-gradient(1000px 420px at 50% -160px, #221d38 0%, transparent 70%),
+    var(--page-bg);
+}
+button {
+  font-family: inherit;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 1px;
+}
+svg { display: block; }
+
+/* ---------- 设计稿外壳 ---------- */
+.sheet {
+  max-width: 1490px;
+  margin: 0 auto;
+  padding: 34px 24px 56px;
+}
+.head-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.head-copy { flex: 1; min-width: 420px; }
+.kicker {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--accent-text);
+  text-transform: uppercase;
+}
+.sheet h1 {
+  margin: 8px 0 9px;
+  font-size: 27px;
+  line-height: 1.2;
+  letter-spacing: -0.022em;
+  font-weight: 700;
+}
+.lede {
+  margin: 0;
+  max-width: 800px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.75;
+}
+.lede b { color: var(--text); font-weight: 600; }
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 22px;
+}
+.head-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 16px;
+}
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 25px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  display: inline-block;
+  background: var(--faint);
+}
+.dot.run { background: var(--accent); }
+.dot.ok { background: var(--green); }
+.dot.wait { background: var(--amber); }
+.dot.fail { background: var(--red); }
+
+.demo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11.5px;
+  transition: color 0.14s, border-color 0.14s, background 0.14s;
+}
+.demo-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.demo-btn.primary {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.demo-btn.danger {
+  border-color: color-mix(in srgb, var(--red) 26%, var(--border));
+  background: color-mix(in srgb, var(--red) 5%, var(--panel));
+  color: var(--red);
+}
+.demo-btn.danger:hover { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 42%, var(--border)); }
+.demo-btn svg { width: 13px; height: 13px; }
+
+/* ---------- 舞台 / 窗口 ---------- */
+.stage {
+  margin-top: 24px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--win-border) 80%, transparent);
+  border-radius: 18px;
+  background: linear-gradient(180deg, var(--stage-bg) 0%, color-mix(in srgb, var(--stage-bg) 88%, var(--page-bg)) 100%);
+  box-shadow: 0 24px 60px rgb(20 18 40 / 0.08);
+  overflow-x: auto;
+}
+.stage-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 1px 4px 12px;
+}
+.stage-label {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.stage-label em {
+  font-style: normal;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--faint);
+  margin-left: 6px;
+}
+.stage-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.win {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 1180px;
+  height: 842px;
+  border: 1px solid var(--win-border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow: 0 30px 80px rgb(18 16 34 / 0.16), 0 2px 6px rgb(18 16 34 / 0.06);
+  font-size: 12px;
+}
+:root[data-theme='dark'] .win {
+  box-shadow: 0 30px 80px rgb(0 0 0 / 0.5), 0 2px 6px rgb(0 0 0 / 0.3);
+}
+
+/* 标题栏 */
+.win-titlebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 12px 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.lights { display: flex; gap: 8px; flex: none; }
+.lights i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  display: block;
+}
+.lights i:nth-child(1) { background: #ff5f57; }
+.lights i:nth-child(2) { background: #febc2e; }
+.lights i:nth-child(3) { background: #28c840; }
+.nav-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.nav-pill.on {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.nav-pill svg { width: 13px; height: 13px; }
+.nav-pill b { color: inherit; font-weight: 650; }
+.nav-pill .sep { color: var(--faint); }
+.nav-pill .caret { color: var(--faint); font-size: 9px; }
+.titlebar-spacer { flex: 1; }
+.tb-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+}
+.tb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 27px;
+  height: 27px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  flex: none;
+}
+.tb-btn svg { width: 14px; height: 14px; }
+.tb-bell { position: relative; }
+.tb-bell::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--red);
+  border: 1.5px solid var(--panel);
+}
+
+.win-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* ---------- 图标栏（rail）---------- */
+.rail {
+  flex: none;
+  width: 50px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0 9px;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+.rail-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: var(--muted);
+  transition: background 0.14s, color 0.14s;
+}
+.rail-btn svg { width: 17px; height: 17px; }
+.rail-btn:hover { background: var(--hover); color: var(--text); }
+.rail-btn.on { background: var(--accent-soft); color: var(--accent); }
+.rail-btn.on::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+.rail-sep { width: 22px; height: 1px; background: var(--border); margin: 5px 0; }
+.rail-spacer { flex: 1; }
+.rail-engine {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--faint);
+}
+.rail-engine span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 34px;
+}
+.rail-engine i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--green);
+  flex: none;
+}
+.rail-engine i.off { background: var(--faint); }
+
+/* ============================================================
+ * 视图 1：Agents（管理台）
+ * ============================================================ */
+.agents {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  background: var(--bg);
+}
+/* 左栏：分类 */
+.agents-side {
+  flex: none;
+  width: 208px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+.as-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 44px;
+  padding: 0 12px 0 14px;
+}
+.as-title { font-size: 12.5px; font-weight: 650; letter-spacing: 0.01em; }
+.as-count { color: var(--faint); font-family: var(--font-mono); font-size: 9.5px; margin-top: 1px; }
+.as-head .grow { flex: 1; }
+.mini-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+}
+.mini-btn:hover { background: var(--hover); color: var(--text); }
+.as-filter {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 27px;
+  margin: 0 10px 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--faint);
+  font-size: 10.5px;
+}
+.as-filter svg { width: 12px; height: 12px; flex: none; }
+.as-scroll { flex: 1; overflow: auto; padding: 0 8px 8px; scrollbar-width: thin; }
+.as-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px 5px;
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.as-section .line { flex: 1; height: 1px; background: var(--border); opacity: 0.7; }
+.agent-list-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  margin-bottom: 2px;
+  transition: background 0.14s, border-color 0.14s;
+}
+.agent-list-item:hover { background: var(--hover); }
+.agent-list-item.on { background: var(--panel-2); border-color: var(--border); box-shadow: var(--shadow-sm); }
+.agent-list-item.on::before {
+  content: '';
+  position: absolute;
+  left: -1px; top: 7px; bottom: 7px;
+  width: 3px; border-radius: 0 3px 3px 0; background: var(--accent);
+}
+.li-avatar {
+  width: 24px; height: 24px; border-radius: 7px;
+  display: grid; place-items: center; flex: none;
+  background: var(--agent, #64748b); color: #fff;
+  font-size: 10px; font-weight: 700;
+}
+.li-copy { flex: 1; min-width: 0; }
+.li-name { font-size: 11.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.li-sub { font-size: 9px; color: var(--faint); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.origin-dot { width: 5px; height: 5px; border-radius: 50%; flex: none; }
+.origin-dot.builtin { background: var(--faint); }
+.origin-dot.user { background: var(--accent); }
+.as-foot { flex: none; padding: 9px 10px 11px; border-top: 1px solid var(--border); }
+.new-agent {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; height: 31px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  color: var(--accent-text); font-size: 11px; font-weight: 600;
+}
+.new-agent:hover { background: var(--accent-soft); }
+.new-agent svg { width: 12px; height: 12px; }
+
+/* 主区：卡片网格 */
+.agents-main {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  background: var(--bg);
+}
+.am-head {
+  flex: none; padding: 11px 16px 9px; border-bottom: 1px solid var(--border); background: var(--panel);
+}
+.am-head-top { display: flex; align-items: center; gap: 8px; }
+.am-title { font-size: 13px; font-weight: 650; letter-spacing: -0.005em; }
+.am-head .grow { flex: 1; }
+.head-acts { display: flex; align-items: center; gap: 5px; flex: none; }
+.tool-btn {
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--panel-2);
+  color: var(--muted); font-size: 10.5px; white-space: nowrap;
+}
+.tool-btn svg { width: 12.5px; height: 12.5px; }
+.tool-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.tool-btn.primary {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: var(--accent-soft); color: var(--accent-text); font-weight: 600;
+}
+.am-sub {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  margin-top: 6px; color: var(--faint); font-size: 9.5px;
+}
+.am-sub .sep { color: var(--border-strong); }
+.am-scroll { flex: 1; overflow: auto; padding: 16px; scrollbar-width: thin; }
+.agent-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(236px, 1fr)); gap: 10px;
+}
+.agent-card {
+  position: relative; display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 13px 11px; border: 1px solid var(--border); border-radius: 11px;
+  background: var(--panel); box-shadow: var(--shadow-sm); text-align: left;
+  transition: border-color 0.14s, box-shadow 0.14s, transform 0.14s;
+}
+.agent-card:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: var(--shadow); }
+.agent-card.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow);
+}
+.card-top { display: flex; align-items: flex-start; gap: 9px; }
+.card-avatar {
+  width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; flex: none;
+  background: var(--agent, #64748b); color: #fff; font-size: 14px; font-weight: 700;
+}
+.card-title-copy { flex: 1; min-width: 0; }
+.card-title-row { display: flex; align-items: center; gap: 6px; }
+.card-name { font-size: 12.8px; font-weight: 650; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-id { font-family: var(--font-mono); font-size: 8.5px; color: var(--faint); }
+.card-desc { margin-top: 3px; font-size: 10.3px; line-height: 1.5; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.origin-badge {
+  flex: none; display: inline-flex; align-items: center; height: 17px; padding: 0 6px;
+  border-radius: 999px; font-size: 8.5px; font-weight: 650;
+}
+.origin-badge.builtin { background: var(--panel-2); color: var(--faint); border: 1px solid var(--border); }
+.origin-badge.user { background: var(--accent-soft); color: var(--accent-text); }
+.tag-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.tag {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 6px;
+  border-radius: 5px; background: var(--panel-2); border: 1px solid var(--border);
+  color: var(--muted); font-size: 8.5px;
+}
+.card-foot { display: flex; align-items: center; gap: 5px; margin-top: auto; }
+.eng {
+  flex: none; font-family: var(--font-mono); font-size: 8px; line-height: 14px; padding: 0 4px;
+  border-radius: 3px; border: 1px solid var(--border); background: var(--panel-2); color: var(--faint);
+}
+.eng.native { border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); background: var(--accent-soft); color: var(--accent-text); }
+.eng.dsh { border-color: color-mix(in srgb, #0284c7 30%, var(--border)); background: color-mix(in srgb, #0284c7 8%, var(--panel)); color: color-mix(in srgb, #0284c7 82%, var(--text)); }
+.eng.oc { border-color: color-mix(in srgb, var(--green) 30%, var(--border)); background: var(--green-soft); color: var(--green); }
+.card-spacer { flex: 1; }
+.perm-badge { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 8.5px; color: var(--muted); }
+.perm-badge .dot { width: 5px; height: 5px; }
+.perm-badge.ro .dot { background: var(--green); }
+.perm-badge.ww .dot { background: var(--accent); }
+.perm-badge.da .dot { background: var(--red); }
+.tool-count { flex: none; font-family: var(--font-mono); font-size: 8.5px; color: var(--faint); }
+
+/* 右侧：详情/编辑 */
+.agents-insp {
+  flex: none; width: 300px; display: flex; flex-direction: column; min-height: 0;
+  border-left: 1px solid var(--border); background: var(--panel);
+}
+.insp-head { flex: none; padding: 12px 14px 0; }
+.insp-kicker {
+  display: flex; align-items: center; gap: 6px; color: var(--faint);
+  font-size: 9px; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase;
+}
+.insp-kicker .grow { flex: 1; }
+.insp-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 5px; color: var(--faint); font-size: 14px; line-height: 1;
+}
+.insp-close:hover { background: var(--hover); color: var(--text); }
+.insp-title-row { display: flex; align-items: flex-start; gap: 8px; margin-top: 9px; }
+.insp-avatar {
+  width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; flex: none;
+  background: var(--agent, #64748b); color: #fff; font-size: 12px; font-weight: 700;
+}
+.insp-title-copy { flex: 1; min-width: 0; }
+.insp-title-copy h2 { margin: 0; font-size: 13.5px; font-weight: 650; letter-spacing: -0.005em; line-height: 1.3; }
+.insp-title-copy p { margin: 3px 0 0; color: var(--faint); font-size: 9.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.insp-tabs {
+  flex: none; display: flex; gap: 2px; margin-top: 11px; padding: 0 10px; border-bottom: 1px solid var(--border);
+}
+.insp-tab {
+  position: relative; flex: 1; height: 30px; color: var(--faint); font-size: 10px; font-weight: 550;
+  border-radius: 5px 5px 0 0;
+}
+.insp-tab:hover { color: var(--text); background: var(--hover); }
+.insp-tab.on { color: var(--text); font-weight: 650; }
+.insp-tab.on::after {
+  content: ''; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px;
+  border-radius: 2px 2px 0 0; background: var(--accent);
+}
+.insp-body { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px 14px; scrollbar-width: thin; }
+.insp-section { margin-bottom: 13px; }
+.insp-section:last-child { margin-bottom: 0; }
+.insp-label {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 6px; color: var(--faint);
+  font-size: 8.5px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase;
+}
+.insp-label .grow { flex: 1; }
+.insp-label .count { letter-spacing: 0; text-transform: none; font-family: var(--font-mono); font-weight: 500; }
+.prompt-box {
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-2);
+  color: var(--text); font-size: 10px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
+}
+.chip-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px;
+  border: 1px solid var(--border); border-radius: 5px; background: var(--panel-2);
+  color: var(--muted); font-family: var(--font-mono); font-size: 9px;
+}
+.chip.private { border-color: color-mix(in srgb, var(--amber) 32%, var(--border)); background: var(--amber-soft); color: var(--amber); }
+.chip.denied { color: var(--faint); text-decoration: line-through; opacity: 0.7; }
+.chip .tag { font-family: var(--font-ui); font-size: 8px; font-weight: 650; letter-spacing: 0.02em; }
+.kv {
+  display: flex; align-items: center; gap: 8px; padding: 5px 0;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 75%, transparent); font-size: 9.8px;
+}
+.kv:last-child { border-bottom: 0; }
+.kv span { color: var(--faint); flex: none; }
+.kv b { margin-left: auto; min-width: 0; font-weight: 550; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kv b.mono { font-family: var(--font-mono); font-size: 8.8px; font-weight: 500; }
+.kv b.ok { color: var(--green); }
+.kv b.warn { color: var(--amber); }
+.preview-note {
+  padding: 8px 9px; border: 1px dashed var(--border); border-radius: 7px;
+  color: var(--faint); font-size: 9.3px; line-height: 1.6;
+}
+.insp-foot { flex: none; display: flex; gap: 6px; padding: 9px 12px; border-top: 1px solid var(--border); background: var(--panel); }
+.insp-foot button { flex: 1; height: 29px; font-size: 10.5px; }
+
+/* ============================================================
+ * 视图 2：工坊（插件清单）
+ * ============================================================ */
+.workshop {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg);
+}
+.ws-head { flex: none; padding: 11px 16px 9px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.ws-title { font-size: 13px; font-weight: 650; letter-spacing: -0.005em; }
+.ws-sub { display: flex; align-items: center; gap: 7px; margin-top: 6px; color: var(--faint); font-size: 9.5px; }
+.ws-sub .sep { color: var(--border-strong); }
+.ws-scroll { flex: 1; overflow: auto; padding: 16px; scrollbar-width: thin; }
+.plugin-group { margin-bottom: 18px; }
+.plugin-group:last-child { margin-bottom: 0; }
+.pg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.pg-title { font-size: 11px; font-weight: 650; letter-spacing: 0.02em; }
+.pg-note { font-size: 9.5px; color: var(--faint); }
+.pg-head .line { flex: 1; height: 1px; background: var(--border); opacity: 0.7; }
+.plugin-table { border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--panel); }
+.plugin-row {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border-top: 1px solid var(--border); font-size: 10.5px;
+}
+.plugin-row:first-child { border-top: 0; }
+.plugin-row.head { background: var(--panel-2); color: var(--faint); font-size: 8.5px; letter-spacing: 0.05em; text-transform: uppercase; font-weight: 650; }
+.plugin-id { font-family: var(--font-mono); font-size: 10px; color: var(--accent-text); flex: none; width: 150px; }
+.plugin-desc { flex: 1; color: var(--muted); min-width: 0; }
+.plugin-requires { flex: none; color: var(--faint); font-family: var(--font-mono); font-size: 8.8px; width: 170px; }
+.switch {
+  position: relative; flex: none; width: 30px; height: 17px; border-radius: 999px;
+  background: var(--border-strong); transition: background 0.16s;
+}
+.switch::after {
+  content: ''; position: absolute; left: 2px; top: 2px; width: 13px; height: 13px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 0.2); transition: left 0.16s;
+}
+.switch.on { background: var(--accent); }
+.switch.on::after { left: 15px; }
+.switch.core { background: var(--accent); opacity: 0.7; cursor: default; }
+.switch.core::after { left: 15px; }
+.plugin-row.head .plugin-id, .plugin-row.head .plugin-desc, .plugin-row.head .plugin-requires { color: var(--faint); }
+
+/* ============================================================
+ * 视图 3：编排（内嵌 dag-planner 的画布）
+ * 精简版：左栏计划 + 主区 DAG 画布 + 右侧详情
+ * ============================================================ */
+.dag { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
+.dag-body { flex: 1; display: flex; min-height: 0; }
+.plans {
+  flex: none; width: 228px; display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--border); background: var(--panel);
+}
+.plans-head { flex: none; display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 12px 0 14px; }
+.plans-title { font-size: 12.5px; font-weight: 650; letter-spacing: 0.01em; }
+.plans-count { color: var(--faint); font-family: var(--font-mono); font-size: 9.5px; margin-top: 1px; }
+.plans-head .grow { flex: 1; }
+.plans-filter {
+  flex: none; display: flex; align-items: center; gap: 6px; height: 27px; margin: 0 10px 6px;
+  padding: 0 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-2);
+  color: var(--faint); font-size: 10.5px;
+}
+.plans-filter svg { width: 12px; height: 12px; flex: none; }
+.plans-scroll { flex: 1; overflow: auto; padding: 0 8px 8px; scrollbar-width: thin; }
+.plans-section { display: flex; align-items: center; gap: 6px; padding: 10px 6px 5px; font-size: 9.5px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); }
+.plans-section .line { flex: 1; height: 1px; background: var(--border); opacity: 0.7; }
+.plan-item {
+  position: relative; display: block; width: 100%; text-align: left; padding: 8px 9px 9px;
+  border: 1px solid transparent; border-radius: 8px; margin-bottom: 3px; transition: background 0.14s, border-color 0.14s;
+}
+.plan-item:hover { background: var(--hover); }
+.plan-item.on { background: var(--panel-2); border-color: var(--border); box-shadow: var(--shadow-sm); }
+.plan-item.on::before { content: ''; position: absolute; left: -1px; top: 9px; bottom: 9px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent); }
+.plan-top { display: flex; align-items: center; gap: 6px; }
+.plan-name { flex: 1; min-width: 0; font-size: 11.5px; font-weight: 600; line-height: 1.4; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-meta { display: flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 9.5px; color: var(--faint); }
+.plan-meta .mono { font-family: var(--font-mono); }
+.mini-run { display: flex; gap: 2px; margin-top: 7px; }
+.mini-run i { flex: 1; height: 3px; border-radius: 2px; background: var(--border); }
+.mini-run i.done { background: color-mix(in srgb, var(--green) 70%, var(--border)); }
+.mini-run i.live { background: var(--accent); background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.45), transparent); background-size: 200% 100%; animation: shimmer 1.6s linear infinite; }
+.mini-run i.wait { background: color-mix(in srgb, var(--amber) 70%, var(--border)); }
+.plans-foot { flex: none; padding: 9px 10px 11px; border-top: 1px solid var(--border); }
+.new-plan { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; height: 31px; border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--accent) 5%, transparent); color: var(--accent-text); font-size: 11px; font-weight: 600; }
+.new-plan:hover { background: var(--accent-soft); }
+.new-plan svg { width: 12px; height: 12px; }
+
+.dag-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.dag-head { flex: none; padding: 11px 16px 9px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.dag-head-top { display: flex; align-items: center; gap: 8px; }
+.dag-breadcrumb { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--faint); font-size: 10.5px; }
+.dag-breadcrumb b { color: var(--text); font-weight: 650; font-size: 13px; letter-spacing: -0.005em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dag-head .grow { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 5px; height: 19px; padding: 0 7px; border-radius: 999px; font-size: 9.8px; font-weight: 650; white-space: nowrap; }
+.pill.running { background: var(--accent-soft); color: var(--accent-text); }
+.pill.done { background: var(--green-soft); color: var(--green); }
+.pill.pending { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+.pill.waiting { background: var(--amber-soft); color: var(--amber); }
+.pill.failed { background: var(--red-soft); color: var(--red); }
+.pill .pulse { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: pulse 1.8s ease-in-out infinite; }
+.dag-sub { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 6px; color: var(--faint); font-size: 9.5px; }
+.dag-sub .mono { font-family: var(--font-mono); }
+.dag-sub .sep { color: var(--border-strong); }
+.run-bar { flex: none; display: flex; gap: 3px; padding: 0 16px 9px; background: var(--panel); }
+.run-bar i { flex: 1; height: 3px; border-radius: 2px; background: var(--border); }
+.run-bar i.done { background: color-mix(in srgb, var(--green) 72%, var(--border)); }
+.run-bar i.live { background: var(--accent); background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.5), transparent); background-size: 200% 100%; animation: shimmer 1.6s linear infinite; }
+.run-bar i.wait { background: color-mix(in srgb, var(--amber) 65%, var(--border)); }
+
+.canvas {
+  position: relative; flex: 1; min-height: 0; overflow: hidden; background-color: var(--bg);
+  background-image: radial-gradient(circle, var(--grid-dot) 1px, transparent 1px);
+  background-size: 18px 18px; cursor: grab; touch-action: none;
+}
+.canvas.is-panning { cursor: grabbing; }
+.canvas-world { position: absolute; left: 0; top: 0; width: 792px; height: 620px; transform-origin: 0 0; will-change: transform; }
+.node-layer { position: absolute; inset: 0; }
+.edges { position: absolute; inset: 0; width: 792px; height: 620px; overflow: visible; pointer-events: none; }
+.edges path { fill: none; stroke-width: 1.3; stroke-linecap: round; transition: stroke 0.2s, opacity 0.2s; }
+.edges path.done { stroke: color-mix(in srgb, var(--green) 58%, var(--border)); }
+.edges path.active { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 5 5; animation: dash 0.9s linear infinite; }
+.edges path.idle { stroke: var(--border-strong); stroke-dasharray: 4 5; opacity: 0.72; }
+.edges path.skip { stroke: var(--border); stroke-dasharray: 3 5; opacity: 0.5; }
+
+.node {
+  position: absolute; width: var(--node-w); height: var(--node-h); display: flex; flex-direction: column; gap: 5px;
+  padding: 10px 11px 9px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+  box-shadow: var(--shadow-sm); text-align: left; overflow: hidden;
+  transition: border-color 0.14s, box-shadow 0.14s, transform 0.14s, opacity 0.14s;
+}
+.node:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: var(--shadow); }
+.node.is-selected { border-color: color-mix(in srgb, var(--accent) 62%, var(--border)); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); z-index: 3; }
+.node.is-running { border-color: color-mix(in srgb, var(--accent) 34%, var(--border)); }
+.node.is-running::before { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); background-size: 200% 100%; animation: shimmer 2.2s linear infinite; }
+.node.is-pending { opacity: 0.82; }
+.node.is-waiting { border-color: color-mix(in srgb, var(--amber) 40%, var(--border)); }
+.node-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
+.status-dot.done { background: var(--green); }
+.status-dot.running { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); animation: pulse 1.8s ease-in-out infinite; }
+.status-dot.waiting { background: var(--amber); }
+.status-dot.failed { background: var(--red); }
+.status-dot.pending { background: var(--faint); }
+.node-title { flex: 1; min-width: 0; font-size: 12.3px; font-weight: 650; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.node-check { width: 12px; height: 12px; color: var(--green); flex: none; }
+.node-sub { display: block; font-size: 10px; line-height: 1.35; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.node-foot { display: flex; align-items: center; gap: 5px; margin-top: auto; min-width: 0; }
+.avatar { width: 17px; height: 17px; border-radius: 50%; display: grid; place-items: center; flex: none; background: var(--agent, #64748b); color: #fff; font-size: 8.5px; font-weight: 700; letter-spacing: -0.02em; }
+.agent-name { font-size: 9.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.node-spacer { flex: 1; }
+.gate-chip { flex: none; padding: 0 4px; border-radius: 3px; background: var(--amber-soft); color: var(--amber); font-size: 8px; line-height: 13px; font-weight: 600; }
+.node-time { flex: none; font-family: var(--font-mono); font-size: 8.5px; color: var(--faint); }
+.node-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: color-mix(in srgb, var(--accent) 12%, var(--border)); }
+.node-progress i { display: block; height: 100%; background: var(--accent); background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.55), transparent); background-size: 200% 100%; animation: shimmer 1.8s linear infinite; transition: width 0.4s ease; }
+
+.canvas-tools { position: absolute; left: 12px; bottom: 12px; display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(8px); box-shadow: var(--shadow-sm); z-index: 6; }
+.canvas-tools button { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; padding: 0 6px; border-radius: 5px; color: var(--muted); font-size: 11px; }
+.canvas-tools button:hover { background: var(--hover); color: var(--text); }
+.canvas-tools .sep { width: 1px; height: 14px; background: var(--border); margin: 0 1px; }
+.canvas-tools svg { width: 12px; height: 12px; }
+.live-chip { position: absolute; top: 12px; right: 12px; display: inline-flex; align-items: center; gap: 6px; height: 23px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border)); border-radius: 999px; background: color-mix(in srgb, var(--accent-soft) 82%, transparent); backdrop-filter: blur(8px); color: var(--accent-text); font-size: 9.5px; font-weight: 650; z-index: 6; }
+.live-chip .pulse { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: pulse 1.8s ease-in-out infinite; }
+.legend { position: absolute; left: 50%; bottom: 15px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 10px; height: 23px; padding: 0 9px; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(8px); color: var(--faint); font-size: 9px; white-space: nowrap; z-index: 6; }
+.legend span { display: inline-flex; align-items: center; gap: 4px; }
+.legend i { width: 5px; height: 5px; border-radius: 50%; background: var(--faint); }
+.legend i.ok { background: var(--green); }
+.legend i.run { background: var(--accent); }
+.legend i.wait { background: var(--amber); }
+
+.inspector { flex: none; width: 292px; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--border); background: var(--panel); }
+.insp-id { font-family: var(--font-mono); font-size: 8.5px; color: var(--faint); }
+.insp-statusbar { display: flex; align-items: center; gap: 6px; margin-top: 9px; }
+.insp-statusbar .grow { flex: 1; }
+.insp-duration { font-family: var(--font-mono); font-size: 8.8px; color: var(--faint); }
+.insp-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 12px 14px 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.insp-meta div { padding: 7px 8px 8px; border-top: 1px solid var(--border); }
+.insp-meta div:nth-child(1), .insp-meta div:nth-child(2) { border-top: 0; }
+.insp-meta div:nth-child(odd) { border-right: 1px solid var(--border); }
+.insp-meta dt { color: var(--faint); font-size: 8.5px; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 3px; }
+.insp-meta dd { margin: 0; font-size: 9.8px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.insp-meta dd.mono { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
+.insp-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent-text); font-size: 9.5px; font-weight: 600; white-space: nowrap; }
+.insp-link svg { width: 10px; height: 10px; }
+
+/* ---------- Planner 弹层（从顶部 DAG Planner 入口触发）---------- */
+.planner-overlay {
+  position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center;
+  background: rgb(10 9 20 / 0.42); backdrop-filter: blur(3px); opacity: 0; pointer-events: none; transition: opacity 0.18s ease;
+}
+.planner-overlay.show { opacity: 1; pointer-events: auto; }
+.planner-card {
+  width: 460px; max-width: 92vw; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: var(--shadow-md); overflow: hidden; transform: translateY(8px); transition: transform 0.18s ease;
+}
+.planner-overlay.show .planner-card { transform: translateY(0); }
+.pc-head { padding: 16px 18px 0; }
+.pc-kicker { font-size: 9px; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent-text); }
+.pc-title { margin: 6px 0 2px; font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+.pc-sub { color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+.pc-body { padding: 14px 18px; }
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 9px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); margin-bottom: 5px; }
+.field textarea, .field input {
+  width: 100%; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-2);
+  color: var(--text); font-family: inherit; font-size: 11.5px; padding: 8px 10px; line-height: 1.6; resize: none;
+}
+.field textarea:focus, .field input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent); outline-offset: -1px; border-color: var(--accent); }
+.field textarea { min-height: 72px; }
+.field .hint { color: var(--faint); font-size: 9px; margin-top: 4px; }
+.pc-row { display: flex; gap: 10px; }
+.pc-row .field { flex: 1; }
+.pc-foot { display: flex; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--border); background: var(--panel-2); }
+.pc-foot .grow { flex: 1; }
+.pc-foot button { height: 30px; padding: 0 14px; font-size: 11px; }
+
+/* ---------- 页脚 ---------- */
+.sheet-foot { margin: 14px 0 0; text-align: center; color: var(--faint); font-size: 10px; }
+.sheet-foot b { color: var(--muted); font-weight: 600; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 26px; z-index: 300; display: flex; align-items: center; gap: 7px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent); color: var(--text); font-size: 10.5px;
+  box-shadow: var(--shadow-md); backdrop-filter: blur(10px); opacity: 0; pointer-events: none;
+  transform: translate(-50%, 8px); transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes dash { to { stroke-dashoffset: -20; } }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+}
+@media (max-width: 760px) {
+  .sheet { padding: 22px 12px 40px; }
+  .sheet h1 { font-size: 23px; }
+  .head-copy { min-width: 0; }
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <header class="sheet-head">
+    <div class="head-row">
+      <div class="head-copy">
+        <div class="kicker">Prism · Design Spec / 编排 × Agent × 插件</div>
+        <h1>需求分析 → 编排 → 可插拔 Agent</h1>
+        <p class="lede">
+          所有 DAG 都由 <b>DAG Planner</b> 从需求分析发起：它读 <b>Agent 注册表</b>（内置 + 自定义，
+          全部可插拔）挑人，按依赖编排成图，每个节点落到一个 Agent 的会话。
+          左侧图标栏在「编排 / Agents / 工坊」三个一级视图间切换。
+        </p>
+      </div>
+      <div class="head-actions">
+        <button class="demo-btn primary" id="plannerOpen" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3"/></svg>
+          发起需求分析
+        </button>
+        <button class="demo-btn" id="themeToggle" type="button">切换深色</button>
+      </div>
+    </div>
+    <div class="head-meta">
+      <span class="meta-chip">DAG Planner 从需求分析发起</span>
+      <span class="meta-chip">Agent 内置 + 自定义 · 同一注册表</span>
+      <span class="meta-chip">工具公用 / 私有 · 可插拔</span>
+      <span class="meta-chip">节点 = 独立会话</span>
+    </div>
+  </header>
+
+  <div class="stage">
+    <div class="stage-bar">
+      <span class="stage-label" id="stageLabel">Agents 管理台 <em>静态设计稿 · 内置 + 自定义 Agent 走同一注册表</em></span>
+      <div class="stage-controls">
+        <span class="meta-chip" id="stageChip">10 Agents</span>
+        <button class="demo-btn" id="fitTop" type="button" hidden>适应窗口</button>
+      </div>
+    </div>
+
+    <div class="win">
+      <div class="win-titlebar">
+        <div class="lights"><i></i><i></i><i></i></div>
+        <div class="nav-pill on">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="5.5" cy="6" r="2.2"/><circle cx="18.5" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M7.7 6h8.6M6.8 8.1l4.2 7.8M17.2 8.1l-4.2 7.8"/></svg>
+          <b id="pillTitle">Agents</b><span class="sep">/</span><span>prism</span><span class="caret">▾</span>
+        </div>
+        <div class="titlebar-spacer"></div>
+        <span class="tb-status" id="tbStatus"><i class="dot run"></i>10 agents</span>
+        <button class="tb-btn tb-bell" type="button" aria-label="通知">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
+        </button>
+        <button class="tb-btn" type="button" aria-label="设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.09A1.7 1.7 0 0 0 10 3.05V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1Z"/></svg>
+        </button>
+      </div>
+
+      <div class="win-body">
+        <!-- 图标栏：编排 / Agents / 工坊 三个一级视图切换 -->
+        <nav class="rail" aria-label="一级视图">
+          <button class="rail-btn on" data-view="agents" type="button" aria-label="Agents" title="Agents 管理台">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8.5" r="3.2"/><circle cx="17" cy="9.5" r="2.4"/><circle cx="12" cy="17" r="2.6"/><path d="M5.4 15.2c1.3 2 3.2 3.3 5.4 3.6M14.4 6.4c1.8.7 3.2 2.1 3.9 3.9"/></svg>
+          </button>
+          <button class="rail-btn" data-view="dag" type="button" aria-label="编排" title="编排">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="5.5" cy="6" r="2.2"/><circle cx="18.5" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M7.7 6h8.6M6.8 8.1l4.2 7.8M17.2 8.1l-4.2 7.8"/></svg>
+          </button>
+          <button class="rail-btn" data-view="workshop" type="button" aria-label="工坊" title="工坊 · 插件">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          </button>
+          <div class="rail-sep"></div>
+          <button class="rail-btn" type="button" aria-label="首页" title="首页">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.5 12 4l8 6.5V20H4z"/><path d="M9.5 20v-6h5v6"/></svg>
+          </button>
+          <button class="rail-btn" type="button" aria-label="归档" title="归档">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5h17V20h-17zM3.5 4h17v3.5h-17zM9.5 12h5"/></svg>
+          </button>
+          <button class="rail-btn" type="button" aria-label="工作台" title="工作台">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 5.5h17v13h-17zM9 5.5v13M15 5.5v13"/></svg>
+          </button>
+          <button class="rail-btn" type="button" aria-label="搜索" title="搜索">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m20 20-4.4-4.4"/></svg>
+          </button>
+          <button class="rail-btn" type="button" aria-label="用量" title="用量">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 20h16M6.5 20v-6M12 20V7M17.5 20v-9"/></svg>
+          </button>
+          <div class="rail-spacer"></div>
+          <div class="rail-engine" aria-label="引擎状态">
+            <span><i></i>NA</span>
+            <span><i></i>DSH</span>
+            <span><i class="off"></i>OC</span>
+          </div>
+        </nav>
+
+        <!-- ===== 视图：Agents 管理台 ===== -->
+        <div class="agents" id="view-agents" data-pane>
+          <aside class="agents-side">
+            <div class="as-head">
+              <div>
+                <div class="as-title">Agents</div>
+                <div class="as-count">7 内置 · 3 自定义</div>
+              </div>
+              <div class="grow"></div>
+              <button class="mini-btn" type="button" aria-label="新建 Agent">＋</button>
+            </div>
+            <div class="as-filter">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m19.5 19.5-4-4"/></svg>
+              筛选 Agent…
+            </div>
+            <div class="as-scroll" id="agentList"></div>
+            <div class="as-foot">
+              <button class="new-agent" type="button" id="newAgentBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                新建 Agent
+              </button>
+            </div>
+          </aside>
+
+          <main class="agents-main">
+            <div class="am-head">
+              <div class="am-head-top">
+                <span class="am-title">全部 Agent</span>
+                <div class="grow"></div>
+                <div class="head-acts">
+                  <button class="tool-btn" type="button" id="filterBuiltin">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 5h17l-6.5 7.5v6l-4 2.5v-8.5z"/></svg>
+                    内置 / 自定义
+                  </button>
+                  <button class="tool-btn" type="button" id="sortBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 6h7M4 12h7M4 18h7M14 6h6M14 12h6M14 18h6"/></svg>
+                    按标签
+                  </button>
+                </div>
+              </div>
+              <div class="am-sub">
+                <span>每个 Agent 声明自己的执行器、工具策略与权限档</span><span class="sep">·</span>
+                <span>DAG Planner 从这里挑人</span>
+              </div>
+            </div>
+            <div class="am-scroll">
+              <div class="agent-grid" id="agentGrid"></div>
+            </div>
+          </main>
+
+          <aside class="agents-insp" id="agentsInsp"></aside>
+        </div>
+
+        <!-- ===== 视图：工坊（插件）===== -->
+        <div class="workshop" id="view-workshop" data-pane hidden>
+          <div class="ws-head">
+            <div class="ws-title">工坊 · 插件</div>
+            <div class="ws-sub">
+              <span>内核 + 引擎 + DAG + Agent，全部是编译期模块 + 清单 + 可逆关停</span><span class="sep">·</span>
+              <span>关掉插件，依赖它的计划运行前报「缺少执行器」，不崩</span>
+            </div>
+          </div>
+          <div class="ws-scroll">
+            <div class="plugin-group">
+              <div class="pg-head"><span class="pg-title">内核与引擎</span><span class="pg-note">基础运行轴</span><span class="line"></span></div>
+              <div class="plugin-table">
+                <div class="plugin-row head"><span class="plugin-id">插件</span><span class="plugin-desc">提供</span><span class="plugin-requires">requires</span><span>状态</span></div>
+                <div class="plugin-row"><span class="plugin-id">kernel</span><span class="plugin-desc">KernelCtx · 插件生命周期 · 可逆关停</span><span class="plugin-requires">—</span><span class="switch core on" data-core></span></div>
+                <div class="plugin-row"><span class="plugin-id">engine.host</span><span class="plugin-desc">引擎注册表（native / opencode / codex / dsh）</span><span class="plugin-requires">kernel</span><span class="switch core on" data-core></span></div>
+                <div class="plugin-row"><span class="plugin-id">tools.mcp</span><span class="plugin-desc">MCP stdio 客户端 · 外部工具登记</span><span class="plugin-requires">engine.host</span><span class="switch on" data-switch></span></div>
+              </div>
+            </div>
+            <div class="plugin-group">
+              <div class="pg-head"><span class="pg-title">DAG 编排</span><span class="pg-note">需求分析 → 调度 → 执行</span><span class="line"></span></div>
+              <div class="plugin-table">
+                <div class="plugin-row head"><span class="plugin-id">插件</span><span class="plugin-desc">提供</span><span class="plugin-requires">requires</span><span>状态</span></div>
+                <div class="plugin-row"><span class="plugin-id">dag.core</span><span class="plugin-desc">DagStore · Scheduler · IPC 状态</span><span class="plugin-requires">engine.host</span><span class="switch core on" data-core></span></div>
+                <div class="plugin-row"><span class="plugin-id">dag.planner.llm</span><span class="plugin-desc">Planner id=llm · JSON schema + 校验修复 + 降级</span><span class="plugin-requires">dag.core</span><span class="switch on" data-switch></span></div>
+                <div class="plugin-row"><span class="plugin-id">dag.executor.native</span><span class="plugin-desc">NodeRunner id=native · 节点 = native 会话</span><span class="plugin-requires">dag.core</span><span class="switch on" data-switch></span></div>
+                <div class="plugin-row"><span class="plugin-id">dag.executor.engine</span><span class="plugin-desc">NodeRunner id=engine · 复用 Engine trait（dsh/codex）</span><span class="plugin-requires">dag.core, engine.host</span><span class="switch on" data-switch></span></div>
+                <div class="plugin-row"><span class="plugin-id">dag.workspace.worktree</span><span class="plugin-desc">WorkspaceProvider id=worktree · 分支 / commit / diff</span><span class="plugin-requires">dag.core</span><span class="switch on" data-switch></span></div>
+              </div>
+            </div>
+            <div class="plugin-group">
+              <div class="pg-head"><span class="pg-title">Agent 与能力</span><span class="pg-note">可插拔 Agent + 私有工具</span><span class="line"></span></div>
+              <div class="plugin-table">
+                <div class="plugin-row head"><span class="plugin-id">插件</span><span class="plugin-desc">提供</span><span class="plugin-requires">requires</span><span>状态</span></div>
+                <div class="plugin-row"><span class="plugin-id">dag.presets</span><span class="plugin-desc">内置 Agent profile · 计划模板</span><span class="plugin-requires">dag.core</span><span class="switch on" data-switch></span></div>
+                <div class="plugin-row"><span class="plugin-id">dag.agents.mcp</span><span class="plugin-desc">私有 MCP 工具 · Private(agent) 登记</span><span class="plugin-requires">dag.core, tools.mcp</span><span class="switch on" data-switch></span></div>
+                <div class="plugin-row"><span class="plugin-id">dag.agents.ui</span><span class="plugin-desc">Agents 视图 · IPC 薄壳</span><span class="plugin-requires">dag.core</span><span class="switch on" data-switch></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== 视图：编排（DAG）===== -->
+        <div class="dag" id="view-dag" data-pane hidden>
+          <div class="dag-body">
+            <aside class="plans">
+              <div class="plans-head">
+                <div>
+                  <div class="plans-title">编排</div>
+                  <div class="plans-count">6 plans · 2 running</div>
+                </div>
+                <div class="grow"></div>
+                <button class="mini-btn" type="button" aria-label="新建计划">＋</button>
+              </div>
+              <div class="plans-filter">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m19.5 19.5-4-4"/></svg>
+                筛选计划…
+              </div>
+              <div class="plans-scroll">
+                <div class="plans-section">进行中 <span class="line"></span></div>
+                <button class="plan-item on" type="button">
+                  <span class="plan-top"><i class="dot run"></i><span class="plan-name">给设置页加自动更新</span><span class="plan-meta mono">12:04</span></span>
+                  <span class="plan-meta"><span>3/6 节点</span><span>·</span><span>2 运行中</span></span>
+                  <span class="mini-run"><i class="done"></i><i class="done"></i><i class="done"></i><i class="live"></i><i class="live"></i><i></i></span>
+                </button>
+                <button class="plan-item" type="button">
+                  <span class="plan-top"><i class="dot wait"></i><span class="plan-name">重构权限闸门</span><span class="plan-meta mono">11:20</span></span>
+                  <span class="plan-meta"><span>2/5 节点</span><span>·</span><span>等待审批</span></span>
+                  <span class="mini-run"><i class="done"></i><i class="done"></i><i class="wait"></i><i></i><i></i></span>
+                </button>
+                <div class="plans-section">草稿 <span class="line"></span></div>
+                <button class="plan-item" type="button">
+                  <span class="plan-top"><i class="dot"></i><span class="plan-name">搜索索引增量更新</span><span class="plan-meta mono">刚刚</span></span>
+                  <span class="plan-meta"><span>6 节点</span><span>·</span><span>待确认</span></span>
+                </button>
+                <div class="plans-section">已完成 <span class="line"></span></div>
+                <button class="plan-item" type="button">
+                  <span class="plan-top"><i class="dot ok"></i><span class="plan-name">Windows 安装包签名</span><span class="plan-meta mono">18:20</span></span>
+                  <span class="plan-meta"><span>6/6 节点</span><span>·</span><span>4m12s</span></span>
+                </button>
+              </div>
+              <div class="plans-foot">
+                <button class="new-plan" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                  新建计划
+                </button>
+              </div>
+            </aside>
+
+            <main class="dag-main">
+              <div class="dag-head">
+                <div class="dag-head-top">
+                  <div class="dag-breadcrumb"><span>计划</span><span>/</span><b>给设置页加自动更新</b></div>
+                  <span class="pill running"><i class="pulse"></i>运行中</span>
+                  <div class="grow"></div>
+                  <div class="head-acts">
+                    <button class="tool-btn" type="button" id="layoutBtn">自动排版</button>
+                    <button class="tool-btn" type="button" id="exportBtn">导出</button>
+                    <button class="tool-btn danger" type="button" id="stopBtn">停止</button>
+                  </div>
+                </div>
+                <div class="dag-sub">
+                  <span class="mono">6 个节点</span><span class="sep">·</span><span>并发上限 2</span><span class="sep">·</span>
+                  <span>开始于 12:04</span><span class="sep">·</span><span class="mono">41.2k tokens</span>
+                </div>
+              </div>
+              <div class="run-bar" aria-hidden="true">
+                <i class="done"></i><i class="done"></i><i class="done"></i><i class="live"></i><i class="live"></i><i></i>
+              </div>
+              <div class="canvas" id="canvas">
+                <div class="canvas-world" id="world">
+                  <svg class="edges" id="edges" viewBox="0 0 792 620" aria-hidden="true">
+                    <defs>
+                      <marker id="arrow-done" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 8 4 0 8z" fill="var(--green)" opacity=".65"/></marker>
+                      <marker id="arrow-active" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 8 4 0 8z" fill="var(--accent)"/></marker>
+                      <marker id="arrow-idle" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 8 4 0 8z" fill="var(--border-strong)"/></marker>
+                    </defs>
+                    <g id="edgeLayer"></g>
+                  </svg>
+                  <div class="node-layer" id="nodeLayer"></div>
+                </div>
+                <div class="live-chip"><i class="pulse"></i>实时同步</div>
+                <div class="canvas-tools">
+                  <button type="button" id="zoomOut" aria-label="缩小">−</button>
+                  <button type="button" id="zoomIn" aria-label="放大">＋</button>
+                  <span class="sep"></span>
+                  <button type="button" id="fitCanvas" title="适应窗口" aria-label="适应窗口">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+                  </button>
+                </div>
+                <div class="legend">
+                  <span><i class="ok"></i>已完成</span>
+                  <span><i class="run"></i>运行中</span>
+                  <span><i></i>待运行</span>
+                  <span><i class="wait"></i>需确认</span>
+                </div>
+              </div>
+            </main>
+
+            <aside class="inspector" id="inspector"></aside>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="sheet-foot">
+    静态设计稿 · 对应 <b>docs/DAG_PLANNER.md</b> 与 <b>docs/AGENTS.md</b> ·
+    点左上「发起需求分析」看 Planner · 图标栏切换视图 · 滚轮缩放 / 拖拽平移
+  </p>
+</div>
+
+<!-- Planner 弹层 -->
+<div class="planner-overlay" id="plannerOverlay">
+  <div class="planner-card">
+    <div class="pc-head">
+      <div class="pc-kicker">DAG Planner · 需求分析</div>
+      <div class="pc-title">发起一次编排</div>
+      <div class="pc-sub">描述目标，Planner 会从 Agent 注册表挑人、按依赖生成 DAG 草案，人工确认后再调度。</div>
+    </div>
+    <div class="pc-body">
+      <div class="field">
+        <label for="plannerGoal">目标</label>
+        <textarea id="plannerGoal">给设置页加「自动更新」：检查 / 下载进度 / 重启安装，并补文档。</textarea>
+      </div>
+      <div class="pc-row">
+        <div class="field">
+          <label for="plannerProject">项目目录</label>
+          <input id="plannerProject" value="/Users/me/project/prism" />
+        </div>
+        <div class="field">
+          <label for="plannerModel">规划模型</label>
+          <input id="plannerModel" value="deepseek-chat" />
+        </div>
+      </div>
+      <div class="pc-row">
+        <div class="field">
+          <label>并发上限</label>
+          <input value="2" />
+        </div>
+        <div class="field">
+          <label>失败策略</label>
+          <input value="failFast" />
+        </div>
+      </div>
+      <div class="field">
+        <div class="hint">Planner 会读取 <b>7 个内置 + 3 个自定义</b> Agent 作为候选人目录，并为每个节点指派 Agent、工作区与工具策略。</div>
+      </div>
+    </div>
+    <div class="pc-foot">
+      <div class="grow"></div>
+      <button class="demo-btn" type="button" id="plannerCancel">取消</button>
+      <button class="demo-btn primary" type="button" id="plannerRun">生成 DAG 草案</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"><i></i><span></span></div>
+<script>
+/* ============================================================
+ * 演示数据
+ * ============================================================ */
+const AGENTS = [
+  { id: 'explore', name: '探索者', initial: '探', color: '#64748b', origin: 'builtin',
+    desc: '只读调研：定位文件、梳理调用链、给出「文件:行号」证据与缺口清单。',
+    tags: ['调研'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'ro', permLabel: '只读', tools: 5, priv: 0,
+    systemPrompt: '你负责只读调研。先搜再读，结论必须有「文件:行号」证据；不修改任何文件。',
+    shared: ['read_file', 'grep', 'list_files', 'list_sessions', 'web_fetch'], denied: [] },
+  { id: 'general', name: '通用助手', initial: '通', color: '#6d5ae6', origin: 'builtin',
+    desc: '默认通用 Agent：可读改文件、跑命令，处理没有专属 Agent 的杂活。',
+    tags: ['通用'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'ww', permLabel: '工作区可写', tools: 9, priv: 0,
+    systemPrompt: '你是一个通用工程助手。先读再改，保持仓库现有风格。',
+    shared: ['read_file', 'grep', 'list_files', 'edit_file', 'write_file', 'run_command'], denied: [] },
+  { id: 'frontend', name: '前端工程师', initial: '前', color: '#6d5ae6', origin: 'builtin',
+    desc: '前端实现：组件、样式、交互，保持现有设计令牌与间距体系。',
+    tags: ['前端', '实现'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'ww', permLabel: '工作区可写', tools: 8, priv: 1,
+    systemPrompt: '你负责前端实现。改动保持仓库现有风格，不引入新组件库；先读再改。',
+    shared: ['read_file', 'edit_file', 'run_command', 'grep'], private: ['figma__export'], denied: ['web__fetch'] },
+  { id: 'backend', name: '后端工程师', initial: '后', color: '#0d9488', origin: 'builtin',
+    desc: '后端实现：Rust / IPC / 命令接线，落盘与事件语义对齐现有约定。',
+    tags: ['后端', '实现'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'ww', permLabel: '工作区可写', tools: 7, priv: 0,
+    systemPrompt: '你负责后端实现。命令薄壳、逻辑进模块，事件信封与现有约定一致。',
+    shared: ['read_file', 'edit_file', 'run_command', 'grep'], denied: [] },
+  { id: 'architect', name: '架构师', initial: '架', color: '#0284c7', origin: 'builtin',
+    desc: '设计接口、状态机与数据模型，产出契约与取舍说明，不写实现。',
+    tags: ['设计'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'ro', permLabel: '只读', tools: 4, priv: 0,
+    systemPrompt: '你负责架构设计。产出契约、状态机与取舍，不改文件。',
+    shared: ['read_file', 'grep', 'list_files'], denied: [] },
+  { id: 'docs', name: '文档工程师', initial: '文', color: '#b45309', origin: 'builtin',
+    desc: '文档与说明：README、变更说明、迁移指引，以实现为准。',
+    tags: ['文档'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'ww', permLabel: '工作区可写', tools: 4, priv: 0,
+    systemPrompt: '你负责文档。以实际实现为准，不夸大、不臆造。',
+    shared: ['read_file', 'edit_file', 'grep'], denied: [] },
+  { id: 'verifier', name: '验证者', initial: '验', color: '#15803d', origin: 'builtin',
+    desc: '合并并验证：跑构建与测试，输出结论、耗时与冲突。',
+    tags: ['验证'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'ww', permLabel: '工作区可写', tools: 5, priv: 0,
+    systemPrompt: '你负责验证。跑构建与测试，输出可复现的结论。',
+    shared: ['read_file', 'run_command', 'grep'], denied: [] },
+  { id: 'dsh-research', name: 'DeepSeek 调研', initial: 'DS', color: '#0284c7', origin: 'builtin',
+    desc: '用 DeepSeek Harness 引擎做只读调研，沙箱内跑，适合不可信任务。',
+    tags: ['调研', '沙箱'], executor: 'dsh', engLabel: 'DSH', engClass: 'dsh',
+    perm: 'ro', permLabel: '只读', tools: 4, priv: 0, noPrivateTools: true,
+    systemPrompt: '只读调研，输出证据与结论。', shared: ['read_file', 'grep', 'list_files'], denied: [] },
+  { id: 'code-reviewer', name: '代码审查', initial: '审', color: '#7c3aed', origin: 'user',
+    desc: '自定义：按团队规范审查 diff，输出分级问题清单与修复建议。',
+    tags: ['审查', '质量'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'ro', permLabel: '只读', tools: 4, priv: 0,
+    systemPrompt: '按团队规范审查代码，输出分级问题清单。', shared: ['read_file', 'grep', 'run_command'], denied: [] },
+  { id: 'release-eng', name: '发布工程师', initial: '发', color: '#ea580c', origin: 'user',
+    desc: '自定义：打包、签名、产物上传，联动 release 脚本。',
+    tags: ['发布'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'da', permLabel: '全盘可写', tools: 6, priv: 2,
+    systemPrompt: '你负责发布流程。改动外部环境前先说明并等待确认。',
+    shared: ['read_file', 'edit_file', 'run_command', 'grep'], private: ['github__release', 'sign__codesign'], denied: [] },
+  { id: 'sql-analyst', name: '数据分析师', initial: '数', color: '#059669', origin: 'user',
+    desc: '自定义：写查询、出报表，私有 MCP 工具只对本 Agent 可见。',
+    tags: ['数据'], executor: 'native', engLabel: '原生', engClass: 'native',
+    perm: 'ro', permLabel: '只读', tools: 5, priv: 1,
+    systemPrompt: '你负责数据分析。查询只读，产出结构化报表。',
+    shared: ['read_file', 'grep', 'run_command'], private: ['sql__query'], denied: ['edit_file'] },
+];
+
+const NODES = [
+  { id: 'intake', title: '需求分析', sub: '规划 · 目标与验收标准',
+    x: 284, y: 24, status: 'done', agent: 'DAG Planner', initial: '规', color: '#4f46e5',
+    engine: '规划器', engineClass: 'plan', elapsed: 38,
+    workspace: 'shared', permission: '只读', deps: [],
+    tools: ['ask_user', 'read_file', 'list_sessions', 'write_plan'], privateTools: [], denied: [],
+    prompt: '先把目标变成可执行的 DAG：澄清范围与验收标准 → 拆出调研、实现、验证节点 → 为每个节点选择 Agent、工作区和工具策略。',
+    report: '验收标准 4 条；拆成 6 个执行节点 + 1 个合并验证节点；写节点全部使用 worktree；verify 运行前需要人工确认。' },
+  { id: 'research', title: '摸清更新链路', sub: '调研 · Tauri updater',
+    x: 154, y: 180, status: 'done', agent: '探索者', initial: '探', color: '#64748b',
+    engine: 'DSH', engineClass: 'dsh', elapsed: 72,
+    workspace: 'shared', permission: '只读', deps: ['intake'],
+    tools: ['read_file', 'grep', 'list_files'], privateTools: [], denied: [],
+    prompt: '调查 Tauri updater 在本仓库的接线，输出「文件:行号」证据与缺口清单。',
+    report: '已定位 3 条链路。缺口：下载进度没有事件、失败没有回滚提示。' },
+  { id: 'specs', title: '梳理接口与数据流', sub: '调研 · 更新状态机',
+    x: 414, y: 180, status: 'done', agent: '架构师', initial: '架', color: '#0284c7',
+    engine: '原生', engineClass: 'native', elapsed: 96,
+    workspace: 'shared', permission: '只读', deps: ['intake'],
+    tools: ['read_file', 'grep'], privateTools: [], denied: [],
+    prompt: '梳理自动更新的状态机与 IPC 契约。',
+    report: '状态机 6 态；建议命令 updater_check / updater_download / updater_install。' },
+  { id: 'frontend', title: '设置页 UI', sub: '实现 · 检查 / 下载 / 重启',
+    x: 24, y: 336, status: 'running', agent: '前端工程师', initial: '前', color: '#6d5ae6',
+    engine: '原生', engineClass: 'native', elapsed: 123, progress: 62,
+    workspace: 'worktree', permission: '工作区内修改', deps: ['research', 'specs'],
+    tools: ['read_file', 'edit_file', 'run_command', 'grep'],
+    privateTools: ['figma__export'], denied: ['web__fetch'],
+    prompt: '基于上游调研实现设置页的自动更新交互。',
+    report: '' },
+  { id: 'backend', title: 'IPC 与更新流程', sub: '实现 · updater 命令',
+    x: 284, y: 336, status: 'done', agent: '后端工程师', initial: '后', color: '#0d9488',
+    engine: '原生', engineClass: 'native', elapsed: 221,
+    workspace: 'worktree', permission: '工作区内修改', deps: ['research', 'specs'],
+    tools: ['read_file', 'edit_file', 'run_command'], privateTools: [], denied: [],
+    prompt: '实现 updater 的三个 IPC 命令与事件。',
+    report: 'updater_check / updater_download / updater_install 已接；错误码 E_SIGNATURE / E_NETWORK / E_INSTALL。' },
+  { id: 'docs', title: '更新文档', sub: '实现 · README / 设置说明',
+    x: 544, y: 336, status: 'running', agent: '文档工程师', initial: '文', color: '#b45309',
+    engine: '原生', engineClass: 'native', elapsed: 48, progress: 28,
+    workspace: 'worktree', permission: '工作区内修改', deps: ['research', 'backend'],
+    tools: ['read_file', 'edit_file', 'grep'], privateTools: [], denied: [],
+    prompt: '更新 README 与设置页说明。',
+    report: '' },
+  { id: 'verify', title: '合并验证', sub: '验证 · 构建 + 测试',
+    x: 284, y: 492, status: 'pending', agent: '验证者', initial: '验', color: '#15803d',
+    engine: '原生', engineClass: 'native', elapsed: 0, gate: true,
+    workspace: 'worktree', permission: '工作区内修改', deps: ['frontend', 'backend', 'docs'],
+    tools: ['read_file', 'run_command', 'grep'], privateTools: [], denied: [],
+    prompt: '把上游三个 worktree 的改动合到一个验证工作区，跑构建与测试。',
+    report: '' }
+];
+
+const EDGES = [
+  ['intake', 'research', 'done'],
+  ['intake', 'specs', 'done'],
+  ['research', 'frontend', 'active'],
+  ['research', 'backend', 'done'],
+  ['research', 'docs', 'done'],
+  ['specs', 'frontend', 'active'],
+  ['specs', 'backend', 'done'],
+  ['backend', 'docs', 'active'],
+  ['frontend', 'verify', 'idle'],
+  ['backend', 'verify', 'idle'],
+  ['docs', 'verify', 'idle']
+];
+
+const WORLD_W = 792;
+const WORLD_H = 620;
+const NODE_W = 200;
+const NODE_H = 96;
+
+/* ============================================================
+ * 工具函数
+ * ============================================================ */
+const byId = Object.fromEntries(NODES.map(n => [n.id, n]));
+let selectedAgent = 'frontend';
+let selectedNodeId = 'frontend';
+let activeAgentTab = 'identity';
+let activeNodeTab = 'task';
+
+let toastTimer = 0;
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.querySelector('span').textContent = msg;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
+}
+function escapeHtml(s) {
+  return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+}
+function fmtDuration(sec) {
+  const s = Math.max(0, Math.round(sec));
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`;
+}
+
+/* ============================================================
+ * 视图切换
+ * ============================================================ */
+const VIEW_META = {
+  agents: { label: 'Agents 管理台', sub: '内置 + 自定义 Agent 走同一注册表', pill: 'Agents', chip: '10 Agents', status: '10 agents' },
+  workshop: { label: '工坊 · 插件', sub: '内核 + 引擎 + DAG + Agent 全部可插拔', pill: '工坊', chip: '14 插件', status: 'plugin list' },
+  dag: { label: '编排视图', sub: '一次运行中的 DAG · 由 DAG Planner 发起', pill: '编排', chip: '3 完成', status: '3/6 · 2 running' }
+};
+
+function switchView(view) {
+  document.querySelectorAll('.rail-btn[data-view]').forEach(b => b.classList.toggle('on', b.dataset.view === view));
+  document.querySelectorAll('[data-pane]').forEach(p => { p.hidden = p.id !== `view-${view}`; });
+  const meta = VIEW_META[view];
+  document.getElementById('stageLabel').innerHTML = `${meta.label} <em>静态设计稿 · ${meta.sub}</em>`;
+  document.getElementById('pillTitle').textContent = meta.pill;
+  document.getElementById('stageChip').textContent = meta.chip;
+  document.getElementById('tbStatus').innerHTML = `<i class="dot run"></i>${meta.status}`;
+  document.getElementById('fitTop').hidden = view !== 'dag';
+  if (view === 'dag') requestAnimationFrame(() => requestAnimationFrame(fitView));
+}
+document.querySelectorAll('.rail-btn[data-view]').forEach(b => {
+  b.addEventListener('click', () => switchView(b.dataset.view));
+});
+
+/* ============================================================
+ * Agent 面板
+ * ============================================================ */
+function renderAgentList() {
+  const builtin = AGENTS.filter(a => a.origin === 'builtin');
+  const user = AGENTS.filter(a => a.origin === 'user');
+  const item = (a) => `
+    <button class="agent-list-item ${a.id === selectedAgent ? 'on' : ''}" type="button" data-agent="${a.id}">
+      <span class="li-avatar" style="--agent:${a.color}">${a.initial}</span>
+      <span class="li-copy">
+        <span class="li-name">${a.name}</span>
+        <span class="li-sub">${a.tags.join(' · ')} · ${a.engLabel}</span>
+      </span>
+      <span class="origin-dot ${a.origin}"></span>
+    </button>`;
+  document.getElementById('agentList').innerHTML = `
+    <div class="as-section">内置 <span class="line"></span></div>
+    ${builtin.map(item).join('')}
+    <div class="as-section">自定义 <span class="line"></span></div>
+    ${user.map(item).join('')}`;
+  document.querySelectorAll('.agent-list-item').forEach(el => {
+    el.addEventListener('click', () => { selectedAgent = el.dataset.agent; renderAgentList(); renderAgentGrid(); renderAgentInspector(); });
+  });
+}
+
+function permBadge(a) {
+  const cls = { ro: 'ro', ww: 'ww', da: 'da' }[a.perm];
+  return `<span class="perm-badge ${cls}"><i class="dot"></i>${a.permLabel}</span>`;
+}
+
+function renderAgentGrid() {
+  document.getElementById('agentGrid').innerHTML = AGENTS.map(a => {
+    const originBadge = a.origin === 'builtin'
+      ? '<span class="origin-badge builtin">内置</span>'
+      : '<span class="origin-badge user">自定义</span>';
+    const privNote = a.noPrivateTools ? '私有工具不支持' : (a.priv ? `${a.priv} 私有` : '');
+    return `
+      <button class="agent-card ${a.id === selectedAgent ? 'is-selected' : ''}" type="button" data-agent="${a.id}">
+        <span class="card-top">
+          <span class="card-avatar" style="--agent:${a.color}">${a.initial}</span>
+          <span class="card-title-copy">
+            <span class="card-title-row"><span class="card-name">${a.name}</span><span class="card-id">${a.id}</span></span>
+            <span class="card-desc">${escapeHtml(a.desc)}</span>
+          </span>
+          ${originBadge}
+        </span>
+        <span class="tag-row">${a.tags.map(t => `<span class="tag">${t}</span>`).join('')}</span>
+        <span class="card-foot">
+          <span class="eng ${a.engClass}">${a.engLabel}</span>
+          <span class="card-spacer"></span>
+          <span class="tool-count">${a.tools} 公用${privNote ? ' · ' + privNote : ''}</span>
+          ${permBadge(a)}
+        </span>
+      </button>`;
+  }).join('');
+  document.querySelectorAll('.agent-card').forEach(el => {
+    el.addEventListener('click', () => { selectedAgent = el.dataset.agent; renderAgentList(); renderAgentGrid(); renderAgentInspector(); });
+  });
+}
+
+function agentIdentityPanel(a) {
+  return `
+    <div class="insp-section">
+      <div class="insp-label">简介</div>
+      <div class="prompt-box">${escapeHtml(a.desc)}</div>
+    </div>
+    <div class="insp-section">
+      <div class="insp-label">标签</div>
+      <div class="chip-row">${a.tags.map(t => `<span class="chip">${t}</span>`).join('')}</div>
+    </div>
+    <div class="insp-section">
+      <div class="insp-label">身份</div>
+      <div class="kv"><span>id</span><b class="mono">${a.id}</b></div>
+      <div class="kv"><span>来源</span><b>${a.origin === 'builtin' ? '内置（只读）' : '自定义（可删）'}</b></div>
+    </div>`;
+}
+function agentExecutorPanel(a) {
+  return `
+    <div class="insp-section">
+      <div class="insp-label">执行器</div>
+      <div class="kv"><span>executor</span><b class="mono">${a.executor}</b></div>
+      <div class="kv"><span>model</span><b class="mono">${a.executor === 'native' ? '跟随全局默认' : 'deepseek-chat'}</b></div>
+    </div>
+    <div class="insp-section">
+      <div class="insp-label">系统提示</div>
+      <div class="prompt-box">${escapeHtml(a.systemPrompt)}</div>
+    </div>
+    ${a.noPrivateTools ? `
+    <div class="insp-section">
+      <div class="preview-note">此执行器（外部引擎）不支持私有工具与系统提示强约束——能力矩阵已在 Planner 里标注，不会给这类节点派私有工具。</div>
+    </div>` : ''}`;
+}
+function agentToolsPanel(a) {
+  const shared = a.shared.map(t => `<span class="chip">${t}</span>`).join('');
+  const priv = (a.private || []).map(t => `<span class="chip private">${t}<span class="tag">私有</span></span>`).join('');
+  const denied = a.denied.map(t => `<span class="chip denied">${t}<span class="tag">拒绝</span></span>`).join('');
+  return `
+    <div class="insp-section">
+      <div class="insp-label">公用工具 <span class="count">${a.shared.length}</span></div>
+      <div class="chip-row">${shared}</div>
+    </div>
+    ${(a.private || []).length ? `
+    <div class="insp-section">
+      <div class="insp-label">私有工具 <span class="count">${a.private.length}</span></div>
+      <div class="chip-row">${priv}</div>
+    </div>` : ''}
+    ${a.denied.length ? `
+    <div class="insp-section">
+      <div class="insp-label">明确拒绝 <span class="count">${a.denied.length}</span></div>
+      <div class="chip-row">${denied}</div>
+    </div>` : ''}
+    <div class="insp-section">
+      <div class="insp-label">权限档</div>
+      <div class="kv"><span>permission</span><b class="${a.perm === 'da' ? 'warn' : a.perm === 'ro' ? 'ok' : ''}">${a.permLabel}</b></div>
+    </div>`;
+}
+function agentPreviewPanel(a) {
+  const effective = [...a.shared, ...(a.private || [])].filter(t => !a.denied.includes(t));
+  return `
+    <div class="insp-section">
+      <div class="insp-label">模型将看到 <span class="count">${effective.length}</span></div>
+      <div class="chip-row">${effective.map(t => `<span class="chip">${t}</span>`).join('')}</div>
+    </div>
+    <div class="insp-section">
+      <div class="preview-note">解析顺序：内置 + 公用 → 加私有 → 去 deny → 按权限档过滤 → 私有覆盖公用（内置名不可覆盖）。</div>
+    </div>`;
+}
+
+const AGENT_TABS = [['identity', '身份'], ['executor', '执行器'], ['tools', '工具'], ['preview', '预览']];
+
+function renderAgentInspector() {
+  const a = AGENTS.find(x => x.id === selectedAgent);
+  const tabs = AGENT_TABS.map(([id, label]) => `<button class="insp-tab ${activeAgentTab === id ? 'on' : ''}" type="button" data-tab="${id}">${label}</button>`).join('');
+  let body;
+  if (activeAgentTab === 'executor') body = agentExecutorPanel(a);
+  else if (activeAgentTab === 'tools') body = agentToolsPanel(a);
+  else if (activeAgentTab === 'preview') body = agentPreviewPanel(a);
+  else body = agentIdentityPanel(a);
+  const foot = a.origin === 'builtin'
+    ? `<button class="demo-btn primary" type="button" data-act="clone">复制为新 Agent</button>
+       <button class="demo-btn" type="button" data-act="override">覆盖内置</button>`
+    : `<button class="demo-btn primary" type="button" data-act="save">保存</button>
+       <button class="demo-btn danger" type="button" data-act="delete">删除</button>`;
+  document.getElementById('agentsInsp').innerHTML = `
+    <div class="insp-head">
+      <div class="insp-kicker"><span>Agent 详情</span><span class="grow"></span><span class="insp-id">${a.id}</span><button class="insp-close" type="button">×</button></div>
+      <div class="insp-title-row">
+        <div class="insp-avatar" style="--agent:${a.color}">${a.initial}</div>
+        <div class="insp-title-copy"><h2>${a.name}</h2><p>${a.tags.join(' · ')}</p></div>
+      </div>
+    </div>
+    <div class="insp-tabs">${tabs}</div>
+    <div class="insp-body">${body}</div>
+    <div class="insp-foot">${foot}</div>`;
+  document.querySelectorAll('#agentsInsp .insp-tab').forEach(b => {
+    b.addEventListener('click', () => { activeAgentTab = b.dataset.tab; renderAgentInspector(); });
+  });
+  document.querySelector('#agentsInsp [data-act="clone"]')?.addEventListener('click', () => showToast(`复制 ${a.name} 为新自定义 Agent（演示）`));
+  document.querySelector('#agentsInsp [data-act="override"]')?.addEventListener('click', () => showToast(`覆盖内置：写入 user/${a.id}.json，删除即还原（演示）`));
+  document.querySelector('#agentsInsp [data-act="save"]')?.addEventListener('click', () => showToast(`保存 ${a.name}（演示）`));
+  document.querySelector('#agentsInsp [data-act="delete"]')?.addEventListener('click', () => showToast(`删除 ${a.name}：其私有工具一并释放，引用它的草稿计划下次校验报错（演示）`));
+}
+
+/* ============================================================
+ * DAG 画布（内嵌 dag-planner 逻辑）
+ * ============================================================ */
+const STATUS = { done: { label: '已完成', pill: 'done' }, running: { label: '运行中', pill: 'running' }, pending: { label: '待运行', pill: 'pending' }, waiting: { label: '等待审批', pill: 'waiting' }, failed: { label: '失败', pill: 'failed' } };
+function nodeStatusLabel(n) { return n.gate && n.status === 'pending' ? '待确认' : STATUS[n.status]?.label ?? n.status; }
+
+function renderNodes() {
+  const layer = document.getElementById('nodeLayer');
+  layer.innerHTML = NODES.map(n => {
+    const sel = n.id === selectedNodeId ? ' is-selected' : '';
+    const check = n.status === 'done' ? '<svg class="node-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7"/></svg>' : '';
+    const gate = n.gate ? '<span class="gate-chip">需确认</span>' : '';
+    const progress = n.status === 'running' ? `<span class="node-progress"><i style="width:${n.progress ?? 40}%"></i></span>` : '';
+    const time = n.status === 'pending' ? '—' : fmtDuration(n.elapsed);
+    return `<button class="node is-${n.status}${sel}" type="button" data-id="${n.id}" style="left:${n.x}px;top:${n.y}px;--agent:${n.color}" aria-label="${escapeHtml(n.title)}">
+      <span class="node-top"><i class="status-dot ${n.status}"></i><span class="node-title">${escapeHtml(n.title)}</span>${check}</span>
+      <span class="node-sub">${escapeHtml(n.sub)}</span>
+      <span class="node-foot"><span class="avatar">${n.initial}</span><span class="agent-name">${escapeHtml(n.agent)}</span><span class="eng ${n.engineClass}">${n.engine}</span><span class="node-spacer"></span>${gate}<span class="node-time">${time}</span></span>
+      ${progress}</button>`;
+  }).join('');
+  layer.querySelectorAll('.node').forEach(el => el.addEventListener('click', e => { e.stopPropagation(); selectedNodeId = el.dataset.id; renderNodes(); renderNodeInspector(); }));
+}
+function edgePath(from, to) {
+  const x1 = from.x + NODE_W, y1 = from.y + NODE_H / 2, x2 = to.x, y2 = to.y + NODE_H / 2;
+  const bend = Math.max(26, (x2 - x1) * 0.52);
+  return `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
+}
+function renderEdges() {
+  document.getElementById('edgeLayer').innerHTML = EDGES.map(([f, t, s]) => `<path class="${s}" d="${edgePath(byId[f], byId[t])}" marker-end="url(#arrow-${s})"/>`).join('');
+}
+
+function renderNodeInspector() {
+  const n = byId[selectedNodeId];
+  const status = STATUS[n.status];
+  const isGate = Boolean(n.gate && n.status === 'pending');
+  const statusClass = isGate ? 'waiting' : status.pill;
+  const label = nodeStatusLabel(n);
+  const tabs = [['task', '任务'], ['tools', '工具'], ['output', '输出']].map(([id, t]) => `<button class="insp-tab ${activeNodeTab === id ? 'on' : ''}" type="button" data-tab="${id}">${t}</button>`).join('');
+  let body;
+  if (activeNodeTab === 'tools') {
+    body = `
+      <div class="insp-section"><div class="insp-label">公用工具</div><div class="chip-row">${n.tools.map(t => `<span class="chip">${t}</span>`).join('')}</div></div>
+      ${n.privateTools.length ? `<div class="insp-section"><div class="insp-label">私有工具</div><div class="chip-row">${n.privateTools.map(t => `<span class="chip private">${t}<span class="tag">私有</span></span>`).join('')}</div></div>` : ''}
+      ${n.denied.length ? `<div class="insp-section"><div class="insp-label">拒绝</div><div class="chip-row">${n.denied.map(t => `<span class="chip denied">${t}</span>`).join('')}</div></div>` : ''}`;
+  } else if (activeNodeTab === 'output') {
+    body = n.status === 'pending'
+      ? `<div class="insp-section"><div class="preview-note">节点尚未运行，上游完成后${n.gate ? '需人工确认' : '自动调度'}。</div></div>`
+      : `<div class="insp-section"><div class="insp-label">结果报告</div><div class="prompt-box">${escapeHtml(n.report || '（运行中，暂无报告）')}</div></div>
+         <div class="insp-section"><div class="kv"><span>耗时</span><b class="mono">${fmtDuration(n.elapsed)}</b></div><div class="kv"><span>Agent</span><b>${n.agent}</b></div></div>`;
+  } else {
+    body = `
+      <div class="insp-section"><div class="insp-label">提示词</div><div class="prompt-box">${escapeHtml(n.prompt)}</div></div>
+      <div class="insp-section"><div class="insp-label">依赖</div><div class="chip-row">${n.deps.map(d => `<span class="chip"><i class="dot ${byId[d].status === 'done' ? 'ok' : ''}"></i>${escapeHtml(byId[d].title)}</span>`).join('') || '<span class="chip">无 · 根节点</span>'}</div></div>
+      <div class="insp-section"><div class="kv"><span>工作区</span><b class="mono">${n.workspace}</b></div><div class="kv"><span>权限</span><b>${n.permission}</b></div></div>`;
+  }
+  const foot = n.status === 'running'
+    ? `<button class="demo-btn primary" type="button" data-act="open">打开会话</button><button class="demo-btn danger" type="button" data-act="stop">停止节点</button>`
+    : n.status === 'done'
+      ? `<button class="demo-btn primary" type="button" data-act="open">打开会话</button><button class="demo-btn" type="button" data-act="rerun">重新运行</button>`
+      : `<button class="demo-btn primary" type="button" data-act="run">${isGate ? '确认并运行' : '立即运行'}</button><button class="demo-btn" type="button" data-act="edit">编辑节点</button>`;
+  document.getElementById('inspector').innerHTML = `
+    <div class="insp-head">
+      <div class="insp-kicker"><span>节点详情</span><span class="grow"></span><span class="insp-id">${n.id}</span><button class="insp-close" type="button">×</button></div>
+      <div class="insp-title-row"><div class="insp-avatar" style="--agent:${n.color}">${n.initial}</div><div class="insp-title-copy"><h2>${escapeHtml(n.title)}</h2><p>${escapeHtml(n.sub)}</p></div></div>
+      <div class="insp-statusbar"><span class="pill ${statusClass}"><i class="pulse"></i>${label}</span><span class="insp-duration">${n.status === 'pending' ? '尚未开始' : fmtDuration(n.elapsed)}</span><span class="grow"></span><span class="eng ${n.engineClass}">${n.engine}</span></div>
+    </div>
+    <div class="insp-meta">
+      <div><dt>Agent</dt><dd>${escapeHtml(n.agent)}</dd></div>
+      <div><dt>执行器</dt><dd>${n.engine}</dd></div>
+      <div><dt>工作区</dt><dd class="mono">${n.workspace}</dd></div>
+      <div><dt>权限</dt><dd>${n.permission}</dd></div>
+    </div>
+    <div class="insp-tabs">${tabs}</div>
+    <div class="insp-body">${body}</div>
+    <div class="insp-foot">${foot}</div>`;
+  document.querySelectorAll('#inspector .insp-tab').forEach(b => b.addEventListener('click', () => { activeNodeTab = b.dataset.tab; renderNodeInspector(); }));
+  document.querySelector('#inspector [data-act="open"]')?.addEventListener('click', () => showToast(`打开 ${n.agent} 的会话…（演示）`));
+  document.querySelector('#inspector [data-act="stop"]')?.addEventListener('click', () => showToast(`停止节点：${n.title}（演示）`));
+  document.querySelector('#inspector [data-act="rerun"]')?.addEventListener('click', () => showToast(`重新运行：${n.title}（演示）`));
+  document.querySelector('#inspector [data-act="run"]')?.addEventListener('click', () => showToast(isGate ? '确认后启动合并验证（演示）' : `运行 ${n.title}（演示）`));
+  document.querySelector('#inspector [data-act="edit"]')?.addEventListener('click', () => showToast(`编辑节点：${n.title}（演示）`));
+}
+
+/* 画布平移缩放 */
+const canvas = document.getElementById('canvas');
+const world = document.getElementById('world');
+const view = { scale: 1, x: 0, y: 0 };
+let autoFit = true;
+function applyView() { world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`; }
+function fitView() {
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width) return;
+  const pad = 34;
+  view.scale = Math.max(0.4, Math.min((rect.width - pad * 2) / WORLD_W, (rect.height - pad * 2) / WORLD_H, 1.06));
+  view.x = Math.round((rect.width - WORLD_W * view.scale) / 2);
+  view.y = Math.round((rect.height - WORLD_H * view.scale) / 2);
+  autoFit = true; applyView();
+}
+function zoomAt(factor, cx, cy) {
+  const rect = canvas.getBoundingClientRect();
+  const px = cx - rect.left, py = cy - rect.top;
+  const next = Math.min(1.8, Math.max(0.45, view.scale * factor));
+  if (Math.abs(next - view.scale) < 0.0001) return;
+  view.x = px - (px - view.x) * (next / view.scale);
+  view.y = py - (py - view.y) * (next / view.scale);
+  view.scale = next; autoFit = false; applyView();
+}
+canvas.addEventListener('wheel', e => { e.preventDefault(); zoomAt(Math.exp(-e.deltaY * 0.0016), e.clientX, e.clientY); }, { passive: false });
+let dragState = null;
+canvas.addEventListener('pointerdown', e => {
+  if (e.button !== 0 || e.target.closest('.node, .canvas-tools')) return;
+  dragState = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
+  canvas.setPointerCapture(e.pointerId); canvas.classList.add('is-panning'); autoFit = false;
+});
+canvas.addEventListener('pointermove', e => { if (!dragState) return; view.x = dragState.vx + e.clientX - dragState.x; view.y = dragState.vy + e.clientY - dragState.y; applyView(); });
+function endDrag(e) { if (!dragState) return; dragState = null; canvas.classList.remove('is-panning'); if (e && canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId); }
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+
+document.getElementById('zoomIn')?.addEventListener('click', () => { const r = canvas.getBoundingClientRect(); zoomAt(1.16, r.left + r.width / 2, r.top + r.height / 2); });
+document.getElementById('zoomOut')?.addEventListener('click', () => { const r = canvas.getBoundingClientRect(); zoomAt(1 / 1.16, r.left + r.width / 2, r.top + r.height / 2); });
+document.getElementById('fitCanvas')?.addEventListener('click', fitView);
+document.getElementById('fitTop')?.addEventListener('click', fitView);
+document.getElementById('layoutBtn')?.addEventListener('click', () => { showToast('自动排版：按依赖重新分层（演示）'); fitView(); });
+document.getElementById('exportBtn')?.addEventListener('click', () => showToast('导出 plan.json 与运行快照（演示）'));
+document.getElementById('stopBtn')?.addEventListener('click', () => showToast('设计稿：停止会取消当前 run，保留各 worktree 产物'));
+
+/* 工坊插件开关 */
+document.querySelectorAll('[data-switch]').forEach(s => {
+  s.addEventListener('click', () => {
+    s.classList.toggle('on');
+    showToast(s.classList.contains('on') ? '插件已启用（演示）' : '插件已关停：依赖它的计划运行前报「缺少能力」（演示）');
+  });
+});
+
+/* Planner 弹层 */
+const overlay = document.getElementById('plannerOverlay');
+function openPlanner() { overlay.classList.add('show'); }
+function closePlanner() { overlay.classList.remove('show'); }
+document.getElementById('plannerOpen')?.addEventListener('click', openPlanner);
+document.getElementById('plannerCancel')?.addEventListener('click', closePlanner);
+overlay.addEventListener('click', e => { if (e.target === overlay) closePlanner(); });
+document.getElementById('plannerRun')?.addEventListener('click', () => {
+  closePlanner();
+  showToast('Planner 已从 10 个 Agent 里挑人，生成 6 节点 DAG 草案 → 待确认（演示）');
+  switchView('dag');
+});
+
+document.getElementById('newAgentBtn')?.addEventListener('click', () => showToast('新建 Agent：填身份 / 执行器 / 工具策略（演示）'));
+document.getElementById('filterBuiltin')?.addEventListener('click', () => showToast('按 内置 / 自定义 过滤（演示）'));
+document.getElementById('sortBtn')?.addEventListener('click', () => showToast('按标签分组排序（演示）'));
+
+/* 主题 */
+const themeToggle = document.getElementById('themeToggle');
+function setTheme(t) { document.documentElement.dataset.theme = t; themeToggle.textContent = t === 'dark' ? '切换浅色' : '切换深色'; }
+try { if (localStorage.getItem('prism-index-theme') === 'dark') setTheme('dark'); } catch {}
+themeToggle.addEventListener('click', () => {
+  const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  setTheme(t); try { localStorage.setItem('prism-index-theme', t); } catch {}
+});
+
+/* 初始化 */
+function renderAll() {
+  renderAgentList();
+  renderAgentGrid();
+  renderAgentInspector();
+  renderNodes();
+  renderEdges();
+  renderNodeInspector();
+}
+renderAll();
+/* URL 参数 ?view=dag|workshop|agents 可直达视图（视觉验证用） */
+try {
+  const v = new URLSearchParams(location.search).get('view');
+  switchView(v === 'dag' || v === 'workshop' ? v : 'agents');
+} catch { switchView('agents'); }
+</script>
+</body>
+</html>

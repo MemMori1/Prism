@@ -9,6 +9,21 @@ export interface EngineHealth {
   ready: boolean
 }
 
+/** dsh 的权限档位。`mode` 为 null 表示没设过，用 dsh 自己的默认。 */
+export interface DshPermissionView {
+  mode: string | null
+  options: DshPermissionOption[]
+}
+
+export interface DshPermissionOption {
+  /** dsh 认的预设名，如 `danger-full-access`。 */
+  id: string
+  label: string
+  description: string
+  /** 全盘可写且从不询问，需要额外提示。 */
+  risky: boolean
+}
+
 export interface ProjectItem {
   /** 所属引擎 id（opencode / codex …）。 */
   engine: string
@@ -582,4 +597,179 @@ export interface TaskSpawnInput {
   title?: string | null
   /** 默认 true；false = 只在终端页显示。 */
   background?: boolean
+}
+
+// ---------------------------------------------------------------- Agent 注册表
+
+/** Agent 从哪来：代码里的 preset，还是 `~/.prism/agents/user/` 下的文件。 */
+export type AgentOrigin = 'builtin' | 'user'
+
+/** 权限档位，与 dsh 的三档同名。 */
+export type AgentPermission = 'read-only' | 'workspace-write' | 'danger-full-access'
+
+/** 节点默认在哪种工作区里跑。 */
+export type AgentWorkspace = 'shared' | 'worktree' | 'scratch'
+
+/** 工具策略：`shared` 为 null 表示"该 Agent 默认可见的全部公用工具"。 */
+export interface AgentToolSelection {
+  shared: string[] | null
+  private: string[]
+  deny: string[]
+}
+
+export interface AgentProfile {
+  id: string
+  name: string
+  description: string
+  origin: AgentOrigin
+  /** 这个 profile 盖掉了一个同名内置 preset。 */
+  overridesBuiltin: boolean
+  /** `native` 或引擎 id（dsh / codex / opencode / claude）。 */
+  executor: string
+  model: string | null
+  systemPrompt: string
+  permission: AgentPermission
+  workspace: AgentWorkspace
+  tools: AgentToolSelection
+  mcp: string[]
+  tags: string[]
+  linkDirs: string[]
+  gateDefault: boolean
+}
+
+// ---------------------------------------------------------------- DAG 编排
+
+export interface DagPosition {
+  x: number
+  y: number
+}
+
+export interface DagRetry {
+  /** 额外重试次数（0 = 不重试）。 */
+  attempts: number
+  backoffMs: number
+}
+
+export interface DagGate {
+  before: boolean
+  after: boolean
+}
+
+export type DagFailurePolicy = 'fail-fast' | 'continue'
+
+export interface DagDefaults {
+  agent: string
+  permission: AgentPermission
+  maxParallel: number
+  failurePolicy: DagFailurePolicy
+  tokenBudget: number | null
+}
+
+/** 一个节点 = 一次独立会话。`null` 字段表示"跟随 Agent profile / defaults"。 */
+export interface DagNode {
+  id: string
+  title: string
+  task: string
+  dependsOn: string[]
+  agent: string | null
+  workspace: AgentWorkspace | null
+  tools: AgentToolSelection | null
+  permission: AgentPermission | null
+  retry: DagRetry
+  timeoutSecs: number | null
+  gate: DagGate | null
+  position: DagPosition | null
+}
+
+export interface DagPlan {
+  version: number
+  id: string
+  name: string
+  goal: string
+  project: string
+  defaults: DagDefaults
+  nodes: DagNode[]
+  layout: Record<string, DagPosition>
+  createdAt: number
+  updatedAt: number
+}
+
+/** 列表视图：不带节点正文。 */
+export interface DagSummary {
+  id: string
+  name: string
+  goal: string
+  project: string
+  nodeCount: number
+  gateCount: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type DagIssueLevel = 'error' | 'warning'
+
+export interface DagIssue {
+  level: DagIssueLevel
+  nodeId: string | null
+  message: string
+}
+
+// ---------------------------------------------------------------- 插件清单
+
+export type PluginState = 'active' | 'disabled' | 'cascaded'
+
+export interface PluginInfo {
+  id: string
+  requires: string[]
+  state: PluginState
+  /** 非 active 时的原因。 */
+  reason: string | null
+}
+
+// ---------------------------------------------------------------- 运行态
+
+/** 单个节点的运行状态（Rust 侧 `NodeStatus`，kebab-case 序列化）。 */
+export type DagNodeStatus =
+  | 'pending'
+  | 'waiting'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'skipped'
+  | 'cancelled'
+
+export type DagRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+/** 一个节点的运行记录。 */
+export interface DagNodeRun {
+  id: string
+  title: string
+  /** 实际指派的 Agent（null 已在后端解析成计划默认值）。 */
+  agent: string
+  status: DagNodeStatus
+  /** 第几次尝试（0 = 还没跑过）。 */
+  attempt: number
+  startedAt: number | null
+  finishedAt: number | null
+  /** 成功时的报告正文，也用于流式追加。 */
+  output: string
+  error: string | null
+  tokensIn: number
+  tokensOut: number
+  /** 工具调用摘要（`read_file src/x.rs`），给过程感。 */
+  steps: string[]
+}
+
+/** 一次运行：计划的动态影子。事件 `dag.run` 推的就是整份快照。 */
+export interface DagRun {
+  id: string
+  planId: string
+  planName: string
+  project: string
+  status: DagRunStatus
+  startedAt: number
+  finishedAt: number | null
+  /** 收尾说明：为什么失败 / 哪些被跳过。 */
+  message: string | null
+  nodes: DagNodeRun[]
 }

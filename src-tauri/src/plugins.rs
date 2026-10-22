@@ -424,3 +424,36 @@ fn register_server_tools(server: &str, spec: &ServerSpec, client: Arc<StdioClien
     }
     registered
 }
+
+/// DAG 节点执行器：把「一个 Agent + 一段任务」跑成「一段报告」。
+///
+/// 它本身不调度——调度在 `dag::executor` 里，与执行器无关。这个插件只做一件事：
+/// 往执行器注册表里登记 `native` 执行器，并登记撤销。关掉它，编排页的「运行」
+/// 会直接报「没有节点执行器」，而不是跑到一半才发现没人干活。
+pub struct DagExecutorPlugin {
+    app: AppHandle,
+}
+
+impl DagExecutorPlugin {
+    pub fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl Plugin for DagExecutorPlugin {
+    fn id(&self) -> &'static str {
+        "dag.executor.native"
+    }
+
+    fn requires(&self) -> &'static [&'static str] {
+        // 执行器是"用引擎"的那一层：引擎不在，它连模型都问不到。
+        &["engine.native"]
+    }
+
+    fn setup(&self, ctx: &mut KernelCtx<'_>) -> Result<(), String> {
+        let runner = Arc::new(crate::dag::runner::NativeRunner::new(Some(self.app.clone())));
+        crate::dag::runner::register(runner);
+        ctx.on_shutdown(|| crate::dag::runner::unregister("native"));
+        Ok(())
+    }
+}

@@ -3,6 +3,8 @@ export type AppView =
   | 'home'
   | 'archive'
   | 'workbench'
+  | 'agents'
+  | 'dag'
   | 'race'
   | 'search'
   | 'usage'
@@ -38,6 +40,27 @@ export const NAV_ITEMS: readonly NavItem[] = [
     label: '工作台',
     hint: '多列并行指挥：同时盯着多个跑着的会话',
     icon: ['M3.5 5.5h17v13h-17z', 'M9 5.5v13', 'M15 5.5v13'],
+  },
+  {
+    view: 'agents',
+    label: 'Agents',
+    hint: 'Agents 管理台：内置 + 自定义 Agent 走同一注册表，各自声明执行器、工具策略与权限档',
+    icon: [
+      'M9 8.5a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Z',
+      'M17 9.5a2.4 2.4 0 1 0 0 4.8 2.4 2.4 0 0 0 0-4.8Z',
+      'M12 17a2.6 2.6 0 1 0 0 5.2 2.6 2.6 0 0 0 0-5.2Z',
+    ],
+  },
+  {
+    view: 'dag',
+    label: '编排',
+    hint: '编排：需求分析 → DAG Planner 拆图 → 每个节点交给一个 Agent 独立跑',
+    icon: [
+      'M5.5 6a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4Z',
+      'M18.5 6a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4Z',
+      'M12 18a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4Z',
+      'M7.7 8.2h8.6M6.8 10.3l4.2 7.6M17.2 10.3l-4.2 7.6',
+    ],
   },
   {
     view: 'race',

@@ -154,6 +154,13 @@ impl AcpClient {
         if let Some(home) = home {
             command.env("DSH_HOME", home);
         }
+        // 权限档位只能从这里进：ACP 没有读/改权限的方法（`session/new` 的
+        // configOptions 只有 model 与 reasoning_effort），而 acp profile 的
+        // sandbox-policy / approval / permission-presets 三处都读这个变量。
+        // 不设就走 dsh 默认（workspace-write + 每次询问）。
+        if let Some(mode) = super::permission::load() {
+            command.env(super::permission::ENV, mode.as_str());
+        }
 
         let mut child = command
             .spawn()

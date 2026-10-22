@@ -86,6 +86,29 @@ if (settingsIndex !== null) {
   }, 900)
 }
 
+/** 截图用：?dag=run 在编排页点一次「运行」，看运行条与节点状态。 */
+const dagAction = params.get('dag')
+if (dagAction) {
+  window.setTimeout(() => {
+    if (dagAction === 'planner') {
+      ;(document.querySelector('.pane-foot .primary-btn') as HTMLElement | null)?.click()
+      return
+    }
+    ;(document.querySelector('.primary-btn.run') as HTMLElement | null)?.click()
+  }, 1400)
+}
+
+/** 截图用：?workshop=plugins 切到工坊的插件清单。 */
+const workshopMode = params.get('workshop')
+if (workshopMode) {
+  window.setTimeout(() => {
+    const buttons = document.querySelectorAll<HTMLElement>('.mode-btn')
+    buttons.forEach(button => {
+      if (button.textContent?.trim() === workshopMode) button.click()
+    })
+  }, 900)
+}
+
 const app = createApp(App)
 installRenderErrorHooks(app)
 app.mount('#app')

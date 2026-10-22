@@ -8,7 +8,15 @@ import { getVersion } from '@tauri-apps/api/app'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type Update } from '@tauri-apps/plugin-updater'
 import { api } from '../api'
-import type { AssetItem, AssetKind, EngineHealth, McpServer, RuntimeStatus, ToolView } from '../types'
+import type {
+  AssetItem,
+  AssetKind,
+  DshPermissionView,
+  EngineHealth,
+  McpServer,
+  RuntimeStatus,
+  ToolView,
+} from '../types'
 import type { AppView } from '../nav'
 import {
   SETTINGS_SECTIONS,
@@ -36,6 +44,22 @@ const runtime = ref<RuntimeStatus | null>(null)
 const prismVersion = ref<string | null>(null)
 const loading = ref(true)
 const errorText = ref<string | null>(null)
+
+/**
+ * dsh 的权限档位。挂在 dsh 进程的环境变量上，改完要重启进程才生效，
+ * 所以保存时会把当前对话打断——界面上要先说清楚。
+ */
+const dshPermission = ref<DshPermissionView | null>(null)
+const dshPermissionSaving = ref<string | null>(null)
+const dshPermissionError = ref<string | null>(null)
+/** dsh 没装的时候这张卡片没有意义，整块隐藏。 */
+const dshReady = computed(() => engines.value.some(item => item.engineId === 'dsh'))
+/** 当前选了哪档；`null`（没设过）时交给模板显示"跟随 dsh 默认"。 */
+const dshCurrent = computed(() => {
+  const view = dshPermission.value
+  if (!view || view.mode === null) return null
+  return view.options.find(item => item.id === view.mode) ?? null
+})
 
 const workshopAssets = ref<AssetItem[]>([])
 const workshopMcp = ref<McpServer[]>([])
@@ -206,6 +230,37 @@ async function load() {
     errorText.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     loading.value = false
+  }
+  // 单独一条，别让它拖垮整页：dsh 没装时这个命令也可能失败。
+  void loadDshPermission()
+}
+
+async function loadDshPermission() {
+  try {
+    dshPermission.value = await api.dshPermission()
+    dshPermissionError.value = null
+  } catch (cause) {
+    dshPermissionError.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+/**
+ * 切换档位。
+ *
+ * `null` = 恢复 dsh 默认（不设环境变量）。后端会顺手关掉 dsh 进程，
+ * 因为权限只在 spawn 时读一次——正在跑的回合会断，所以卡片上写了提示。
+ */
+async function pickDshPermission(mode: string | null) {
+  if (dshPermissionSaving.value !== null) return
+  if ((dshPermission.value?.mode ?? null) === mode) return
+  dshPermissionSaving.value = mode ?? 'reset'
+  dshPermissionError.value = null
+  try {
+    dshPermission.value = await api.dshSetPermission(mode)
+  } catch (cause) {
+    dshPermissionError.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    dshPermissionSaving.value = null
   }
 }
 
@@ -590,6 +645,55 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
                   PID {{ runtime.pid }} · {{ runtime.baseUrl }}
                 </span>
               </div>
+            </div>
+            <div v-if="dshReady" class="settings-card">
+              <header class="settings-card-head">
+                <div class="settings-card-title">权限（DeepSeek Harness）</div>
+                <div class="settings-card-hint">
+                  档位挂在 dsh 进程上，切换会重启它，正在跑的回合会中断。
+                </div>
+              </header>
+              <div class="settings-row">
+                <div class="settings-row-main">
+                  <div class="settings-row-title">当前档位</div>
+                  <div class="settings-row-desc">
+                    {{ dshCurrent?.description ?? '未设置，跟随 dsh 默认：只能改工作区，且每次写文件/跑命令都要审批' }}
+                  </div>
+                </div>
+                <span class="settings-row-value">{{ dshCurrent?.label ?? '跟随默认' }}</span>
+              </div>
+              <div class="perm-grid">
+                <button
+                  v-for="option in dshPermission?.options ?? []"
+                  :key="option.id"
+                  type="button"
+                  class="perm-chip"
+                  :class="{ 'is-active': dshPermission?.mode === option.id, 'is-risky': option.risky }"
+                  :disabled="dshPermissionSaving !== null"
+                  :aria-pressed="dshPermission?.mode === option.id"
+                  @click="pickDshPermission(option.id)"
+                >
+                  <span class="perm-chip-head">
+                    <span class="perm-chip-label">{{ option.label }}</span>
+                    <span v-if="option.risky" class="perm-chip-flag">谨慎</span>
+                  </span>
+                  <span class="perm-chip-desc">{{ option.description }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="perm-chip"
+                  :class="{ 'is-active': !dshPermission?.mode }"
+                  :disabled="dshPermissionSaving !== null"
+                  :aria-pressed="!dshPermission?.mode"
+                  @click="pickDshPermission(null)"
+                >
+                  <span class="perm-chip-head">
+                    <span class="perm-chip-label">跟随 dsh 默认</span>
+                  </span>
+                  <span class="perm-chip-desc">不设环境变量，用 dsh 自己配的档位</span>
+                </button>
+              </div>
+              <p v-if="dshPermissionError" class="settings-error">{{ dshPermissionError }}</p>
             </div>
           </section>
 

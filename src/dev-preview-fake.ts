@@ -13,7 +13,15 @@
  * `null` 并在组件里炸成 `Cannot read properties of null`。这个文件在
  * `tsconfig.include` 范围内，`pnpm build` 的类型检查会覆盖它。
  */
-import type { SessionSummary } from './types'
+import type {
+  AgentProfile,
+  DagNode,
+  DagPlan,
+  DagRun,
+  DagSummary,
+  PluginInfo,
+  SessionSummary,
+} from './types'
 
 const params = new URLSearchParams(location.search)
 const scene = params.get('state') ?? 'bound'
@@ -47,6 +55,163 @@ function summary(
 
 const NATIVE_DIR = '/Users/example/hsbg-helper'
 const PRISM_DIR = '/Users/example/prism'
+
+/* ---- Agent 注册表 / DAG / 插件：样例数据 ----
+ * 真后端加命令时这里必须同步，否则预览里会拿到 null 并在组件里炸。 */
+
+const fakeAgents: AgentProfile[] = [
+  {
+    id: 'explore',
+    name: '探索者',
+    description: '只读调研：定位文件、梳理调用链，结论带「文件:行号」。',
+    origin: 'builtin',
+    overridesBuiltin: false,
+    executor: 'native',
+    model: null,
+    systemPrompt: '你负责只读调研。先搜再读，不修改任何文件。',
+    permission: 'read-only',
+    workspace: 'shared',
+    tools: { shared: ['read_file', 'grep', 'list_files'], private: [], deny: [] },
+    mcp: [],
+    tags: ['调研'],
+    linkDirs: [],
+    gateDefault: false,
+  },
+  {
+    id: 'general',
+    name: '通用工程师',
+    description: '能读能写能跑命令，按任务描述独立完成一个节点。',
+    origin: 'builtin',
+    overridesBuiltin: false,
+    executor: 'native',
+    model: null,
+    systemPrompt: '你负责把一个节点的任务做完，输出结论与改动清单。',
+    permission: 'workspace-write',
+    workspace: 'worktree',
+    tools: { shared: null, private: [], deny: [] },
+    mcp: [],
+    tags: ['实现'],
+    linkDirs: [],
+    gateDefault: false,
+  },
+  {
+    id: 'frontend',
+    name: '前端工程师',
+    description: '前端实现：组件、样式、交互，保持现有设计令牌与间距体系。',
+    origin: 'builtin',
+    overridesBuiltin: false,
+    executor: 'native',
+    model: null,
+    systemPrompt: '你负责前端实现。先读再改，不引入新组件库。',
+    permission: 'workspace-write',
+    workspace: 'worktree',
+    tools: { shared: ['read_file', 'edit_file', 'run_command'], private: [], deny: [] },
+    mcp: [],
+    tags: ['前端', '实现'],
+    linkDirs: ['node_modules'],
+    gateDefault: false,
+  },
+  {
+    id: 'code-reviewer',
+    name: '代码审查',
+    description: '自定义：按团队规范审查 diff，输出分级问题清单。',
+    origin: 'user',
+    overridesBuiltin: false,
+    executor: 'native',
+    model: null,
+    systemPrompt: '按团队规范审查代码：先看意图，再看边界与错误处理。',
+    permission: 'read-only',
+    workspace: 'shared',
+    tools: { shared: ['read_file', 'grep'], private: [], deny: [] },
+    mcp: [],
+    tags: ['审查'],
+    linkDirs: [],
+    gateDefault: false,
+  },
+]
+
+function fakeNode(
+  id: string,
+  title: string,
+  task: string,
+  dependsOn: string[],
+  agent: string | null,
+  extra: Partial<DagNode> = {},
+): DagNode {
+  return {
+    id,
+    title,
+    task,
+    dependsOn,
+    agent,
+    workspace: null,
+    tools: null,
+    permission: null,
+    retry: { attempts: 0, backoffMs: 2000 },
+    timeoutSecs: null,
+    gate: null,
+    position: null,
+    ...extra,
+  }
+}
+
+function fakePlan(id = 'dag-20261022-120400001'): DagPlan {
+  return {
+    version: 1,
+    id,
+    name: '给设置页加自动更新',
+    goal: '在设置里加自动更新，包含检查 / 下载 / 重启',
+    project: PRISM_DIR,
+    defaults: {
+      agent: 'general',
+      permission: 'workspace-write',
+      maxParallel: 2,
+      failurePolicy: 'fail-fast',
+      tokenBudget: null,
+    },
+    nodes: [
+      fakeNode('research', '摸清更新链路', '调查 Tauri updater 的接线与缺口，输出「文件:行号」。', [], 'explore', {
+        workspace: 'shared',
+      }),
+      fakeNode(
+        'frontend',
+        '设置页 UI',
+        '实现检查 / 下载 / 重启交互。\n{{nodes.research.output}}',
+        ['research'],
+        'frontend',
+        { workspace: 'worktree' },
+      ),
+      fakeNode('backend', 'IPC 与更新流程', '接 updater 的三个命令与事件。', ['research'], null, {
+        workspace: 'worktree',
+      }),
+      fakeNode('verify', '合并验证', '合上游改动，跑构建与测试。', ['frontend', 'backend'], null, {
+        workspace: 'worktree',
+        gate: { before: true, after: false },
+      }),
+    ],
+    layout: {},
+    createdAt: now - 3 * MIN,
+    updatedAt: now - MIN,
+  }
+}
+
+const fakePlugins: PluginInfo[] = [
+  { id: 'engine.native', requires: [], state: 'active', reason: null },
+  { id: 'engine.opencode', requires: [], state: 'active', reason: null },
+  { id: 'engine.codex', requires: [], state: 'active', reason: null },
+  { id: 'engine.dsh', requires: [], state: 'active', reason: null },
+  { id: 'engine.claude', requires: [], state: 'active', reason: null },
+  { id: 'engine.host', requires: [], state: 'active', reason: null },
+  { id: 'tray', requires: [], state: 'active', reason: null },
+  { id: 'quota', requires: [], state: 'active', reason: null },
+  { id: 'tasks', requires: [], state: 'active', reason: null },
+  { id: 'routines', requires: ['engine.host'], state: 'active', reason: null },
+  { id: 'tools.mcp', requires: [], state: 'active', reason: null },
+  { id: 'dag.executor.native', requires: ['engine.native'], state: 'active', reason: null },
+]
+
+let fakePlans: DagPlan[] = [fakePlan()]
+let fakeRun: DagRun | null = null
 
 const projects = [
   {
@@ -526,6 +691,132 @@ type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>
 
 const eventListeners = new Set<{ event: string; fn: (envelope: unknown) => void }>()
 
+/* ---- DAG 运行模拟 ----
+ * 预览里没有真模型，所以按依赖手动推进状态机：每个 tick 收掉在跑的、放下
+ * 依赖已齐的，再用 `dag.run` 事件推出去——和真后端推的载荷是同一个形状。 */
+
+const FAKE_STEPS: Record<string, string[]> = {
+  research: ['grep "updater" src-tauri', 'read_file src-tauri/Cargo.toml', 'read_file src/lib.rs'],
+  frontend: ['read_file src/components/SettingsDialog.vue', 'edit_file src/components/SettingsDialog.vue'],
+  backend: ['read_file src-tauri/src/ipc.rs', 'edit_file src-tauri/src/ipc.rs'],
+  verify: ['run_command pnpm build', 'run_command cargo test --lib'],
+}
+
+let runTimer = 0
+
+function emitRun(run: DagRun): void {
+  for (const listener of eventListeners) {
+    if (listener.event !== 'dag.run') continue
+    listener.fn({ event: 'dag.run', id: 0, payload: JSON.parse(JSON.stringify(run)) })
+  }
+}
+
+function finishRun(): void {
+  const run = fakeRun
+  if (!run) return
+  const failed = run.nodes.filter(node => node.status === 'failed').length
+  const cancelled = run.nodes.filter(node => node.status === 'cancelled').length
+  const skipped = run.nodes.filter(node => node.status === 'skipped').length
+  run.status = failed ? 'failed' : cancelled ? 'cancelled' : 'succeeded'
+  run.finishedAt = Date.now()
+  const parts: string[] = []
+  if (failed) parts.push(`失败：${run.nodes.filter(n => n.status === 'failed').map(n => n.id).join('、')}`)
+  if (skipped) parts.push(`${skipped} 个节点被跳过`)
+  if (cancelled) parts.push(`${cancelled} 个节点被取消`)
+  run.message = parts.length ? parts.join('；') : null
+  if (runTimer) {
+    window.clearInterval(runTimer)
+    runTimer = 0
+  }
+  emitRun(run)
+}
+
+function stepRun(): void {
+  const run = fakeRun
+  if (!run || run.status !== 'running') {
+    if (runTimer) {
+      window.clearInterval(runTimer)
+      runTimer = 0
+    }
+    return
+  }
+  const plan = fakePlans.find(item => item.id === run.planId)
+  const statusOf = (id: string): string => run.nodes.find(node => node.id === id)?.status ?? 'pending'
+
+  // 1) 上一 tick 放出去的收到成功（让 running 至少可见一帧）
+  for (const node of run.nodes) {
+    if (node.status !== 'running') continue
+    node.status = 'succeeded'
+    node.finishedAt = Date.now()
+    node.output = `（预览假数据）${node.title} 完成。\n\n- 读了 3 个文件\n- 改了 1 个文件\n\n结论：链路已接上，剩下的是收尾。`
+    node.steps = FAKE_STEPS[node.id] ?? ['read_file src/App.vue']
+    node.tokensIn += 1_800
+    node.tokensOut += 420
+  }
+
+  // 2) 依赖已齐的 pending 放出去
+  const released = run.nodes.filter(node => {
+    if (node.status !== 'pending') return false
+    const source = plan?.nodes.find(item => item.id === node.id)
+    return (source?.dependsOn ?? []).every(dep => statusOf(dep) === 'succeeded')
+  })
+  const parallel = Math.max(1, plan?.defaults.maxParallel ?? 2)
+  let free = parallel - run.nodes.filter(node => node.status === 'running').length
+  for (const node of released) {
+    const source = plan?.nodes.find(item => item.id === node.id)
+    if (source?.gate?.before) {
+      // 闸门：先停在待确认，等 `dag_run_approve`
+      node.status = 'waiting'
+      continue
+    }
+    if (free <= 0) continue
+    node.status = 'running'
+    node.attempt += 1
+    node.startedAt = Date.now()
+    free -= 1
+  }
+
+  const busy = run.nodes.some(node => node.status === 'running' || node.status === 'waiting')
+  if (!busy) {
+    finishRun()
+    return
+  }
+  emitRun(run)
+}
+
+function startRun(plan: DagPlan): DagRun {
+  const run: DagRun = {
+    id: `run-${plan.id}-${Date.now()}`,
+    planId: plan.id,
+    planName: plan.name,
+    project: plan.project,
+    status: 'running',
+    startedAt: Date.now(),
+    finishedAt: null,
+    message: null,
+    nodes: plan.nodes.map(node => ({
+      id: node.id,
+      title: node.title,
+      agent: node.agent ?? plan.defaults.agent,
+      status: 'pending' as const,
+      attempt: 0,
+      startedAt: null,
+      finishedAt: null,
+      output: '',
+      error: null,
+      tokensIn: 0,
+      tokensOut: 0,
+      steps: [],
+    })),
+  }
+  fakeRun = run
+  emitRun(run)
+  if (runTimer) window.clearInterval(runTimer)
+  runTimer = window.setInterval(stepRun, 900)
+  window.setTimeout(stepRun, 120)
+  return run
+}
+
 const invoke: Invoke = async (cmd, args = {}) => {
   calls[cmd] = (calls[cmd] ?? 0) + 1
   // 真 listen() 走这个命令：把 handler 记下来，脚本里用 __emitEngine 推事件。
@@ -922,6 +1213,139 @@ index 1a2b3c4..5d6e7f8 100644
       return null
     case 'plugin:webview|internal_toggle_devtools':
       return null
+    case 'agents_list':
+      return fakeAgents.map(item => JSON.parse(JSON.stringify(item)))
+    case 'agent_save': {
+      const profile = JSON.parse(JSON.stringify(args.profile)) as AgentProfile
+      const index = fakeAgents.findIndex(item => item.id === profile.id)
+      if (index >= 0) {
+        // 覆盖内置：留 origin 的原始值，只换内容，前端才能显示「覆盖内置」
+        fakeAgents[index] = profile
+      } else {
+        fakeAgents.push(profile)
+      }
+      return { ...profile }
+    }
+    case 'agent_delete': {
+      const id = String(args.id)
+      const index = fakeAgents.findIndex(item => item.id === id && item.origin === 'user' && !item.overridesBuiltin)
+      if (index >= 0) fakeAgents.splice(index, 1)
+      return null
+    }
+    case 'dag_list':
+      return fakePlans
+        .map(plan => ({
+          id: plan.id,
+          name: plan.name,
+          goal: plan.goal,
+          project: plan.project,
+          nodeCount: plan.nodes.length,
+          gateCount: plan.nodes.filter(node => node.gate?.before).length,
+          createdAt: plan.createdAt,
+          updatedAt: plan.updatedAt,
+        }) satisfies DagSummary)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+    case 'dag_get': {
+      const plan = fakePlans.find(item => item.id === String(args.id))
+      return plan ? JSON.parse(JSON.stringify(plan)) : null
+    }
+    case 'dag_new':
+      return fakePlan(`dag-${Date.now()}`)
+    case 'dag_save': {
+      const plan = JSON.parse(JSON.stringify(args.plan)) as DagPlan
+      plan.updatedAt = Date.now()
+      const index = fakePlans.findIndex(item => item.id === plan.id)
+      if (index >= 0) fakePlans[index] = plan
+      else fakePlans.unshift(plan)
+      return JSON.parse(JSON.stringify(plan))
+    }
+    case 'dag_delete': {
+      const id = String(args.id)
+      fakePlans = fakePlans.filter(item => item.id !== id)
+      return null
+    }
+    case 'dag_validate': {
+      const plan = args.plan as DagPlan
+      const issues: { level: 'error' | 'warning'; nodeId: string | null; message: string }[] = []
+      for (const node of plan.nodes) {
+        if (!node.task.trim()) {
+          issues.push({ level: 'error', nodeId: node.id, message: '任务描述是空的，子 Agent 没有可做的事' })
+        }
+        for (const dep of node.dependsOn) {
+          if (!plan.nodes.some(item => item.id === dep)) {
+            issues.push({ level: 'error', nodeId: node.id, message: `依赖的节点「${dep}」不在图里` })
+          }
+        }
+        if (!node.agent && !plan.defaults.agent) {
+          issues.push({ level: 'warning', nodeId: node.id, message: '没有指定 Agent，也没有计划默认值' })
+        }
+      }
+      return issues
+    }
+    case 'dag_plan':
+      return fakePlan(`dag-${Date.now()}`)
+    case 'dag_run': {
+      const plan = fakePlans.find(item => item.id === String(args.id))
+      if (!plan) throw new Error(`没有这张计划：${String(args.id)}`)
+      return JSON.parse(JSON.stringify(startRun(plan)))
+    }
+    case 'dag_run_cancel': {
+      if (!fakeRun) return null
+      for (const node of fakeRun.nodes) {
+        if (node.status === 'running' || node.status === 'waiting') {
+          node.status = 'cancelled'
+          node.finishedAt = Date.now()
+          node.error = '运行被取消'
+        } else if (node.status === 'pending') {
+          node.status = 'skipped'
+          node.error = '运行被取消'
+        }
+      }
+      finishRun()
+      return JSON.parse(JSON.stringify(fakeRun))
+    }
+    case 'dag_run_approve': {
+      if (!fakeRun) return null
+      const node = fakeRun.nodes.find(item => item.id === String(args.nodeId))
+      if (node && node.status === 'waiting') {
+        if (args.allowed) {
+          node.status = 'running'
+          node.attempt += 1
+          node.startedAt = Date.now()
+        } else {
+          node.status = 'cancelled'
+          node.finishedAt = Date.now()
+          node.error = '人工确认未通过'
+          // 下游跟着跳过：拒绝一个节点等于砍掉它那条分支
+          for (const other of fakeRun.nodes) {
+            if (other.status === 'pending' && other.id !== node.id) {
+              other.status = 'skipped'
+              other.error = '上游被拒绝'
+            }
+          }
+        }
+      }
+      emitRun(fakeRun)
+      return JSON.parse(JSON.stringify(fakeRun))
+    }
+    case 'dag_run_latest': {
+      if (!fakeRun || fakeRun.planId !== String(args.planId)) return null
+      return JSON.parse(JSON.stringify(fakeRun))
+    }
+    case 'dag_run_get': {
+      if (!fakeRun || fakeRun.id !== String(args.runId)) return null
+      return JSON.parse(JSON.stringify(fakeRun))
+    }
+    case 'plugins_list':
+      return fakePlugins.map(item => JSON.parse(JSON.stringify(item)))
+    case 'plugin_set_enabled': {
+      const target = fakePlugins.find(item => item.id === String(args.id))
+      if (target) {
+        target.state = args.enabled ? 'active' : 'disabled'
+        target.reason = args.enabled ? null : `${target.id}：被配置关闭（下次启动生效）`
+      }
+      return null
+    }
     default:
       console.warn('[fake] 未实现的命令', cmd, args)
       return null

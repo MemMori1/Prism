@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::engines::engine::Engine;
@@ -97,6 +98,19 @@ fn validate(plugins: &[Arc<dyn Plugin>]) -> Result<(), String> {
 /// 插件开关文件（`~/.prism/plugins.json`）。
 const CONFIG_FILE: &str = "plugins.json";
 
+/// 清单里一项：给工坊「插件」页看的。**声明**（清单里有它）与**结果**
+/// （这次到底装没装）分开报，用户才知道"关掉一个插件"到底影响了什么。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInfo {
+    pub id: String,
+    pub requires: Vec<String>,
+    /// `active` / `disabled`（配置关掉）/ `cascaded`（依赖被关，级联关闭）。
+    pub state: String,
+    /// 非 active 时的原因，直接显示给用户。
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 struct PluginConfig {
     /// 关掉的插件 id。默认空＝全装。
@@ -123,6 +137,57 @@ fn disabled_from_disk() -> Vec<String> {
             Vec::new()
         }
     }
+}
+
+/// 改一个插件的开关（写 `~/.prism/plugins.json`）。
+///
+/// **下次启动才生效**：装配只在 `setup` 里跑一次，运行期把插件装进来或拆出去
+/// 需要各插件自己支持热插拔，而 Tauri 的 `manage` 根本不能撤销。与其假装能热切，
+/// 不如把"要重启"写在返回值旁边的界面上。
+///
+/// 只动 `disabled` 一个键，其余字段原样保留（用户可能手写过别的配置）。
+pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
+    let dir = crate::engines::opencode::search::prism_dir()
+        .ok_or_else(|| "找不到 ~/.prism 目录".to_string())?;
+    let path = dir.join(CONFIG_FILE);
+
+    let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text).unwrap_or_else(|error| {
+            // 配置坏了就重写一份：留着坏文件只会让"点了没反应"变成常态。
+            eprintln!("[prism] {CONFIG_FILE} 解析失败，将重写：{error}");
+            serde_json::json!({})
+        }),
+        _ => serde_json::json!({}),
+    };
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+
+    let mut disabled: Vec<String> = root
+        .get("disabled")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    disabled.retain(|item| item != id);
+    if !enabled {
+        disabled.push(id.to_string());
+    }
+    root["disabled"] = serde_json::json!(disabled);
+
+    let body = serde_json::to_string_pretty(&root)
+        .map_err(|error| format!("序列化插件配置失败：{error}"))?;
+    let temp = dir.join(format!(".{CONFIG_FILE}.tmp"));
+    std::fs::write(&temp, body)
+        .map_err(|error| format!("写入 {} 失败：{error}", temp.display()))?;
+    std::fs::rename(&temp, &path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        format!("保存 {} 失败：{error}", path.display())
+    })
 }
 
 /// 按开关求活动集：先剔掉被关掉的，再把"依赖已被剔掉"的级联剔掉。
@@ -203,6 +268,7 @@ pub struct Kernel {
     installed: Vec<&'static str>,
     disposers: Disposers,
     engines: Vec<Arc<dyn Engine>>,
+    manifest: Vec<PluginInfo>,
 }
 
 impl Kernel {
@@ -212,6 +278,7 @@ impl Kernel {
             installed: Vec::new(),
             disposers: Disposers::default(),
             engines: Vec::new(),
+            manifest: Vec::new(),
         }
     }
 
@@ -232,6 +299,44 @@ impl Kernel {
     ) -> Result<(), String> {
         let (active, skipped) = resolve(plugins, disabled);
         validate(&active)?;
+
+        // 清单在装配前就定格：即使某个插件 setup 失败，工坊里也能看到"它存在"，
+        // 而不是整页空白——那会让人以为是没这个功能。
+        self.manifest = plugins
+            .iter()
+            .map(|plugin| {
+                let id = plugin.id();
+                let requires = plugin
+                    .requires()
+                    .iter()
+                    .map(|item| item.to_string())
+                    .collect::<Vec<_>>();
+                let blocked = if disabled.iter().any(|off| off == id) {
+                    Some(("disabled", format!("{id}：被配置关闭")))
+                } else if active.iter().any(|item| item.id() == id) {
+                    None
+                } else {
+                    skipped
+                        .iter()
+                        .find(|reason| reason.starts_with(&format!("{id}：")))
+                        .map(|reason| ("cascaded", reason.clone()))
+                };
+                match blocked {
+                    None => PluginInfo {
+                        id: id.to_string(),
+                        requires,
+                        state: "active".to_string(),
+                        reason: None,
+                    },
+                    Some((state, reason)) => PluginInfo {
+                        id: id.to_string(),
+                        requires,
+                        state: state.to_string(),
+                        reason: Some(reason),
+                    },
+                }
+            })
+            .collect();
 
         for reason in &skipped {
             // 预期结果，不是错误：用 stderr 说明一句就够，不打断启动。
@@ -261,17 +366,19 @@ impl Kernel {
         KernelState {
             disposers: self.disposers,
             installed: self.installed,
+            manifest: self.manifest,
         }
     }
 }
 
-/// 运行期的内核残影：只剩"怎么拆"。
+/// 运行期的内核残影：只剩"怎么拆"与"装了哪些"。
 ///
 /// 刻意不持有 `AppHandle`——托管状态里塞一个 AppHandle 会形成
 /// `App -> State -> App` 的引用环，应用退出时永远释放不掉。
 pub struct KernelState {
     disposers: Disposers,
     installed: Vec<&'static str>,
+    manifest: Vec<PluginInfo>,
 }
 
 impl KernelState {
@@ -283,6 +390,11 @@ impl KernelState {
             println!("[prism] 已关停 {} 个插件", torn_down.len());
         }
         self.installed.clear();
+    }
+
+    /// 本次装配的清单（含被关掉 / 级联关掉的项）。
+    pub fn manifest(&self) -> Vec<PluginInfo> {
+        self.manifest.clone()
     }
 }
 
