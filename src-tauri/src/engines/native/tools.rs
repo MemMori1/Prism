@@ -693,6 +693,8 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
         // 制品工具（只在 DAG 作用域里出现）与安全研究线的本机工具。
         list.extend(super::artifact_tools::tools());
         list.extend(super::forensics::tools());
+        list.extend(super::analysis::tools());
+        list.extend(super::dag_tools::tools());
         list
     })
 }

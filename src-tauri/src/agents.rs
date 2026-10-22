@@ -177,7 +177,7 @@ fn preset(
 /// 老会话里的 `task` 工具调用（`agent_type: "explore"`）解析结果不会因为
 /// 这次改动而变。
 pub fn builtin() -> Vec<AgentProfile> {
-    vec![
+    let mut presets = vec![
         preset(
             "explore",
             "探索者",
@@ -187,7 +187,9 @@ pub fn builtin() -> Vec<AgentProfile> {
             Workspace::Shared,
             "你负责只读调研。先搜再读，结论必须有「文件:行号」证据；不修改任何文件。",
             &["调研"],
-            tools(&["read_file", "grep", "list_files", "list_sessions"], &[], &[]),
+            // `list_sessions` 是 IPC 命令不是工具，早先误写进白名单；
+            // 白名单里挂着不存在的名字等于给用户一个假承诺，删掉。
+            tools(&["read_file", "grep", "list_files"], &[], &[]),
         ),
         preset(
             "general",
@@ -278,7 +280,259 @@ pub fn builtin() -> Vec<AgentProfile> {
             &["调研", "沙箱"],
             tools(&["read_file", "grep", "list_files"], &[], &[]),
         ),
-    ]
+        preset(
+            "dag-planner",
+            "编排规划",
+            "在运行中的 DAG 里改图：加删节点、接依赖、每次改完自动校验。",
+            "native",
+            Permission::WorkspaceWrite,
+            Workspace::Shared,
+            "你负责改这张图，不是重写这张图。\n\
+             先 prism.dag.plan.read 看清现有节点与依赖，再动手；不要凭记忆改。\n\
+             小步改：一次一个动作（加一个节点、接一条边），每次都用返回的 issues 确认没坏。\n\
+             工具会在校验不过时整体回滚并告诉你原因——那不是失败，是让你看清问题再改一次。\n\
+             能复用现有节点就别新建；节点的 task 里引用上游用 {{nodes.<id>.output}}，长报告用 {{artifacts.<id>.summary}}。\n\
+             选 Agent 时按工种匹配：识别哈希字符串用 sample-prep，看导入表用 static-analysis，找算法用 crypto-analysis，出报告用 sec-assist。",
+            &["编排", "规划"],
+            tools(
+                &[
+                    "read_file",
+                    "list_files",
+                    "grep",
+                    "bin.json.jq",
+                    "prism.dag.plan.read",
+                    "prism.dag.node.add",
+                    "prism.dag.node.update",
+                    "prism.dag.node.remove",
+                    "prism.dag.edge.add",
+                    "prism.dag.edge.remove",
+                    "prism.dag.validate",
+                ],
+                &[],
+                &["write_file", "edit_file"],
+            ),
+        ),
+        // ---------------------------------------------------------- 安全研究线
+        // 下面七个不是"给软工 Agent 挂上 bin.* 工具"，而是各自绑定了不同的
+        // 方法论、工具组合与风险档：给「前端工程师」装上 bin.strings.extract，
+        // 它只会把结果当文本读；逆向需要的是"先识别、再定优先级、每条结论带偏移"
+        // 这套流程，那只能写在系统提示里。
+        preset(
+            "sample-prep",
+            "样本预处理",
+            "收样本第一步：识别格式与架构、算哈希、提字符串、给优先级。只读。",
+            "native",
+            Permission::ReadOnly,
+            Workspace::Shared,
+            "你负责样本预处理，只产出事实，不做行为判断。\n\
+             顺序固定：bin.meta.identify（格式/架构/入口/编译时间）→ bin.hash.compute（三哈希，作为去重与情报比对的锚点）→ bin.strings.extract（带可疑标记）。\n\
+             每条结论都要带偏移或字段名，例如「偏移 0x1a40 有 http://…」。解析不出来的字段写「未知」，不要猜。\n\
+             最后给一个 1-5 的优先级与一句理由（有网络特征/有反调试/有已知 C2 域名 → 高）。\n\
+             产出写成 JSON 制品（key=report），供下游节点直接取用。",
+            &["安全", "预处理"],
+            tools(
+                &[
+                    "read_file",
+                    "list_files",
+                    "bin.meta.identify",
+                    "bin.hash.compute",
+                    "bin.strings.extract",
+                    "bin.json.jq",
+                    "prism.artifact.get",
+                    "prism.artifact.put",
+                ],
+                &[],
+                &[],
+            ),
+        ),
+        preset(
+            "unpacker",
+            "脱壳",
+            "判断壳类型并脱壳，产物落新制品并记血缘；原始样本只读。",
+            "native",
+            Permission::WorkspaceWrite,
+            Workspace::Scratch,
+            "你负责脱壳。原始样本永远只读：任何产物都写成新文件 + 新制品，并记 parent 指向原样本。\n\
+             先判断有没有壳：看 bin.meta.identify 的 packerHint、段名与入口点是否异常（入口落在最后一段、段名 UPX0/.vmp/ Themida）。\n\
+             没有壳就直说「不像加壳」，不要为了交差硬脱。\n\
+             有壳才动手：UPX 用 `upx -d`；VMProtect / Themida / ConfuserEx 本机没有工具，直接报「需要 Ghidra + 沙箱（P2）」，不要自造步骤。\n\
+             run_command 只用于确定的脱壳命令，绝不执行样本本身。\n\
+             脱完必须复核：bin.meta.identify 看入口与段是否正常，bin.diff 给出与原样本的差异摘要。",
+            &["安全", "脱壳"],
+            tools(
+                &[
+                    "read_file",
+                    "list_files",
+                    "write_file",
+                    "run_command",
+                    "bin.meta.identify",
+                    "bin.hash.compute",
+                    "bin.strings.extract",
+                    "bin.diff",
+                    "prism.artifact.get",
+                    "prism.artifact.put",
+                ],
+                &[],
+                &["edit_file"],
+            ),
+        ),
+        preset(
+            "static-analysis",
+            "静态分析",
+            "从导入表与字符串入手定位可疑行为，结论带「函数 @ 偏移」。只读。",
+            "native",
+            Permission::ReadOnly,
+            Workspace::Shared,
+            "你负责静态分析，只读。\n\
+             入口是 bin.importexport.list：先看 riskHints，再逐个确认高危 API 的真实用途——imported 了不等于调用了。\n\
+             定位用 bin.xref.search：用字符串或字节特征反查引用点，拿到 offset 与 va。\n\
+             补充用 bin.strings.extract 找 C2、路径、注册表键、互斥体名。\n\
+             每条结论写成「行为 ← 证据」：例如「写注册表自启 ← RegSetValueExA @ 0x4012a0，键名 Software\\Microsoft\\Windows\\CurrentVersion\\Run」。\n\
+             严格区分「看到」（有证据）与「推断」（无证据），后者必须显式标注。\n\
+             本机没有反编译器：不要描述伪代码，也不要编函数名。",
+            &["安全", "静态分析"],
+            tools(
+                &[
+                    "read_file",
+                    "grep",
+                    "list_files",
+                    "bin.meta.identify",
+                    "bin.strings.extract",
+                    "bin.xref.search",
+                    "bin.importexport.list",
+                    "bin.json.jq",
+                    "prism.artifact.get",
+                    "prism.artifact.put",
+                ],
+                &[],
+                &[],
+            ),
+        ),
+        preset(
+            "crypto-analysis",
+            "密码分析",
+            "扫描密码学常量、识别算法与密钥线索，按置信度分级。只读。",
+            "native",
+            Permission::ReadOnly,
+            Workspace::Shared,
+            "你负责密码分析，只读。\n\
+             先用 bin.crypto.scan 扫常量，再按 confidence 分级处理：high 可直接认定算法，medium 要结合上下文，low 只能写「疑似」。\n\
+             RC4 的 0..255 递增表误报很高：没有其它证据时不要写成「用了 RC4」。\n\
+             有已知明文特征时用 xorProbe 试单字节 XOR，给出密钥与命中位置；多把密钥都命中时，取命中位置最集中的那把并说明理由。\n\
+             找算法调用点用 bin.xref.search 反查常量所在地址周围的引用。\n\
+             不给出「无法解密的密文」这种结论；解不出来就写清缺什么（密钥、IV、算法参数）。",
+            &["安全", "密码"],
+            tools(
+                &[
+                    "read_file",
+                    "grep",
+                    "bin.meta.identify",
+                    "bin.strings.extract",
+                    "bin.crypto.scan",
+                    "bin.xref.search",
+                    "bin.json.jq",
+                    "prism.artifact.get",
+                    "prism.artifact.put",
+                ],
+                &[],
+                &[],
+            ),
+        ),
+        preset(
+            "dynamic-sandbox",
+            "动态沙箱",
+            "在受控环境里跑样本并回收行为；本机尚无真实沙箱，执行前须人工确认。",
+            "native",
+            Permission::WorkspaceWrite,
+            Workspace::Scratch,
+            "你负责动态行为观察。**本机当前没有真实隔离沙箱**：run_command 跑样本会影响宿主，所以：\n\
+             1. 默认只做只读准备（哈希、快照、依赖检查），把「要跑什么、预期看到什么」写清楚；\n\
+             2. 只有在用户明确要求、且本条消息里承认风险时才 run_command；一次只跑一个动作，跑完立刻停；\n\
+             3. 执行前先 bin.hash.compute 记录样本哈希，执行后 bin.diff 对比文件系统或产物的变化；\n\
+             4. 结果里必须写明「未隔离执行」这个前提，不要让人误以为拿到了干净的沙箱报告。\n\
+             Ghidra 与真沙箱是 P2/P3 的事，不要假装它们在。",
+            &["安全", "动态"],
+            tools(
+                &[
+                    "read_file",
+                    "run_command",
+                    "bin.meta.identify",
+                    "bin.hash.compute",
+                    "bin.diff",
+                    "prism.artifact.get",
+                    "prism.artifact.put",
+                ],
+                &[],
+                &["edit_file", "write_file"],
+            ),
+        ),
+        preset(
+            "control-flow",
+            "控制流",
+            "沿引用链还原调用关系与分发结构，标出直接调用与间接跳转。只读。",
+            "native",
+            Permission::ReadOnly,
+            Workspace::Shared,
+            "你负责控制流梳理，只读。\n\
+             用 bin.xref.search 把「字符串/常量 → 引用地址 → 所在函数」串成链，每一步都记 offset 与 va。\n\
+             用 bin.importexport.list 判断调用是直接（IAT 有名）还是间接（GetProcAddress 动态取址）——后者才是混淆的迹象。\n\
+             输出用缩进树或边列表描述调用关系，不要画 ASCII 艺术图。\n\
+             本机没有反汇编器：只能给到「引用地址」这一级，不要编造基本块、跳转表或函数边界，那需要 Ghidra（P2）。",
+            &["安全", "控制流"],
+            tools(
+                &[
+                    "read_file",
+                    "grep",
+                    "bin.meta.identify",
+                    "bin.xref.search",
+                    "bin.importexport.list",
+                    "bin.strings.extract",
+                    "bin.json.jq",
+                    "prism.artifact.get",
+                    "prism.artifact.put",
+                ],
+                &[],
+                &[],
+            ),
+        ),
+        preset(
+            "sec-assist",
+            "安全辅助",
+            "把上游结论整理成报告：不改结论、不补证据、缺的一律标未验证。",
+            "native",
+            Permission::WorkspaceWrite,
+            Workspace::Shared,
+            "你负责出报告，不做新的分析。\n\
+             输入是上游节点的制品；用 prism.artifact.get 取全文或 bin.json.jq 取需要的字段，不要凭记忆复述。\n\
+             报告结构固定：结论摘要（3 条以内）→ 证据表（行为 / 证据 / 位置 / 置信度）→ 未验证项 → 建议下一步。\n\
+             禁止补写上游没有的证据；上游说「疑似」的地方，报告里也必须写「疑似」。\n\
+             用 write_file 落 Markdown，同时 prism.artifact.put 存一份（key=report）给下游。",
+            &["安全", "报告"],
+            tools(
+                &[
+                    "read_file",
+                    "list_files",
+                    "grep",
+                    "write_file",
+                    "edit_file",
+                    "bin.json.jq",
+                    "prism.artifact.get",
+                    "prism.artifact.put",
+                ],
+                &[],
+                &[],
+            ),
+        ),
+    ];
+    // 七个工种里只有它会碰宿主（真的跑命令），所以默认过人工闸门。
+    // 其余全是只读或只写工作区，没必要每次都点一下。
+    if let Some(profile) = presets
+        .iter_mut()
+        .find(|item| item.id == "dynamic-sandbox")
+    {
+        profile.gate_default = true;
+    }
+    presets
 }
 
 /// 用户 profile 目录（需要时创建）。
@@ -519,8 +773,95 @@ mod tests {
             "docs",
             "verifier",
             "dsh-research",
+            // 安全研究线七个工种
+            "sample-prep",
+            "unpacker",
+            "static-analysis",
+            "crypto-analysis",
+            "dynamic-sandbox",
+            "control-flow",
+            "sec-assist",
         ] {
             assert!(ids.contains(&expected.to_string()), "缺少内置 Agent：{expected}");
+        }
+    }
+
+    /// 工种的价值在"绑了什么"，不在名字：每个安全 Agent 都要有专属系统提示
+    /// 和至少一个领域工具，否则它就只是个改了名的通用助手。
+    #[test]
+    fn security_presets_bind_tools_and_methodology() {
+        let all = builtin();
+        let security = [
+            "sample-prep",
+            "unpacker",
+            "static-analysis",
+            "crypto-analysis",
+            "dynamic-sandbox",
+            "control-flow",
+            "sec-assist",
+        ];
+        for id in security {
+            let profile = all.iter().find(|item| item.id == id).unwrap();
+            assert!(
+                profile.system_prompt.chars().count() > 80,
+                "{id} 的系统提示太短，写不出方法论"
+            );
+            let shared = profile.tools.shared.as_ref().expect("安全工种要显式列工具");
+            assert!(
+                shared.iter().any(|name| name.starts_with("bin.")
+                    || name.starts_with("prism.artifact.")),
+                "{id} 没有任何领域工具：{shared:?}"
+            );
+            assert!(
+                profile.tags.contains(&"安全".to_string()),
+                "{id} 缺少「安全」标签"
+            );
+        }
+    }
+
+    /// 只有会碰宿主的工种默认过闸门——闸门遍地开就没有信息量了。
+    #[test]
+    fn only_dynamic_sandbox_gates_by_default() {
+        let all = builtin();
+        let gated: Vec<String> = all
+            .iter()
+            .filter(|profile| profile.gate_default)
+            .map(|profile| profile.id.clone())
+            .collect();
+        assert_eq!(gated, vec!["dynamic-sandbox".to_string()]);
+    }
+
+    /// 只读工种必须真的只读：申请了 write_file / run_command 的不能标只读。
+    #[test]
+    fn readonly_security_agents_request_no_write_tools() {
+        let all = builtin();
+        for profile in all.iter().filter(|item| item.permission == Permission::ReadOnly) {
+            let shared = profile.tools.shared.clone().unwrap_or_default();
+            for forbidden in ["write_file", "edit_file", "run_command"] {
+                assert!(
+                    !shared.contains(&forbidden.to_string()),
+                    "{} 是只读档，却申请了 {forbidden}",
+                    profile.id
+                );
+            }
+        }
+    }
+
+    /// 工种里引用的工具名必须真实存在，否则模型看到的白名单会静默变空。
+    #[test]
+    fn security_presets_only_reference_known_tools() {
+        let known: Vec<String> = crate::engines::native::tools::builtin_tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        for profile in builtin() {
+            for name in profile.tools.shared.clone().unwrap_or_default() {
+                assert!(
+                    known.contains(&name),
+                    "{} 引用了不存在的工具：{name}",
+                    profile.id
+                );
+            }
         }
     }
 

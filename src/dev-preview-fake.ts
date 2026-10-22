@@ -1235,7 +1235,13 @@ index 1a2b3c4..5d6e7f8 100644
         { name: 'task_status', origin: 'builtin', permission: 'write', enabled: false, owner: null, description: '查看后台任务', tags: [], risk: 'write', network: 'none', sandbox: null },
         { name: 'task', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '委派给子代理', tags: [], risk: 'write', network: 'none', sandbox: null },
         { name: 'fs__read_file', origin: 'plugin', permission: 'write', enabled: false, owner: 'mcp.fs', description: 'Read a file from disk', tags: ['mcp'], risk: 'write', network: 'outbound', sandbox: null },
-        { name: 'fs__list_directory', origin: 'plugin', permission: 'write', enabled: false, owner: 'mcp.fs', description: 'List directory contents' },
+        { name: 'fs__list_directory', origin: 'plugin', permission: 'write', enabled: false, owner: 'mcp.fs', description: 'List directory contents', tags: ['mcp'], risk: 'write', network: 'outbound', sandbox: null },
+        // 安全研究线的样本工具：预览里要能看到 `bin:static` 标签与只读色点。
+        { name: 'bin.meta.identify', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '样本格式识别', tags: ['bin:static'], risk: 'read', network: 'none', sandbox: null },
+        { name: 'bin.strings.extract', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '字符串提取', tags: ['bin:static'], risk: 'read', network: 'none', sandbox: null },
+        { name: 'bin.xref.search', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '交叉引用检索', tags: ['bin:static'], risk: 'read', network: 'none', sandbox: null },
+        { name: 'bin.crypto.scan', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '密码特征扫描', tags: ['bin:static'], risk: 'read', network: 'none', sandbox: null },
+        { name: 'prism.dag.node.add', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '加节点', tags: ['dag:planner'], risk: 'write', network: 'none', sandbox: null },
       ]
     case 'native_tool_toggle':
       return null

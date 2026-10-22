@@ -10,13 +10,17 @@
 //! - `tools`    内置工具（读写文件、列目录、检索、跑命令）
 //! - `artifact_tools` 制品读写（只在 DAG 节点作用域里出现）
 //! - `forensics` 安全研究线的本机工具（`bin.meta.identify` 等）
+//! - `analysis`  安全研究线的分析工具（xref / 导入导出 / 密码特征 / 差异）
+//! - `dag_tools` Planner 的七工具（改图），只在 DAG 作用域里出现
 //! - `agent`    turn 循环：模型 → 工具 → 模型，事件原样喂给前端 liveTurn
 
 pub mod agent;
+pub mod analysis;
 pub mod approval;
 pub mod artifact_tools;
 pub mod config;
 pub mod context;
+pub mod dag_tools;
 pub mod engine;
 pub mod forensics;
 pub mod provider;

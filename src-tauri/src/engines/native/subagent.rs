@@ -585,7 +585,8 @@ mod tests {
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str())
             .collect();
-        // 只读工具自动进探索档：新加的 bin.* 样本分析工具也是只读，所以一起出现。
+        // 只读工具自动进探索档：样本识别 / 分析这批 bin.* 全是只读，所以一起出现。
+        // 新增分析工具时这里要跟着加——不是回归，是这条规则的可见账本。
         assert_eq!(
             names,
             vec![
@@ -595,6 +596,11 @@ mod tests {
                 "bin.meta.identify",
                 "bin.hash.compute",
                 "bin.strings.extract",
+                "bin.json.jq",
+                "bin.xref.search",
+                "bin.importexport.list",
+                "bin.crypto.scan",
+                "bin.diff",
             ]
         );
 

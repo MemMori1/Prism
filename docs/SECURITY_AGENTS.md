@@ -1,7 +1,9 @@
 # 安全研究 Agent 与工具矩阵 · 需求分析
 
-> 状态：**P0 / P0.5 已实现**（制品仓库、节点数据流、工具标签、三个 `bin.*` 静态工具；
-> 详见 §0.1 与 `docs/ARTIFACTS.md`）。P1 起（`json.jq` / xref / Planner 七工具 / Ghidra / 沙箱）未开始。
+> 状态：**P0 / P0.5 / P1 / P1.5 已实现**（制品仓库、节点数据流、工具标签、
+> 7 个安全研究工种 + 编排规划、8 个 `bin.*` 分析工具、Planner 七工具）。
+> 未实现：P2（Ghidra 反编译）、P3（真实沙箱）、渗透线 `recon.*` / `exp.*`。
+> 详见 §0.1 与 `docs/ARTIFACTS.md`。
 > 关联 `docs/AGENTS.md`、`docs/DAG_PLANNER.md`、`docs/ARTIFACTS.md`。
 > 输入：逆向线 / 渗透线的 Agent 与工具清单（用户整理）。本文只做一件事——
 > 把那份清单和**现在代码里真实存在的东西**对齐，说清差在哪、先补什么、怎么验收。
@@ -12,9 +14,9 @@ Prism 现在是一套能跑起来的**软工编排底座**（Planner 拆图 → 
 但它的 Agent 工种、工具集、数据流都还是"改代码"那一套。要变成安全研究线，
 缺的不是再登记 60 个工具名，而是四层地基：**制品、节点数据流、工具标签、Planner 工具面**。
 
-## 0.1 落地回填（P0 / P0.5，已完成）
+## 0.1 落地回填（P0 / P0.5 / P1 / P1.5 已完成）
 
-需求分析里判"0%"的四层地基，第一层和第二层已经补完：
+需求分析里判"0%"的四层地基，四层都已经补完：
 
 | 项 | 落点 | 状态 |
 |---|---|---|
@@ -24,22 +26,29 @@ Prism 现在是一套能跑起来的**软工编排底座**（Planner 拆图 → 
 | 工具标签 | `engines/native/tools.rs` 的 `ToolMeta`（`tags` / `risk` / `network` / `sandbox` / `scope`）；`scope=dag` 的工具在聊天里不进 schema | ✅ |
 | 制品工具 | `engines/native/artifact_tools.rs`：`prism.artifact.put` / `prism.artifact.get`，`dag_id` 由执行器注入 | ✅ |
 | 静态样本工具 | `engines/native/forensics.rs`：`bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract`，纯 Rust 解析 PE/ELF/Mach-O/DEX/APK | ✅ |
+| P1 分析工具 | `engines/native/analysis.rs`：`bin.json.jq` / `bin.xref.search` / `bin.importexport.list` / `bin.crypto.scan` / `bin.diff`，全部纯 Rust、只读、带上限 | ✅ |
+| **安全研究工种** | `src-tauri/src/agents.rs::builtin()` 新增 7 个 preset：`sample-prep` / `unpacker` / `static-analysis` / `crypto-analysis` / `dynamic-sandbox` / `control-flow` / `sec-assist`；各自绑定方法论提示、工具白名单、权限档、工作区 | ✅ |
+| Planner 工具面 | `engines/native/dag_tools.rs`：`prism.dag.plan.read` / `node.add` / `node.update` / `node.remove` / `edge.add` / `edge.remove` / `validate`；`scope=dag`，校验不过整体回滚 | ✅ |
+| 编排规划工种 | `dag-planner` preset：在 DAG 节点里调上面七个工具改图 | ✅ |
 | 前端 | `DagPane.vue` 节点卡片展示制品（key / kind / 大小 / sha256 / 引用 id / 查看全文 / 派生血缘）；设置页工具清单带标签与风险色 | ✅ |
 
-验收：`cargo test --lib` 359 passed（含"200 KB 节点输出 → 下游 prompt < 3 KB 且含 `art-`、取回长度一致"的端到端用例）；
+验收：`cargo test --lib` 391 passed（含"200 KB 节点输出 → 下游 prompt < 3 KB 且含 `art-`、
+取回长度一致"的端到端用例、PE 导入表遍历、AES 常量命中、单字节 XOR 破译、改图回滚）；
 `vue-tsc --noEmit` 0 错误；`vitest` 376 passed。
-**仍未做**：`prism.dag.*` 七工具（Planner 动态改图）、真实沙箱、渗透线 `recon.*` / `exp.*`、P1 分析工具（`json.jq` / xref / importexport / crypto 扫描）。
+
+**仍未做**：P2 Ghidra（反编译、函数边界、xref 到函数级）、P3 真实沙箱、
+渗透线 `recon.*` / `exp.*`、`bin.pack.detect`（壳类型规则库）、`bin.crypto.xor_brute` 的多字节版本。
 
 
 ## 1. 结论先行：差在哪
 
 | 维度 | 分析时的代码事实 | 目标（清单要求） | 差距（回填后） |
 |---|---|---|---|
-| Agent 工种 | 8 个软工 preset：探索 / 通用 / 前端 / 后端 / 架构 / 文档 / 验证 / DeepSeek 调研 | 样本预处理 / 脱壳 / 静态分析 / 密码 / 动态沙箱 / 控制流 / 辅助 | **0%**，工种完全错位（未动） |
-| 工具集 | 7 个裸名工具：`read_file` `list_files` `grep` `write_file` `edit_file` `run_command` `task_status` | 60+ 个 `bin.*` / `recon.*` / `exp.*`，带权限 tag | **≈ 15%**：命名空间与 tag 已建，落地 `bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract` 三个 |
+| Agent 工种 | 8 个软工 preset：探索 / 通用 / 前端 / 后端 / 架构 / 文档 / 验证 / DeepSeek 调研 | 样本预处理 / 脱壳 / 静态分析 / 密码 / 动态沙箱 / 控制流 / 辅助 | **已补**：7 个工种全部落地，各自绑定方法论、工具白名单与风险档 |
+| 工具集 | 7 个裸名工具：`read_file` `list_files` `grep` `write_file` `edit_file` `run_command` `task_status` | 60+ 个 `bin.*` / `recon.*` / `exp.*`，带权限 tag | **≈ 25%**：命名空间与 tag 已建，落地 8 个 `bin.*`（3 个样本 + 5 个分析）；渗透线 `recon.*` / `exp.*` 未动 |
 | 产物传递 | 节点输出 `NodeOutput.text`，下游用 `{{nodes.x.output}}` **整段内联** | artifact 引用 + `input_artifacts` / `output_artifact_key` + 血缘 | **已补**：8 KB 截断 + `{{artifacts.<别名>.*}}` + 显式/隐式别名 |
 | 制品仓库 | `artifact.rs` 只是**交付物预览**（读本地 html/svg/图片给前端看） | `artifact.put/get`，同 DAG 内可读、跨 DAG 隔离 | **已补**：`dag/artifact.rs` + `prism.artifact.*`，配额与隔离齐 |
-| Planner 形态 | UI 弹窗 + `dag_plan` IPC，调一次模型出一张图 | Planner 是可调 `prism.dag.*` 的 Agent，能动态改图 | **0%**，DAG 引擎与 `scope=dag` 已有插座 |
+| Planner 形态 | UI 弹窗 + `dag_plan` IPC，调一次模型出一张图 | Planner 是可调 `prism.dag.*` 的 Agent，能动态改图 | **已补**：七个 `prism.dag.*` + `dag-planner` 工种；弹窗那条路保留不变 |
 | 权限模型 | 三档（read-only / workspace-write / full-access）+ shared / private / deny 名单 | 风险标签（`dag:planner` `sec:exp-verify` `bin:dyn-sandbox`）+ 高危显式开关 + 网络策略 | **约 40%**：`risk` / `network` / `sandbox` / `scope` 四维已入工具表；高危闸门与网络策略未接 |
 
 **底座不是零**：DAG 模型 / 校验 / 调度 / 并发 / 重试 / 闸门 / 运行记录 / 执行器插件全都在，
@@ -218,36 +227,49 @@ pub struct ArtifactRef {
 
 ### 4.1 逆向线（主体）
 
-| 子 Agent | 工具 | 能力 | 权限 / 风险 | 产出 artifact | 优先级 |
+| 子 Agent | 工具 | 能力 | 权限 / 风险 | 产出 artifact | 状态 |
 |---|---|---|---|---|---|
-| 样本预处理 | `bin.meta.identify` | PE/ELF/Mach-O/DEX/APK 识别、架构、位数、段 | 只读 / 低 | 元信息 JSON | **P0（真实现）** |
-| 样本预处理 | `bin.hash.compute` | md5 / sha1 / sha256 | 只读 / 低 | 哈希清单 | **P0（真实现）** |
-| 样本预处理 | `bin.strings.extract` | ASCII/UTF-16 字符串 + 可疑标记（IP/URL/路径/cmd） | 只读 / 低 | strings JSON | **P0（真实现）** |
-| 样本预处理 | `bin.pack.detect` | UPX / VMProtect / Themida / ConfuserEx | 只读 / 低 | 壳状态 + 置信度 | P0.5（先规则匹配） |
-| 脱壳 | `bin.unpack.upx` | UPX 自动解压 | 写临时区 / 中 | 新二进制 + parent | P1 |
-| 脱壳 | `bin.unpack.dumper` | 沙箱内 dump 脱壳 | `bin:dyn-sandbox` / 高 | 新二进制 + parent | P2 |
-| 脱壳 | `bin.dotnet.deobfuscate` | .NET 反混淆导出 IL | 写 / 中 | IL | P2 |
-| 静态分析 | `bin.ghidra.analyze` | Ghidra headless 自动分析 | 只读 / 中 | 项目归档 + 函数索引 | P2（走 MCP/CLI） |
-| 静态分析 | `bin.ghidra.decompile_func` | 按需反编译单函数 | 只读 / 中 | 单函数伪 C | P2（懒加载） |
-| 静态分析 | `bin.xref.search` | 交叉引用检索 | 只读 / 低 | 引用地址列表 | P1 |
-| 静态分析 | `bin.importexport.list` | IAT/EAT + 高危 API 标记 | 只读 / 低 | 高危 API 清单 | P1 |
-| 静态分析 | `bin.radare2.scan` | 轻量 opcode / 函数边界扫描 | 只读 / 中 | 扫描报告 | P2 |
-| 密码分析 | `bin.crypto.signature_scan` | AES S 盒 / RC4 表 / RSA 模数特征 | 只读 / 中 | 算法 + 地址 | P1 |
-| 密码分析 | `bin.crypto.xor_brute` | 单/多字节 XOR 爆破 | 只读 / 中 | 密钥 + 解密结果 | P1 |
-| 密码分析 | `bin.crypto.asn1.parse` | PEM/DER 证书与密钥解析 | 只读 / 低 | 密钥信息 | P2 |
-| 密码分析 | `bin.crypto.hash_identify` | 哈希常量与循环识别 | 只读 / 低 | 算法 + 地址 | P2 |
-| 动态沙箱 | `bin.dyn.sandbox.run` | 隔离沙箱跑样本 | `bin:dyn-sandbox` / 高 | pcap + syscall + 进程树 | P3 |
-| 动态沙箱 | `bin.dyn.syscall.filter` | 聚焦文件/网络/注入/加密 API | 只读 / 中 | 聚焦日志 | P3 |
-| 动态沙箱 | `bin.dyn.mem.dump` | 指定时机 dump 内存 | `bin:dyn-sandbox` / 高 | 内存 artifact | P3 |
-| 动态沙箱 | `bin.dyn.trace.breakpoint` | 断点跟踪寄存器与参数 | `bin:dyn-sandbox` / 高 | 轨迹 | P3 |
-| 控制流 | `bin.cfg.extract` | CFG 导出 dot/mermaid/json | 只读 / 中 | CFG | P2 |
-| 控制流 | `bin.vm.detect` | 虚机保护识别 | 只读 / 中 | 类型 + 置信度 | P3 |
-| 控制流 | `bin.diff.bin` | 二进制比对（原版 vs 补丁） | 只读 / 中 | 差异函数列表 | P2 |
-| 通用支撑 | `prism.artifact.put` / `.get` | 制品写入 / 读取引用 | 同 DAG / 低 | 引用链 | **P0** |
-| 通用支撑 | `json.jq` | 过滤、提取字段 | 只读 / 低 | 清洗后 JSON | **P0** |
-| 通用支撑 | `prism.text.extract` | 伪 C 分块、摘要、清洗 | 只读 / 低 | 摘要块 | P1 |
-| 通用支撑 | `bin.yara.rule_gen` | 自动生成 yara 规则 | 写 / 低 | 规则集 | P3 |
-| 通用支撑 | `bin.report.rev` | 逆向报告渲染 | 只读 / 低 | 报告 artifact | P3 |
+| 样本预处理 | `bin.meta.identify` | PE/ELF/Mach-O/DEX/APK 识别、架构、位数、段 | 只读 / 低 | 元信息 JSON | ✅ 已实现 |
+| 样本预处理 | `bin.hash.compute` | md5 / sha1 / sha256 | 只读 / 低 | 哈希清单 | ✅ 已实现 |
+| 样本预处理 | `bin.strings.extract` | ASCII/UTF-16 字符串 + 可疑标记（IP/URL/路径/cmd） | 只读 / 低 | strings JSON | ✅ 已实现 |
+| 样本预处理 | `bin.pack.detect` | UPX / VMProtect / Themida / ConfuserEx | 只读 / 低 | 壳状态 + 置信度 | ⬜ 纯规则匹配，最容易补 |
+| 脱壳 | `bin.unpack.upx` | UPX 自动解压 | 写临时区 / 中 | 新二进制 + parent | ⬜ 需本机装 `upx` |
+| 脱壳 | `bin.unpack.dumper` | 沙箱内 dump 脱壳 | `bin:dyn-sandbox` / 高 | 新二进制 + parent | ⬜ 需沙箱 |
+| 脱壳 | `bin.dotnet.deobfuscate` | .NET 反混淆导出 IL | 写 / 中 | IL | ⬜ 需 dnlib / ILSpy |
+| 静态分析 | `bin.ghidra.analyze` | Ghidra headless 自动分析 | 只读 / 中 | 项目归档 + 函数索引 | ⬜ 需 Ghidra |
+| 静态分析 | `bin.ghidra.decompile_func` | 按需反编译单函数 | 只读 / 中 | 单函数伪 C | ⬜ 需 Ghidra |
+| 静态分析 | `bin.xref.search` | 交叉引用检索 | 只读 / 低 | 引用地址列表 | ✅ 已实现（带段与 VA 换算） |
+| 静态分析 | `bin.importexport.list` | IAT/EAT + 高危 API 标记 | 只读 / 低 | 高危 API 清单 | ✅ 已实现（PE IAT/EAT + ELF 动态符号） |
+| 静态分析 | `bin.radare2.scan` | 轻量 opcode / 函数边界扫描 | 只读 / 中 | 扫描报告 | ⬜ 需 radare2 |
+| 密码分析 | `bin.crypto.signature_scan` | AES S 盒 / RC4 表 / RSA 模数特征 | 只读 / 中 | 算法 + 地址 | ✅ 已实现（`bin.crypto.scan`） |
+| 密码分析 | `bin.crypto.xor_brute` | 单/多字节 XOR 爆破 | 只读 / 中 | 密钥 + 解密结果 | ✅ 单字节已实现（`xorProbe`），多字节未做 |
+| 密码分析 | `bin.crypto.asn1.parse` | PEM/DER 证书与密钥解析 | 只读 / 低 | 密钥信息 | ⬜ 可纯 Rust 做，未开始 |
+| 密码分析 | `bin.crypto.hash_identify` | 哈希常量与循环识别 | 只读 / 低 | 算法 + 地址 | ⬜ 循环识别需反汇编 |
+| 动态沙箱 | `bin.dyn.sandbox.run` | 隔离沙箱跑样本 | `bin:dyn-sandbox` / 高 | pcap + syscall + 进程树 | ⬜ 需系统级隔离 |
+| 动态沙箱 | `bin.dyn.syscall.filter` | 聚焦文件/网络/注入/加密 API | 只读 / 中 | 聚焦日志 | ⬜ 需沙箱 |
+| 动态沙箱 | `bin.dyn.mem.dump` | 指定时机 dump 内存 | `bin:dyn-sandbox` / 高 | 内存 artifact | ⬜ 需沙箱 |
+| 动态沙箱 | `bin.dyn.trace.breakpoint` | 断点跟踪寄存器与参数 | `bin:dyn-sandbox` / 高 | 轨迹 | ⬜ 需调试器 + 沙箱 |
+| 控制流 | `bin.cfg.extract` | CFG 导出 dot/mermaid/json | 只读 / 中 | CFG | ⬜ 需反汇编器 |
+| 控制流 | `bin.vm.detect` | 虚机保护识别 | 只读 / 中 | 类型 + 置信度 | ⬜ 需 Ghidra 支撑 |
+| 控制流 | `bin.diff.bin` | 二进制比对（原版 vs 补丁） | 只读 / 中 | 差异函数列表 | ✅ 已实现（`bin.diff`，提前到本轮） |
+| 通用支撑 | `prism.artifact.put` / `.get` | 制品写入 / 读取引用 | 同 DAG / 低 | 引用链 | ✅ 已实现 |
+| 通用支撑 | `json.jq` | 过滤、提取字段 | 只读 / 低 | 清洗后 JSON | ✅ 已实现（`bin.json.jq`，不支持管道） |
+| 通用支撑 | `prism.text.extract` | 伪 C 分块、摘要、清洗 | 只读 / 低 | 摘要块 | ⬜ 等 Ghidra 产出伪 C 才有意义 |
+| 通用支撑 | `bin.yara.rule_gen` | 自动生成 yara 规则 | 写 / 低 | 规则集 | ⬜ P3 |
+| 通用支撑 | `bin.report.rev` | 逆向报告渲染 | 只读 / 低 | 报告 artifact | ⬜ P3（现由 `sec-assist` 工种代劳） |
+
+**这张表 28 行，已实现 10 行**（其中 2 行合并成一个工具）。另外本轮还落地了表里没有的
+**7 个 Planner 工具**（`prism.dag.*`，见 `engines/native/dag_tools.rs`），
+所以本机可用的领域工具是 **8 个 `bin.*` + 2 个 `prism.artifact.*` + 7 个 `prism.dag.*` = 17 个**。
+
+剩下 18 行不是"没写"，是**卡在环境依赖**上，分三类：
+
+| 依赖 | 涉及条目 | 说明 |
+|---|---|---|
+| 外部程序（装了就能接） | Ghidra ×2、radare2、upx、dnlib | 走 CLI / MCP，Prism 侧只负责调用与产物落盘 |
+| 系统级隔离 | `bin.dyn.*` ×4、`unpack.dumper`、`vm.detect` | 没有真沙箱就不该跑样本，`dynamic-sandbox` 工种现在明确写「本机没有隔离」 |
+| 需要反汇编基础设施 | `cfg.extract`、`crypto.hash_identify`、`text.extract` | 都是 Ghidra 的下游，先有反汇编才有它们 |
+
 
 ### 4.2 渗透侦察线（摘要，不在本期）
 

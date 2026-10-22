@@ -153,7 +153,7 @@ fn strings_schema() -> Value {
 
 // ---------------------------------------------------------------- 公共
 
-fn target_of(ctx: &ToolContext<'_>, args: &Value) -> Result<(PathBuf, u64), ToolResult> {
+pub(crate) fn target_of(ctx: &ToolContext<'_>, args: &Value) -> Result<(PathBuf, u64), ToolResult> {
     let raw = args
         .get("path")
         .and_then(Value::as_str)
@@ -169,7 +169,7 @@ fn target_of(ctx: &ToolContext<'_>, args: &Value) -> Result<(PathBuf, u64), Tool
     Ok((path, meta.len()))
 }
 
-fn read_head(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn read_head(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
     let file = std::fs::File::open(path).map_err(|error| format!("打开文件失败：{error}"))?;
     let mut buffer = Vec::new();
     file.take(cap)
@@ -178,7 +178,7 @@ fn read_head(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
     Ok(buffer)
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const TABLE: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -191,7 +191,11 @@ fn hex(bytes: &[u8]) -> String {
 /// 有 DAG 作用域就顺手落制品，返回制品 id。
 ///
 /// 失败不影响工具结果：结果本身已经在返回值里，制品只是"更好的传递方式"。
-fn publish(ctx: &ToolContext<'_>, key: &str, text: &str) -> Option<Result<String, String>> {
+pub(crate) fn publish(
+    ctx: &ToolContext<'_>,
+    key: &str,
+    text: &str,
+) -> Option<Result<String, String>> {
     let scope = ctx.dag?;
     match ArtifactStore::global() {
         Ok(store) => Some(
@@ -204,7 +208,7 @@ fn publish(ctx: &ToolContext<'_>, key: &str, text: &str) -> Option<Result<String
 }
 
 /// 统一出口：序列化 + （必要时）落制品。
-fn respond(ctx: &ToolContext<'_>, key: &str, mut payload: Value) -> ToolResult {
+pub(crate) fn respond(ctx: &ToolContext<'_>, key: &str, mut payload: Value) -> ToolResult {
     if let Some(result) = publish(ctx, key, &payload.to_string()) {
         match result {
             Ok(id) => payload["artifact"] = json!(id),
@@ -301,7 +305,7 @@ pub fn identify(head: &[u8], size: u64) -> Value {
     out
 }
 
-fn read_u16(bytes: &[u8], at: usize, little: bool) -> Option<u16> {
+pub(crate) fn read_u16(bytes: &[u8], at: usize, little: bool) -> Option<u16> {
     let slice = bytes.get(at..at + 2)?;
     let raw = [slice[0], slice[1]];
     Some(if little {
@@ -311,7 +315,7 @@ fn read_u16(bytes: &[u8], at: usize, little: bool) -> Option<u16> {
     })
 }
 
-fn read_u32(bytes: &[u8], at: usize, little: bool) -> Option<u32> {
+pub(crate) fn read_u32(bytes: &[u8], at: usize, little: bool) -> Option<u32> {
     let slice = bytes.get(at..at + 4)?;
     let raw = [slice[0], slice[1], slice[2], slice[3]];
     Some(if little {
@@ -321,7 +325,7 @@ fn read_u32(bytes: &[u8], at: usize, little: bool) -> Option<u32> {
     })
 }
 
-fn read_u64(bytes: &[u8], at: usize, little: bool) -> Option<u64> {
+pub(crate) fn read_u64(bytes: &[u8], at: usize, little: bool) -> Option<u64> {
     let slice = bytes.get(at..at + 8)?;
     let mut raw = [0u8; 8];
     raw.copy_from_slice(slice);
