@@ -333,13 +333,10 @@ const SANDBOX_LABEL: Record<string, string> = {
 }
 
 /**
- * 芯片上只放得下名字，其余信息进原生 tooltip。
+ * tooltip 只补充卡片上没地方铺的信息：来源、权限、网络、沙箱、开关状态。
  *
- * 一行四五个格子意味着每个格子只有 100 来像素，描述和来源挤进去只会互相
- * 截断；不如把它们留在"停一下"就能看到的地方，让扫视时只面对名字和状态。
- *
- * 工具标签（`bin:static` 这类）例外：它决定了这个工具属于哪条工作线，
- * 是扫视时真正想先看到的东西，所以单独在名字右侧留一小格显示。
+ * 名字和说明已经直接写在卡片里（截断成 `bin.importexp…` 等于没写），
+ * 这里带上它们只是为了让悬停时一次看全，不做为主要阅读路径。
  */
 function toolTitle(tool: ToolView) {
   const parts = [tool.name]
@@ -891,10 +888,10 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
                     >
                       <span class="tool-chip-top">
                         <span class="tool-chip-name">{{ tool.name }}</span>
-                        <span v-if="tool.tags.length" class="tool-chip-tag">{{ tool.tags[0] }}</span>
                         <span class="tool-chip-dot" :class="`risk-${tool.risk || 'read'}`" />
                       </span>
-                      <span class="tool-chip-blurb">{{ tool.description || '—' }}</span>
+                      <span class="tool-chip-blurb">{{ tool.description || '没有写说明' }}</span>
+                      <span v-if="tool.tags.length" class="tool-chip-tag">{{ tool.tags.join(' · ') }}</span>
                     </button>
                   </div>
                 </div>

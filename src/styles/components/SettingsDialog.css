@@ -638,28 +638,13 @@
 
 /* ---------- 工具 ---------- */
 
-/* 网格铺开，一行四到五个。
-   芯片只承载「名字 + 状态点」，描述与来源进 title。密度本身就是信息：
-   8 个工具从半屏降到两行，扫一眼就知道哪些亮着。 */
+/* 高度交给内容，不自己截。
+
+   这里原先写死 248px + overflow-y:auto，结果外层 `.settings-content` 本来
+   就能滚，页面里套出一个更窄的滚动条：滚轮落在哪一格取决于指针位置。
+   去掉内层滚动后，工具卡片跟着内容长高，滚动只有一处。 */
 .tool-sheet {
-  max-height: 248px;
-  padding: 2px 0 8px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-}
-
-.tool-sheet::-webkit-scrollbar {
-  width: 6px;
-}
-
-.tool-sheet::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 35%, transparent);
-}
-
-.tool-sheet::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--muted) 60%, transparent);
+  padding: 2px 0 12px;
 }
 
 .tool-group {
@@ -710,22 +695,23 @@
   text-align: center;
 }
 
-/* 134 是试出来的：常见窗口宽下正好 5 列，再宽一点变 6 列也不挤。
-   小于 130 时 `fs__list_directory` 这类名字会被截成两半。 */
+/* 190 是下限：`bin.importexport.list` 这种 20 字符的 mono 名字要一行放得下，
+   再窄就得折成两行，扫视时容易看漏后半截。设置面板内容区约 764px，
+   实际落在 3 列（每格 ~250px），名字和说明都能铺开。 */
 .tool-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(134px, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
 }
 
-/* 一格两行：上面名字 + 状态点，下面一句简介。
-   高度交给内容，不写死——中文字号一变就露馅。 */
+/* 三段式：名字（可折行）→ 一句说明 → 标签脚注。
+   高度全部由内容决定——中文字号或工具描述一变都不会被切掉。 */
 .tool-chip {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
-  padding: 8px 10px 9px;
+  padding: 9px 11px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: color-mix(in srgb, var(--panel-2) 45%, transparent);
@@ -759,38 +745,41 @@
 
 .tool-chip-top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   min-width: 0;
 }
 
+/* 名字不截断：宁可折成两行，也不给 `bin.importexp…` 这种半截名字。
+   `overflow-wrap:anywhere` 是因为工具名里全是点和下划线，没有可断的空格。 */
 .tool-chip-name {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 500;
-  line-height: 1.5;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
+/* 说明最多三行：中文一句、英文一条 MCP 描述都够。
+   超过三行才收，避免某个插件把整张卡片撑成一片。 */
 .tool-chip-blurb {
+  display: -webkit-box;
   overflow: hidden;
   color: var(--faint);
   font-size: 10.5px;
-  line-height: 1.45;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  line-height: 1.5;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
-/* 领域标签（`bin:static` / `artifact` / `mcp`）：只在名字右侧占一小格，
-   超出就省略——它的作用是分类扫视，不是把全名念完。 */
+/* 领域标签（`bin:static` / `artifact` / `mcp`）：退成脚注，不再和名字抢
+   同一行。它的作用是分类扫视，放在最下面一行刚好当注脚。 */
 .tool-chip-tag {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 62px;
+  align-self: flex-start;
+  max-width: 100%;
   overflow: hidden;
   padding: 0 4px;
   border-radius: 4px;
@@ -816,9 +805,11 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 16%, transparent);
 }
 
-/* 亮着的点带一圈光晕；关掉的点只剩一道细描边。 */
+/* 亮着的点带一圈光晕；关掉的点只剩一道细描边。
+   5px 是让它落在名字首行的视觉中线上——名字可能折成两行，居中反而会飘。 */
 .tool-chip-dot {
   flex: none;
+  margin-top: 5px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
