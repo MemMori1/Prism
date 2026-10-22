@@ -157,6 +157,109 @@ impl Permission {
     }
 }
 
+/// 风险等级。`permission` 管的是"能不能写文件"，风险管的是"这东西伤不伤人"，
+/// 两者正交：`read_file` 与 `bin.strings.extract` 都是只读，但后者面对的是
+/// 恶意样本，值得单独标出来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Risk {
+    Read,
+    Write,
+    /// 会执行任意代码 / 命令。
+    Exec,
+    /// 主动攻击类（POC 执行、爆破、提权）。**默认不发给任何 Agent**。
+    /// 本期没有任何工具标这一档：位置先留着，接 POC 验证时才有地方写。
+    #[allow(dead_code)]
+    Attack,
+}
+
+impl Risk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Risk::Read => "read",
+            Risk::Write => "write",
+            Risk::Exec => "exec",
+            Risk::Attack => "attack",
+        }
+    }
+}
+
+/// 网络策略。本期只做声明与展示，真正的隔离在 P2/P3 的沙箱里落。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    /// 不发包。
+    None,
+    /// 可以出站（抓网页、查 CVE）。
+    Outbound,
+    /// 必须断网（动态分析沙箱）。本期只有声明，真正的断网在 P3 的沙箱里做。
+    #[allow(dead_code)]
+    Isolated,
+}
+
+impl Network {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Network::None => "none",
+            Network::Outbound => "outbound",
+            Network::Isolated => "isolated",
+        }
+    }
+}
+
+/// 工具跑在哪套沙箱里。
+///
+/// 两套沙箱**不能复用**：`Code` 是给模型算脚本的，`Malware` 是跑恶意样本的
+/// 重型隔离环境。合成一套，迟早会出现"样本在码沙箱里跑"的事故。
+///
+/// 本期没有任何工具真的跑在这两套沙箱里（`run_command` 没有隔离），
+/// 这里只是把标签位留出来——接 P2/P3 时不用改 Agent profile 的结构。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sandbox {
+    Code,
+    Malware,
+}
+
+impl Sandbox {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Sandbox::Code => "code",
+            Sandbox::Malware => "malware",
+        }
+    }
+}
+
+/// 工具的可用作用域。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolScope {
+    /// 哪儿都能用（聊天、子代理、DAG 节点）。
+    Any,
+    /// 只在 DAG 节点里出现：需要执行器注入的 `dag` 作用域（制品类工具）。
+    Dag,
+}
+
+/// 一条工具的标签集合（主题外的"元信息"）。
+#[derive(Debug, Clone, Copy)]
+pub struct ToolMeta {
+    /// 领域标签：`bin:static` / `bin:dyn-sandbox` / `dag:planner` / `artifact`。
+    pub tags: &'static [&'static str],
+    pub risk: Risk,
+    pub network: Network,
+    pub sandbox: Option<Sandbox>,
+    pub scope: ToolScope,
+}
+
+impl Default for ToolMeta {
+    fn default() -> Self {
+        ToolMeta {
+            tags: &[],
+            risk: Risk::Read,
+            network: Network::None,
+            sandbox: None,
+            scope: ToolScope::Any,
+        }
+    }
+}
+
 /// 工具开关集合。
 ///
 /// 只记"被显式改过"的工具；没记录的按**登记项自带的默认值**走。内置工具
@@ -222,6 +325,9 @@ pub struct ToolContext<'a> {
     pub permission: Option<&'a str>,
     /// 当前生效的工具开关：执行前兜底校验，不依赖模型"听话"。
     pub enabled: &'a EnabledTools,
+    /// DAG 作用域：由执行器为每个节点注入，模型改不了 `dag_id`。
+    /// 聊天与子代理为 `None`，此时 [`ToolScope::Dag`] 的工具根本不在 schema 里。
+    pub dag: Option<&'a crate::dag::artifact::DagScope>,
     pub should_stop: &'a dyn Fn() -> bool,
 }
 
@@ -240,7 +346,7 @@ pub struct ToolResult {
 
 impl ToolResult {
     /// 普通工具：只有文本结果。
-    fn plain(outcome: ToolOutcome) -> Self {
+    pub(crate) fn plain(outcome: ToolOutcome) -> Self {
         ToolResult {
             outcome,
             meta: None,
@@ -325,6 +431,8 @@ pub struct ToolDef {
     pub delegable: bool,
     /// 没被开关覆盖时的默认状态。
     pub enabled_by_default: bool,
+    /// 领域标签 / 风险 / 网络 / 沙箱 / 作用域（见 [`ToolMeta`]）。
+    pub meta: ToolMeta,
     pub run: ToolImpl,
 }
 
@@ -482,7 +590,7 @@ fn task_status_schema() -> Value {
 pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
     static BUILTINS: OnceLock<Vec<Arc<ToolDef>>> = OnceLock::new();
     BUILTINS.get_or_init(|| {
-        vec![
+        let mut list = vec![
             builtin(
                 "read_file",
                 "读取文件",
@@ -538,7 +646,7 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
                 true,
                 run_edit_file,
             ),
-            builtin(
+            builtin_full(
                 "run_command",
                 "执行命令",
                 run_command_schema,
@@ -547,6 +655,14 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
                 Some("command"),
                 "运行命令需要授权",
                 true,
+                // 会执行任意命令：风险档单独标 exec，免得和"写文件"混在一起。
+                ToolMeta {
+                    tags: &["exec"],
+                    risk: Risk::Exec,
+                    network: Network::None,
+                    sandbox: None,
+                    scope: ToolScope::Any,
+                },
                 run_run_command,
             ),
             builtin(
@@ -573,7 +689,11 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
                 false,
                 super::subagent::run_as_tool,
             ),
-        ]
+        ];
+        // 制品工具（只在 DAG 作用域里出现）与安全研究线的本机工具。
+        list.extend(super::artifact_tools::tools());
+        list.extend(super::forensics::tools());
+        list
     })
 }
 
@@ -589,6 +709,42 @@ fn builtin(
     delegable: bool,
     run: ToolRun,
 ) -> Arc<ToolDef> {
+    // 老工具零改动：风险等级按权限档推，其它标签留空。
+    let meta = ToolMeta {
+        risk: match permission {
+            Permission::ReadOnly => Risk::Read,
+            Permission::WriteWorkspace => Risk::Write,
+        },
+        ..ToolMeta::default()
+    };
+    builtin_full(
+        name,
+        blurb,
+        schema,
+        permission,
+        action,
+        resource_key,
+        summary,
+        delegable,
+        meta,
+        run,
+    )
+}
+
+/// 带标签的登记。新工具用它，老工具走上面的 `builtin`。
+#[allow(clippy::too_many_arguments)]
+pub fn builtin_full(
+    name: &'static str,
+    blurb: &'static str,
+    schema: fn() -> Value,
+    permission: Permission,
+    action: Option<&'static str>,
+    resource_key: Option<&'static str>,
+    summary: &'static str,
+    delegable: bool,
+    meta: ToolMeta,
+    run: ToolRun,
+) -> Arc<ToolDef> {
     Arc::new(ToolDef {
         name: Cow::Borrowed(name),
         schema: ToolSchema::Build(schema),
@@ -600,6 +756,7 @@ fn builtin(
         blurb: Cow::Borrowed(blurb),
         delegable,
         enabled_by_default: true,
+        meta,
         run: ToolImpl::Fn(run),
     })
 }
@@ -700,25 +857,33 @@ fn all_tools() -> Vec<Arc<ToolDef>> {
     tools
 }
 
-/// 发给模型的工具声明（受当前开关约束）。
+/// 发给模型的工具声明（受当前开关与作用域约束）。
 ///
 /// 关掉的工具不进 schema：模型看不到就不会调，也省一份 schema 的 token。
+/// `scope = Dag` 的工具在这里一律不发——聊天里没有 DAG 作用域，发了也只会失败。
 pub fn specs(enabled: &EnabledTools) -> Vec<Value> {
     all_tools()
         .into_iter()
-        .filter(|tool| enabled.is_on(tool))
+        .filter(|tool| enabled.is_on(tool) && tool.meta.scope == ToolScope::Any)
         .map(|tool| tool.schema_value())
         .collect()
 }
 
-/// 按权限等级筛出的声明（子代理白名单）：权限档 + 开关双重过滤。
+/// 按权限等级筛出的声明（子代理 / DAG 节点）：权限档 + 开关 + 作用域三重过滤。
 ///
 /// 取代了原来按工具名硬编码的 `AgentType::tool_names()`：只读子代理天然
 /// 拿不到写类工具，而新增的只读工具会自动进入探索子代理的能力集。
-pub fn specs_for(enabled: &EnabledTools, max: Permission) -> Vec<Value> {
+///
+/// `dag = true` 表示有 DAG 作用域，制品类工具才进清单。
+pub fn specs_for(enabled: &EnabledTools, max: Permission, dag: bool) -> Vec<Value> {
     all_tools()
         .into_iter()
-        .filter(|tool| tool.delegable && tool.permission.within(max) && enabled.is_on(tool))
+        .filter(|tool| {
+            tool.delegable
+                && tool.permission.within(max)
+                && enabled.is_on(tool)
+                && (dag || tool.meta.scope == ToolScope::Any)
+        })
         .map(|tool| tool.schema_value())
         .collect()
 }
@@ -745,6 +910,10 @@ pub fn run_with_args(ctx: &ToolContext<'_>, name: &str, args: &Value) -> ToolRes
     // 或者干脆幻觉一个被禁的工具名——不能指望它"看不见就不调"。
     if !ctx.enabled.is_on(&tool) {
         return ToolResult::fail(format!("工具 {name} 已被关闭，如需使用请在设置里打开"));
+    }
+    // 作用域的第三道防线：schema 里没发，但历史里可能留着旧调用。
+    if tool.meta.scope == ToolScope::Dag && ctx.dag.is_none() {
+        return ToolResult::fail(format!("{name} 只在 DAG 节点里可用（需要节点作用域）"));
     }
     tool.call(ctx, args)
 }
@@ -826,6 +995,7 @@ pub fn execute_with_stop(
         model: None,
         permission: None,
         enabled: &enabled,
+        dag: None,
         should_stop,
     };
     execute(&ctx, name, arguments).outcome
@@ -882,8 +1052,12 @@ fn resolve(root: &Path, raw: &str) -> Result<PathBuf, String> {
     Ok(normalized)
 }
 
-fn read_file(root: &Path, args: &Value) -> ToolOutcome {
-    let Some(path) = str_arg(args, "path") else {
+/// 把相对路径解析到工作目录内（给兄弟模块用：制品、逆向工具都要读样本）。
+pub fn resolve_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
+    resolve(root, raw)
+}
+
+fn read_file(root: &Path, args: &Value) -> ToolOutcome {    let Some(path) = str_arg(args, "path") else {
         return ToolOutcome::fail("缺少 path");
     };
     let target = match resolve(root, path) {
@@ -1568,6 +1742,7 @@ mod tests {
             model: None,
             permission: None,
             enabled: &enabled,
+            dag: None,
             should_stop: &|| false,
         };
         let result = super::execute(&ctx, "run_command", r#"{"command":"echo hi"}"#);
@@ -1953,6 +2128,7 @@ mod tests {
             blurb: Cow::Borrowed("测试用外部工具"),
             delegable: false,
             enabled_by_default: trusted,
+            meta: ToolMeta::default(),
             run: ToolImpl::Boxed(run),
         })
     }
@@ -1981,6 +2157,7 @@ mod tests {
             model: None,
             permission: None,
             enabled: &enabled,
+            dag: None,
             should_stop: &|| false,
         };
         let result = run_with_args(&ctx, name, &json!({ "text": "hi" }));
@@ -2058,6 +2235,7 @@ mod tests {
             model: None,
             permission: None,
             enabled: &enabled,
+            dag: None,
             should_stop: &|| false,
         };
         let result = run_with_args(&ctx, name, &json!({}));

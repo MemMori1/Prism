@@ -79,6 +79,8 @@ impl StopHandle {
 /// 一次节点执行的全部输入。
 pub struct NodeRequest {
     pub run_id: String,
+    /// 所属计划 id：制品作用域要它（同 DAG 可读、跨 DAG 拒绝）。
+    pub dag_id: String,
     pub node_id: String,
     pub profile: AgentProfile,
     /// 已替换过占位符的任务正文。
@@ -159,46 +161,129 @@ pub fn installed() -> Vec<&'static str> {
 
 // ---------------------------------------------------------------- 占位符
 
-/// 单个占位符最多塞多少字符。
+/// 单个 `{{nodes.<id>.output}}` 最多塞多少字符。
 ///
-/// 上游报告动辄上万字，原样拼进下游提示词会直接撞上下文上限（还花钱）。
-/// 截断并留一句说明，比让请求 400 好得多。
-const SUBSTITUTE_MAX: usize = 8_000;
+/// 上游报告动辄上百 KB，原样拼进下游提示词会直接撞上下文上限（还花钱）。
+/// 截断并留一句说明 + 制品引用，比让请求 400 好得多。
+///
+/// 为什么是 8 KB 而不是 2 KB：读完之后要"再改"的下游节点很常见，一份 5 KB
+/// 的调研结论砍掉六成，模型就开始猜了。这个阈值的职责是拦住百 KB 级倾倒。
+pub const PROMPT_INLINE_LIMIT: usize = 8_000;
 
-/// 把 `{{nodes.<id>.output}}` 换成上游报告。
+/// 把 `{{nodes.<id>.output}}` / `{{artifacts.<别名>.<字段>}}` 换成实际内容。
 ///
-/// `.report` / `.files` 也认（历史图里有这两种写法），一律取报告正文——
-/// 产物文件清单还没跟踪，给空串会让下游误以为"没有产物"，不如给正文。
-pub fn resolve_task(task: &str, outputs: &std::collections::HashMap<String, String>) -> String {
-    const PREFIX: &str = "{{nodes.";
+/// `outputs` 是上游正文（键为节点 id），`artifacts` 是本次可用的制品视图
+/// （键为别名；隐式别名就是上游节点 id）。
+pub fn resolve_task(
+    task: &str,
+    outputs: &std::collections::HashMap<String, String>,
+    artifacts: &std::collections::HashMap<String, super::artifact::ArtifactView>,
+) -> String {
+    const NODES: &str = "{{nodes.";
+    const ARTIFACTS: &str = "{{artifacts.";
+
     let mut out = String::with_capacity(task.len());
     let mut rest = task;
-    while let Some(start) = rest.find(PREFIX) {
+    loop {
+        let nodes_at = rest.find(NODES);
+        let artifacts_at = rest.find(ARTIFACTS);
+        let (start, prefix) = match (nodes_at, artifacts_at) {
+            (None, None) => break,
+            (Some(at), None) => (at, NODES),
+            (None, Some(at)) => (at, ARTIFACTS),
+            (Some(a), Some(b)) => {
+                if a <= b {
+                    (a, NODES)
+                } else {
+                    (b, ARTIFACTS)
+                }
+            }
+        };
         out.push_str(&rest[..start]);
-        let after = &rest[start + PREFIX.len()..];
+        let after = &rest[start + prefix.len()..];
         let Some(close) = after.find("}}") else {
             // 没闭合：原样保留，让用户看见自己写错了。
             out.push_str(&rest[start..]);
             return out;
         };
         let inner = &after[..close];
-        let id = inner.split('.').next().unwrap_or("").trim();
-        match outputs.get(id) {
-            Some(text) if !text.trim().is_empty() => {
-                if text.chars().count() > SUBSTITUTE_MAX {
-                    out.push_str(&text.chars().take(SUBSTITUTE_MAX).collect::<String>());
-                    out.push_str("\n\n（上游报告过长，以上为节选）");
-                } else {
-                    out.push_str(text);
-                }
-            }
-            Some(_) => out.push_str(&format!("（节点 {id} 没有留下正文）")),
-            None => out.push_str(&format!("（节点 {id} 没有产出）")),
+        if prefix == NODES {
+            let id = inner.split('.').next().unwrap_or("").trim();
+            out.push_str(&node_text(id, outputs, artifacts));
+        } else {
+            let mut parts = inner.split('.');
+            let alias = parts.next().unwrap_or("").trim();
+            let field = parts.next().map(str::trim).unwrap_or("summary");
+            out.push_str(&artifact_text(alias, if field.is_empty() { "summary" } else { field }, artifacts));
         }
         rest = &after[close + 2..];
     }
     out.push_str(rest);
     out
+}
+
+/// 一个上游节点的正文：超长截断，并在有制品时给出引用。
+fn node_text(
+    id: &str,
+    outputs: &std::collections::HashMap<String, String>,
+    artifacts: &std::collections::HashMap<String, super::artifact::ArtifactView>,
+) -> String {
+    let Some(text) = outputs.get(id) else {
+        return format!("（节点 {id} 没有产出）");
+    };
+    if text.trim().is_empty() {
+        return format!("（节点 {id} 没有留下正文）");
+    }
+    let artifact = artifacts.get(id).filter(|view| !view.id.is_empty());
+    if text.chars().count() <= PROMPT_INLINE_LIMIT {
+        return text.clone();
+    }
+    let mut out: String = text.chars().take(PROMPT_INLINE_LIMIT).collect();
+    match artifact {
+        Some(view) => out.push_str(&format!(
+            "\n\n（上游报告过长，以上为前 {PROMPT_INLINE_LIMIT} 字。完整内容见制品 {}，\
+             需要细节就调用 prism.artifact.get 取）",
+            view.id
+        )),
+        None => out.push_str("\n\n（上游报告过长，以上为节选）"),
+    }
+    out
+}
+
+/// 一个制品占位符：`id` / `summary` / `meta`。
+fn artifact_text(
+    alias: &str,
+    field: &str,
+    artifacts: &std::collections::HashMap<String, super::artifact::ArtifactView>,
+) -> String {
+    let Some(view) = artifacts.get(alias) else {
+        return format!("（未声明的制品 {alias}）");
+    };
+    match field {
+        "id" => {
+            if view.id.is_empty() {
+                "（制品不可用：上游没有落盘成功，只能用摘要）".to_string()
+            } else {
+                view.id.clone()
+            }
+        }
+        "meta" => view.meta_json(),
+        "summary" => {
+            if view.summary.trim().is_empty() {
+                return "（制品没有正文）".to_string();
+            }
+            let mut out = view.summary.clone();
+            if view.truncated {
+                out.push_str(&format!(
+                    "\n\n（摘要截到 {} 字；全文见制品 {}）",
+                    super::artifact::SUMMARY_LIMIT,
+                    if view.id.is_empty() { "（不可用）" } else { &view.id }
+                ));
+            }
+            out
+        }
+        other => format!("（制品占位符不支持 .{other}）"),
+    }
 }
 
 // ---------------------------------------------------------------- 原生执行器
@@ -228,7 +313,13 @@ impl NodeRunner for NativeRunner {
             Permission::ReadOnly => ToolPermission::ReadOnly,
             _ => ToolPermission::WriteWorkspace,
         };
-        let specs = filter_specs(tools::specs_for(&enabled, cap), &request.selection);
+        let specs = filter_specs(tools::specs_for(&enabled, cap, true), &request.selection);
+        // 制品工具的边界：作用域由执行器注入，模型改不了 dag_id，
+        // 所以"读别的 DAG 的产物"在参数层面就不成立。
+        let scope = super::artifact::DagScope {
+            dag_id: request.dag_id.clone(),
+            node_id: request.node_id.clone(),
+        };
 
         let mut messages: Vec<Value> = vec![
             serde_json::json!({ "role": "system", "content": system_prompt(&request) }),
@@ -326,6 +417,7 @@ impl NodeRunner for NativeRunner {
                                 model: Some(&model),
                                 permission: Some(permission_str(request.permission)),
                                 enabled: &enabled,
+                                dag: Some(&scope),
                                 should_stop: &should_stop,
                             },
                             &call.name,
@@ -476,6 +568,7 @@ fn pick_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dag::artifact::ArtifactView;
     use std::collections::HashMap;
 
     fn outputs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -485,31 +578,57 @@ mod tests {
             .collect()
     }
 
+    fn views(items: &[(&str, &str, &str)]) -> HashMap<String, ArtifactView> {
+        items
+            .iter()
+            .map(|(alias, id, text)| {
+                (
+                    alias.to_string(),
+                    ArtifactView {
+                        id: id.to_string(),
+                        key: "report".to_string(),
+                        kind: "text".to_string(),
+                        size: text.len() as u64,
+                        sha256: "abc".to_string(),
+                        summary: text.chars().take(2048).collect(),
+                        truncated: text.chars().count() > 2048,
+                    },
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn substitutes_upstream_reports() {
         let task = "基于这些结论继续：\n{{nodes.research.output}}";
-        let text = resolve_task(task, &outputs(&[("research", "找到了 3 处调用")]));
+        let text = resolve_task(
+            task,
+            &outputs(&[("research", "找到了 3 处调用")]),
+            &HashMap::new(),
+        );
         assert!(text.contains("找到了 3 处调用"));
         assert!(!text.contains("{{"));
     }
 
     #[test]
     fn missing_node_does_not_leave_a_hole() {
-        let text = resolve_task("[{{nodes.ghost.output}}]", &outputs(&[]));
+        let text = resolve_task("[{{nodes.ghost.output}}]", &outputs(&[]), &HashMap::new());
         assert!(text.contains("没有产出"), "{text}");
     }
 
     #[test]
-    fn long_reports_are_truncated() {
-        let long = "啊".repeat(SUBSTITUTE_MAX + 100);
-        let text = resolve_task("{{nodes.a.output}}", &outputs(&[("a", &long)]));
-        assert!(text.contains("节选"));
-        assert!(text.chars().count() < SUBSTITUTE_MAX + 200);
+    fn long_reports_are_truncated_and_point_at_the_artifact() {
+        let long = "啊".repeat(PROMPT_INLINE_LIMIT + 100);
+        let artifacts = views(&[("a", "art-1", &long)]);
+        let text = resolve_task("{{nodes.a.output}}", &outputs(&[("a", &long)]), &artifacts);
+        assert!(text.contains("上游报告过长"));
+        assert!(text.contains("art-1"), "截断时必须给出制品引用：{text}");
+        assert!(text.chars().count() < PROMPT_INLINE_LIMIT + 300);
     }
 
     #[test]
     fn unclosed_placeholder_is_left_alone() {
-        let text = resolve_task("{{nodes.a.output", &outputs(&[("a", "x")]));
+        let text = resolve_task("{{nodes.a.output", &outputs(&[("a", "x")]), &HashMap::new());
         assert_eq!(text, "{{nodes.a.output");
     }
 
@@ -518,8 +637,59 @@ mod tests {
         let text = resolve_task(
             "{{nodes.a.report}}|{{nodes.a.files}}",
             &outputs(&[("a", "报告")]),
+            &HashMap::new(),
         );
         assert_eq!(text, "报告|报告");
+    }
+
+    #[test]
+    fn artifact_fields_render() {
+        let artifacts = views(&[("notes", "art-9", "三处风险")]);
+        let text = resolve_task(
+            "id={{artifacts.notes.id}}\n摘要={{artifacts.notes.summary}}\n裸={{artifacts.notes}}",
+            &HashMap::new(),
+            &artifacts,
+        );
+        assert!(text.contains("id=art-9"), "{text}");
+        assert_eq!(text.matches("三处风险").count(), 2);
+
+        let meta = resolve_task("{{artifacts.notes.meta}}", &HashMap::new(), &artifacts);
+        assert!(meta.contains("\"id\":\"art-9\""), "{meta}");
+        assert!(meta.contains("\"key\":\"report\""));
+    }
+
+    #[test]
+    fn missing_artifact_degrades_to_summary() {
+        // 写入失败：id 为空，但摘要还能用——不能变成空白。
+        let artifacts = views(&[("notes", "", "兜底摘要")]);
+        let text = resolve_task(
+            "{{artifacts.notes.id}} / {{artifacts.notes.summary}}",
+            &HashMap::new(),
+            &artifacts,
+        );
+        assert!(text.contains("制品不可用"), "{text}");
+        assert!(text.contains("兜底摘要"));
+    }
+
+    #[test]
+    fn unknown_artifact_and_field_are_explained() {
+        let text = resolve_task("{{artifacts.ghost.id}}", &HashMap::new(), &HashMap::new());
+        assert!(text.contains("未声明的制品"), "{text}");
+
+        let artifacts = views(&[("notes", "art-1", "x")]);
+        let text = resolve_task("{{artifacts.notes.path}}", &HashMap::new(), &artifacts);
+        assert!(text.contains("不支持 .path"), "{text}");
+    }
+
+    #[test]
+    fn mixed_placeholders_keep_order() {
+        let artifacts = views(&[("notes", "art-1", "摘要")]);
+        let text = resolve_task(
+            "A{{artifacts.notes.id}}B{{nodes.r.output}}C",
+            &outputs(&[("r", "正文")]),
+            &artifacts,
+        );
+        assert_eq!(text, "Aart-1B正文C");
     }
 
     #[test]

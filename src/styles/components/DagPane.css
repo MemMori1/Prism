@@ -1425,3 +1425,125 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ---- 制品 ---- */
+
+.run-artifact {
+  margin-bottom: 10px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+.art-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.art-key {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.art-meta {
+  color: var(--muted);
+  font-size: 9.5px;
+}
+
+.art-sha {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 9.5px;
+}
+
+.art-id {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.art-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.art-parent {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 全文预览：比规划弹窗宽，因为要看长报告。 */
+.artifact-card {
+  display: flex;
+  flex-direction: column;
+  width: 780px;
+  max-width: 92%;
+  max-height: 86%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+}
+
+.artifact-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 8px;
+}
+
+.artifact-title {
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  word-break: break-all;
+}
+
+.artifact-meta {
+  padding: 0 16px 10px;
+  color: var(--faint);
+  font-size: 9.5px;
+  word-break: break-all;
+}
+
+.artifact-pre {
+  flex: 1;
+  min-height: 120px;
+  margin: 0 16px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.artifact-note {
+  padding: 9px 16px 14px;
+  color: var(--faint);
+  font-size: 10px;
+}

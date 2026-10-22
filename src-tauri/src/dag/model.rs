@@ -98,6 +98,23 @@ impl Default for DagDefaults {
     }
 }
 
+/// 一条"要读上游哪个制品"的声明。
+///
+/// 不写也能用：每个上游的主产出制品自动以「节点 id」为别名可引用。
+/// 需要改别名、或者要读上游**非主产出**（工具写入的 `strings` / `hashes`）时才写。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactInput {
+    /// 上游节点 id。
+    pub from: String,
+    /// 要它哪个制品；空 = 上游的主产出 key。
+    #[serde(default)]
+    pub key: String,
+    /// 占位符里用的名字：`{{artifacts.<as>.summary}}`。
+    #[serde(default, rename = "as")]
+    pub alias: String,
+}
+
 /// 一个节点 = 一次独立会话。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,12 +146,31 @@ pub struct DagNode {
     pub gate: Option<Gate>,
     #[serde(default)]
     pub position: Option<Position>,
+    /// 显式声明的上游制品引用（可省，见 [`ArtifactInput`]）。
+    #[serde(default)]
+    pub input_artifacts: Vec<ArtifactInput>,
+    /// 本节点产出落到哪个制品 key。空 = `report`。
+    #[serde(default)]
+    pub output_artifact_key: String,
 }
+
+/// 主产出的默认 key。
+pub const DEFAULT_ARTIFACT_KEY: &str = "report";
 
 impl DagNode {
     /// 这个节点要人确认才开跑。
     pub fn needs_gate(&self) -> bool {
         self.gate.map(|gate| gate.before).unwrap_or(false)
+    }
+
+    /// 本节点产出的制品 key（空值回落默认）。
+    pub fn artifact_key(&self) -> String {
+        let trimmed = self.output_artifact_key.trim();
+        if trimmed.is_empty() {
+            DEFAULT_ARTIFACT_KEY.to_string()
+        } else {
+            trimmed.to_string()
+        }
     }
 }
 

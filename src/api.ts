@@ -10,6 +10,8 @@ import type {
   ContextStats,
   CreatedSession,
   DagIssue,
+  DagArtifactList,
+  DagArtifactText,
   DagPlan,
   DagRun,
   DagSummary,
@@ -253,6 +255,11 @@ export const api = {
   dagRunGet: (runId: string) => invoke<DagRun | null>('dag_run_get', { runId }),
   /** 已装的节点执行器 id：Agent 编辑器据此标出"这个引擎现在跑不了"。 */
   dagRunners: () => invoke<string[]>('dag_runners'),
+  /** 某个 DAG 的产物清单 + 已用空间。 */
+  dagArtifacts: (dagId: string) => invoke<DagArtifactList>('dag_artifacts', { dagId }),
+  /** 按引用取产物正文（预览用，超过 limit 会截断）。 */
+  dagArtifactGet: (dagId: string, id: string, limit?: number) =>
+    invoke<DagArtifactText>('dag_artifact_get', { dagId, id, limit: limit ?? null }),
 
   // ---- 插件清单 ----
   pluginsList: () => invoke<PluginInfo[]>('plugins_list'),

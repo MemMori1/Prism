@@ -38,6 +38,8 @@ pub fn run() {
             ipc::dag_save,
             ipc::dag_delete,
             ipc::dag_validate,
+            ipc::dag_artifacts,
+            ipc::dag_artifact_get,
             ipc::dag_plan,
             ipc::dag_run,
             ipc::dag_run_cancel,

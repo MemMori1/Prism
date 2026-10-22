@@ -1,6 +1,8 @@
 # 安全研究 Agent 与工具矩阵 · 需求分析
 
-> 状态：**需求分析（P0 未实现）**；关联 `docs/AGENTS.md`、`docs/DAG_PLANNER.md`。
+> 状态：**P0 / P0.5 已实现**（制品仓库、节点数据流、工具标签、三个 `bin.*` 静态工具；
+> 详见 §0.1 与 `docs/ARTIFACTS.md`）。P1 起（`json.jq` / xref / Planner 七工具 / Ghidra / 沙箱）未开始。
+> 关联 `docs/AGENTS.md`、`docs/DAG_PLANNER.md`、`docs/ARTIFACTS.md`。
 > 输入：逆向线 / 渗透线的 Agent 与工具清单（用户整理）。本文只做一件事——
 > 把那份清单和**现在代码里真实存在的东西**对齐，说清差在哪、先补什么、怎么验收。
 
@@ -10,16 +12,35 @@ Prism 现在是一套能跑起来的**软工编排底座**（Planner 拆图 → 
 但它的 Agent 工种、工具集、数据流都还是"改代码"那一套。要变成安全研究线，
 缺的不是再登记 60 个工具名，而是四层地基：**制品、节点数据流、工具标签、Planner 工具面**。
 
+## 0.1 落地回填（P0 / P0.5，已完成）
+
+需求分析里判"0%"的四层地基，第一层和第二层已经补完：
+
+| 项 | 落点 | 状态 |
+|---|---|---|
+| 制品仓库 | `src-tauri/src/dag/artifact.rs`：`~/.prism/artifacts/<dag_id>/`，索引 + 内容分离，单件 256 MiB / 单 DAG 2 GiB 配额，跨 DAG 读取拒绝 | ✅ |
+| 节点数据流 | `dag/model.rs` 的 `input_artifacts` / `output_artifact_key`；`dag/runner.rs::resolve_task` 支持 `{{nodes.x.output}}`（超 8 KB 截断并附 `art-` 引用）与 `{{artifacts.<别名>.id|summary|meta}}` | ✅ |
+| 隐式别名 | 未声明 `input_artifacts` 时，上游主产出自动以上游节点 id 为别名，老计划零改动 | ✅ |
+| 工具标签 | `engines/native/tools.rs` 的 `ToolMeta`（`tags` / `risk` / `network` / `sandbox` / `scope`）；`scope=dag` 的工具在聊天里不进 schema | ✅ |
+| 制品工具 | `engines/native/artifact_tools.rs`：`prism.artifact.put` / `prism.artifact.get`，`dag_id` 由执行器注入 | ✅ |
+| 静态样本工具 | `engines/native/forensics.rs`：`bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract`，纯 Rust 解析 PE/ELF/Mach-O/DEX/APK | ✅ |
+| 前端 | `DagPane.vue` 节点卡片展示制品（key / kind / 大小 / sha256 / 引用 id / 查看全文 / 派生血缘）；设置页工具清单带标签与风险色 | ✅ |
+
+验收：`cargo test --lib` 359 passed（含"200 KB 节点输出 → 下游 prompt < 3 KB 且含 `art-`、取回长度一致"的端到端用例）；
+`vue-tsc --noEmit` 0 错误；`vitest` 376 passed。
+**仍未做**：`prism.dag.*` 七工具（Planner 动态改图）、真实沙箱、渗透线 `recon.*` / `exp.*`、P1 分析工具（`json.jq` / xref / importexport / crypto 扫描）。
+
+
 ## 1. 结论先行：差在哪
 
-| 维度 | 现在（代码事实） | 目标（清单要求） | 差距 |
+| 维度 | 分析时的代码事实 | 目标（清单要求） | 差距（回填后） |
 |---|---|---|---|
-| Agent 工种 | 8 个软工 preset：探索 / 通用 / 前端 / 后端 / 架构 / 文档 / 验证 / DeepSeek 调研 | 样本预处理 / 脱壳 / 静态分析 / 密码 / 动态沙箱 / 控制流 / 辅助 | **0%**，工种完全错位 |
-| 工具集 | 7 个裸名工具：`read_file` `list_files` `grep` `write_file` `edit_file` `run_command` `task_status` | 60+ 个 `bin.*` / `recon.*` / `exp.*`，带权限 tag | **0%**，且没有命名空间 |
-| 产物传递 | 节点输出 `NodeOutput.text`，下游用 `{{nodes.x.output}}` **整段内联** | artifact 引用 + `input_artifacts` / `output_artifact_key` + 血缘 | **0%**，这是最容易炸上下文的一环 |
-| 制品仓库 | `artifact.rs` 只是**交付物预览**（读本地 html/svg/图片给前端看） | `artifact.put/get`，同 DAG 内可读、跨 DAG 隔离 | **0%**，同名不同物 |
-| Planner 形态 | UI 弹窗 + `dag_plan` IPC，调一次模型出一张图 | Planner 是可调 `prism.dag.*` 的 Agent，能动态改图 | **0%**，但 DAG 引擎已有 |
-| 权限模型 | 三档（read-only / workspace-write / full-access）+ shared / private / deny 名单 | 风险标签（`dag:planner` `sec:exp-verify` `bin:dyn-sandbox`）+ 高危显式开关 + 网络策略 | **约 20%**，缺标签与高危闸门 |
+| Agent 工种 | 8 个软工 preset：探索 / 通用 / 前端 / 后端 / 架构 / 文档 / 验证 / DeepSeek 调研 | 样本预处理 / 脱壳 / 静态分析 / 密码 / 动态沙箱 / 控制流 / 辅助 | **0%**，工种完全错位（未动） |
+| 工具集 | 7 个裸名工具：`read_file` `list_files` `grep` `write_file` `edit_file` `run_command` `task_status` | 60+ 个 `bin.*` / `recon.*` / `exp.*`，带权限 tag | **≈ 15%**：命名空间与 tag 已建，落地 `bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract` 三个 |
+| 产物传递 | 节点输出 `NodeOutput.text`，下游用 `{{nodes.x.output}}` **整段内联** | artifact 引用 + `input_artifacts` / `output_artifact_key` + 血缘 | **已补**：8 KB 截断 + `{{artifacts.<别名>.*}}` + 显式/隐式别名 |
+| 制品仓库 | `artifact.rs` 只是**交付物预览**（读本地 html/svg/图片给前端看） | `artifact.put/get`，同 DAG 内可读、跨 DAG 隔离 | **已补**：`dag/artifact.rs` + `prism.artifact.*`，配额与隔离齐 |
+| Planner 形态 | UI 弹窗 + `dag_plan` IPC，调一次模型出一张图 | Planner 是可调 `prism.dag.*` 的 Agent，能动态改图 | **0%**，DAG 引擎与 `scope=dag` 已有插座 |
+| 权限模型 | 三档（read-only / workspace-write / full-access）+ shared / private / deny 名单 | 风险标签（`dag:planner` `sec:exp-verify` `bin:dyn-sandbox`）+ 高危显式开关 + 网络策略 | **约 40%**：`risk` / `network` / `sandbox` / `scope` 四维已入工具表；高危闸门与网络策略未接 |
 
 **底座不是零**：DAG 模型 / 校验 / 调度 / 并发 / 重试 / 闸门 / 运行记录 / 执行器插件全都在，
 新工种只是往这套底座上挂数据。这一点决定了工作量是"补领域层"，不是"重写编排"。

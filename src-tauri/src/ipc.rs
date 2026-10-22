@@ -238,6 +238,14 @@ pub struct ToolView {
     pub enabled: bool,
     pub owner: Option<String>,
     pub description: String,
+    /// 领域标签（`bin:static` / `artifact` …）。设置页只用前两个做标记。
+    pub tags: Vec<String>,
+    /// read / write / exec / attack。
+    pub risk: String,
+    /// none / outbound / isolated。
+    pub network: String,
+    /// code / malware；没有沙箱为 None。
+    pub sandbox: Option<String>,
 }
 
 #[tauri::command]
@@ -273,6 +281,10 @@ fn tool_view(
         // 给设置页的一行简介，不是 schema 里给模型看的长描述：
         // 一格只有一百来像素，那句"读取工作目录里的一个文本文件，带行号"放不下。
         description: def.blurb.to_string(),
+        tags: def.meta.tags.iter().map(|tag| tag.to_string()).collect(),
+        risk: def.meta.risk.as_str().to_string(),
+        network: def.meta.network.as_str().to_string(),
+        sandbox: def.meta.sandbox.map(|sandbox| sandbox.as_str().to_string()),
     }
 }
 
@@ -1713,6 +1725,50 @@ pub fn dag_delete(id: String) -> Result<(), String> {
 pub fn dag_validate(plan: DagPlan) -> Result<Vec<Issue>, String> {
     let known: Vec<String> = agents::list().into_iter().map(|agent| agent.id).collect();
     Ok(dag::validate::validate(&plan, &known))
+}
+
+/// 某个 DAG 的制品清单（新的在前）+ 已用空间。
+///
+/// 编排页的「产物」用它：用户在跑完之后要能看见"这个节点到底产了什么"。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagArtifactList {
+    pub items: Vec<dag::artifact::ArtifactRef>,
+    pub bytes: u64,
+}
+
+#[tauri::command]
+pub fn dag_artifacts(dag_id: String) -> Result<DagArtifactList, String> {
+    let store = dag::artifact::ArtifactStore::global()?;
+    Ok(DagArtifactList {
+        items: store.list(&dag_id),
+        bytes: store.dag_bytes(&dag_id),
+    })
+}
+
+/// 制品正文（预览用）。`limit` 是字符数，默认 40 000。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagArtifactText {
+    pub artifact: dag::artifact::ArtifactRef,
+    pub text: String,
+    pub truncated: bool,
+}
+
+#[tauri::command]
+pub fn dag_artifact_get(
+    dag_id: String,
+    id: String,
+    limit: Option<usize>,
+) -> Result<DagArtifactText, String> {
+    let store = dag::artifact::ArtifactStore::global()?;
+    let limit = limit.unwrap_or(40_000).clamp(1, 200_000);
+    let (artifact, text, truncated) = store.read_text(&dag_id, &id, limit)?;
+    Ok(DagArtifactText {
+        artifact,
+        text,
+        truncated,
+    })
 }
 
 /// 让 Planner 从一句目标生成草案（**不落盘**，确认后再 `dag_save`）。

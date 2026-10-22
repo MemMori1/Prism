@@ -313,17 +313,45 @@ async function toggleTool(tool: ToolView) {
   }
 }
 
+/** 风险档的中文说法。未知值原样透出，方便后端加档时前端不必同步改。 */
+const RISK_LABEL: Record<string, string> = {
+  read: '只读',
+  write: '可写',
+  exec: '执行命令',
+  attack: '主动探测',
+}
+
+/** 网络行为的中文说法；`none` 不展示（大多数本地工具都是它，说了等于没说）。 */
+const NET_LABEL: Record<string, string> = {
+  outbound: '会出网',
+  isolated: '仅在隔离环境内联网',
+}
+
+const SANDBOX_LABEL: Record<string, string> = {
+  code: '需要代码沙箱',
+  malware: '需要恶意样本沙箱',
+}
+
 /**
  * 芯片上只放得下名字，其余信息进原生 tooltip。
  *
  * 一行四五个格子意味着每个格子只有 100 来像素，描述和来源挤进去只会互相
  * 截断；不如把它们留在"停一下"就能看到的地方，让扫视时只面对名字和状态。
+ *
+ * 工具标签（`bin:static` 这类）例外：它决定了这个工具属于哪条工作线，
+ * 是扫视时真正想先看到的东西，所以单独在名字右侧留一小格显示。
  */
 function toolTitle(tool: ToolView) {
   const parts = [tool.name]
   if (tool.description) parts.push(tool.description)
   parts.push(tool.owner ? `来自 ${tool.owner}` : '随 Prism 编译')
   parts.push(tool.permission === 'read-only' ? '只读' : '可写工作目录')
+  if (tool.risk) parts.push(RISK_LABEL[tool.risk] ?? tool.risk)
+  const net = NET_LABEL[tool.network]
+  if (net) parts.push(net)
+  const sandbox = tool.sandbox ? SANDBOX_LABEL[tool.sandbox] : null
+  if (sandbox) parts.push(sandbox)
+  if (tool.tags.length) parts.push(`标签 ${tool.tags.join(' ')}`)
   parts.push(tool.enabled ? '已开启' : '已关闭')
   return parts.join(' · ')
 }
@@ -863,7 +891,8 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
                     >
                       <span class="tool-chip-top">
                         <span class="tool-chip-name">{{ tool.name }}</span>
-                        <span class="tool-chip-dot" />
+                        <span v-if="tool.tags.length" class="tool-chip-tag">{{ tool.tags[0] }}</span>
+                        <span class="tool-chip-dot" :class="`risk-${tool.risk || 'read'}`" />
                       </span>
                       <span class="tool-chip-blurb">{{ tool.description || '—' }}</span>
                     </button>

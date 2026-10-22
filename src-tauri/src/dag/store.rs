@@ -276,6 +276,8 @@ mod tests {
                 timeout_secs: None,
                 gate: None,
                 position: None,
+                input_artifacts: Vec::new(),
+                output_artifact_key: String::new(),
             }],
             layout: HashMap::new(),
             created_at: 0,

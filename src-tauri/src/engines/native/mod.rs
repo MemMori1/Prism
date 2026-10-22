@@ -8,13 +8,17 @@
 //! - `store`    会话与消息落盘（`~/.prism/native/sessions/<id>/`）
 //! - `provider` OpenAI 兼容的流式客户端（SSE 解析 + 增量拼装 + `/models` 拉取）
 //! - `tools`    内置工具（读写文件、列目录、检索、跑命令）
+//! - `artifact_tools` 制品读写（只在 DAG 节点作用域里出现）
+//! - `forensics` 安全研究线的本机工具（`bin.meta.identify` 等）
 //! - `agent`    turn 循环：模型 → 工具 → 模型，事件原样喂给前端 liveTurn
 
 pub mod agent;
 pub mod approval;
+pub mod artifact_tools;
 pub mod config;
 pub mod context;
 pub mod engine;
+pub mod forensics;
 pub mod provider;
 pub mod store;
 pub mod subagent;

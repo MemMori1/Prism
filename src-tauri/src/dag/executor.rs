@@ -183,8 +183,24 @@ pub fn execute(
                     continue;
                 };
                 match done.result {
-                    Ok(output) => {
-                        handle.mark_succeeded(&node.id, output);
+                    Ok(mut output) => {
+                        // 跑完即落制品：正文只进一次磁盘，下游拿引用或摘要。
+                        // 写失败不判节点失败——正文还在运行记录里，判失败等于
+                        // 丢掉已经花钱跑出来的结果，降级成一条过程记录。
+                        let artifact =
+                            match handle.save_artifact(
+                                &plan.id,
+                                &node.id,
+                                &node.artifact_key(),
+                                &output.text,
+                            ) {
+                                Ok(reference) => reference,
+                                Err(error) => {
+                                    output.steps.push(format!("制品写入失败：{error}"));
+                                    None
+                                }
+                            };
+                        handle.mark_succeeded(&node.id, output, artifact);
                         retry_at.remove(&node.id);
                     }
                     Err(error) => apply_failure(node, error, &handle, &mut retry_at),
@@ -271,6 +287,81 @@ fn cancel_pending(plan: &DagPlan, handle: &RunHandle, reason: &str) {
     }
 }
 
+/// 拼提示词时可用的制品视图。
+///
+/// 别名来源两条，后者覆盖前者：
+/// 1. **隐式**：每个上游节点 → 别名 = 节点 id，key = 该节点的主产出 key；
+/// 2. **显式** `input_artifacts`：要改别名、或要读上游非主产出（工具写的
+///    `strings` / `hashes`）时才写。
+pub fn artifact_views(
+    plan: &DagPlan,
+    node: &DagNode,
+    handle: &RunHandle,
+) -> HashMap<String, super::artifact::ArtifactView> {
+    let mut views: HashMap<String, super::artifact::ArtifactView> = HashMap::new();
+    for dep in &node.depends_on {
+        let key = plan
+            .node(dep)
+            .map(DagNode::artifact_key)
+            .unwrap_or_default();
+        views.insert(dep.clone(), view_of(plan, handle, dep, &key));
+    }
+    for input in &node.input_artifacts {
+        let key = if input.key.trim().is_empty() {
+            plan.node(&input.from)
+                .map(DagNode::artifact_key)
+                .unwrap_or_default()
+        } else {
+            input.key.trim().to_string()
+        };
+        let alias = if input.alias.trim().is_empty() {
+            input.from.clone()
+        } else {
+            input.alias.trim().to_string()
+        };
+        views.insert(alias, view_of(plan, handle, &input.from, &key));
+    }
+    views
+}
+
+fn view_of(
+    plan: &DagPlan,
+    handle: &RunHandle,
+    node_id: &str,
+    key: &str,
+) -> super::artifact::ArtifactView {
+    let text = handle.output_of(node_id).unwrap_or_default();
+    let (summary, truncated) =
+        super::artifact::head(&text, super::artifact::SUMMARY_LIMIT);
+    // 主产出走内存里的运行记录（最快，写入失败时也能兜底）；工具写入的其它
+    // key 只有磁盘索引里有，所以第二条路径必须查仓库。
+    let reference = handle
+        .artifact_of(node_id)
+        .filter(|reference| reference.key == super::artifact::normalize_key(key))
+        .or_else(|| {
+            handle
+                .artifact_store()
+                .and_then(|store| store.find(&plan.id, node_id, key))
+        });
+    match reference {
+        Some(reference) => super::artifact::ArtifactView {
+            id: reference.id,
+            key: reference.key,
+            kind: reference.kind,
+            size: reference.size,
+            sha256: reference.sha256,
+            summary,
+            truncated,
+        },
+        None => super::artifact::ArtifactView {
+            key: key.to_string(),
+            summary,
+            truncated,
+            ..Default::default()
+        },
+    }
+}
+
 /// 组装一次节点执行：解析 Agent、权限、工具、目录与占位符。
 fn build_request(
     plan: &DagPlan,
@@ -323,11 +414,12 @@ fn build_request(
 
     let request = NodeRequest {
         run_id: handle.id(),
+        dag_id: plan.id.clone(),
         node_id: node.id.clone(),
         permission,
         selection,
         directory,
-        prompt: resolve_task(&node.task, &outputs),
+        prompt: resolve_task(&node.task, &outputs, &artifact_views(plan, node, handle)),
         profile,
         stop: StopHandle::new(handle.cancel_flag(), node.timeout_secs),
         on_text: {
@@ -405,9 +497,12 @@ mod tests {
     use crate::agents::{Permission, ToolSelection, Workspace};
     use crate::dag::model::{DagDefaults, DagNode, Retry};
 
+    #[derive(Default)]
     struct ScriptedRunner {
         script: HashMap<String, Result<String, String>>,
         delay: Duration,
+        /// 每个节点的入参提示词：用来断言"下游拿到的是摘要不是全文"。
+        seen: Option<Arc<std::sync::Mutex<Vec<(String, String)>>>>,
     }
 
     impl NodeRunner for ScriptedRunner {
@@ -416,6 +511,11 @@ mod tests {
         }
 
         fn run(&self, request: NodeRequest) -> Result<NodeOutput, String> {
+            if let Some(seen) = self.seen.as_ref() {
+                if let Ok(mut list) = seen.lock() {
+                    list.push((request.node_id.clone(), request.prompt.clone()));
+                }
+            }
             std::thread::sleep(self.delay);
             match self.script.get(&request.node_id) {
                 Some(Ok(text)) => Ok(NodeOutput {
@@ -465,6 +565,8 @@ mod tests {
             timeout_secs: None,
             gate: None,
             position: None,
+            input_artifacts: Vec::new(),
+            output_artifact_key: String::new(),
         }
     }
 
@@ -505,7 +607,11 @@ mod tests {
                 )
             })
             .collect();
-        let runner = Arc::new(ScriptedRunner { script, delay });
+        let runner = Arc::new(ScriptedRunner {
+            script,
+            delay,
+            ..Default::default()
+        });
         let started = hub
             .start(plan, &[profile("general")], Some(runner), Arc::new(|_: &crate::dag::run::DagRun| {}))
             .expect("应当能起跑");
@@ -583,6 +689,7 @@ mod tests {
         let runner = Arc::new(ScriptedRunner {
             script: HashMap::new(),
             delay: Duration::from_millis(5),
+            ..Default::default()
         });
         let started = hub
             .start(plan, &[profile("general")], Some(runner), Arc::new(|_: &crate::dag::run::DagRun| {}))
@@ -616,6 +723,7 @@ mod tests {
         let runner = Arc::new(ScriptedRunner {
             script: HashMap::new(),
             delay: Duration::from_millis(5),
+            ..Default::default()
         });
         let started = hub
             .start(plan, &[profile("general")], Some(runner), Arc::new(|_: &crate::dag::run::DagRun| {}))
@@ -641,6 +749,7 @@ mod tests {
         let runner = Arc::new(ScriptedRunner {
             script: HashMap::new(),
             delay: Duration::from_millis(120),
+            ..Default::default()
         });
         let started = hub
             .start(plan, &[profile("general")], Some(runner), Arc::new(|_: &crate::dag::run::DagRun| {}))
@@ -666,12 +775,78 @@ mod tests {
         let runner = Arc::new(ScriptedRunner {
             script: HashMap::new(),
             delay: Duration::from_millis(200),
+            ..Default::default()
         });
         let notify = Arc::new(|_: &crate::dag::run::DagRun| {});
         hub.start(plan.clone(), &[profile("general")], Some(runner.clone()), notify.clone())
             .unwrap();
         let second = hub.start(plan, &[profile("general")], Some(runner), notify);
         assert!(second.is_err(), "同一张计划不该并发跑");
+    }
+
+    #[test]
+    fn node_output_lands_in_the_artifact_store() {
+        let big = "结".repeat(200_000);
+        let mut graph = plan(
+            vec![node("a", &[]), node("b", &["a"])],
+            1,
+            FailurePolicy::FailFast,
+        );
+        graph.nodes[1].task =
+            "引用：{{artifacts.a.id}} | 摘要：{{artifacts.a.summary}}".to_string();
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(ScriptedRunner {
+            script: HashMap::from([("a".to_string(), Ok(big.clone()))]),
+            delay: Duration::from_millis(5),
+            seen: Some(seen.clone()),
+        });
+        let hub = crate::dag::run::DagHub::ephemeral();
+        let started = hub
+            .start(
+                graph,
+                &[profile("general")],
+                Some(runner),
+                Arc::new(|_: &crate::dag::run::DagRun| {}),
+            )
+            .expect("应当能起跑");
+        let handle = hub.get(&started.id).unwrap();
+        for _ in 0..100 {
+            if handle.status() != crate::dag::run::RunStatus::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let run = handle.snapshot();
+        let artifact = run
+            .node("a")
+            .and_then(|node| node.artifact.clone())
+            .expect("节点跑完就该有制品");
+        assert_eq!(artifact.key, "report");
+        assert_eq!(artifact.size, big.len() as u64);
+        assert_eq!(
+            artifact.sha256,
+            crate::dag::artifact::sha256_of(big.as_bytes())
+        );
+
+        // 下游提示词里是 id + 摘要（2 KB），不是 200 KB 正文。
+        let prompts = seen.lock().unwrap();
+        let prompt = &prompts.iter().find(|(id, _)| id == "b").unwrap().1;
+        assert!(prompt.contains(&artifact.id), "摘要里必须带引用");
+        assert!(
+            prompt.chars().count() < 3_000,
+            "下游不该拿到全文：{} 字",
+            prompt.chars().count()
+        );
+
+        // 按引用取回：长度与原文一致（截断与否由调用方决定）。
+        let store = handle.artifact_store().expect("单测应当有临时仓库");
+        let (_, text, truncated) = store
+            .read_text("dag-test", &artifact.id, 1_000_000)
+            .unwrap();
+        assert_eq!(text.chars().count(), big.chars().count());
+        assert!(!truncated);
     }
 
     #[test]

@@ -236,6 +236,8 @@ pub(crate) fn from_json(
             timeout_secs: None,
             gate,
             position: None,
+            input_artifacts: Vec::new(),
+            output_artifact_key: String::new(),
         });
     }
 
@@ -309,6 +311,8 @@ pub fn blank(project: &str) -> DagPlan {
             timeout_secs: None,
             gate: None,
             position: None,
+            input_artifacts: Vec::new(),
+            output_artifact_key: String::new(),
         }],
         layout: Default::default(),
         created_at: 0,

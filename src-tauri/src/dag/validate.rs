@@ -8,7 +8,6 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::model::DagPlan;
-
 /// 单张图最多多少个节点：再多人也看不完，模型也规划不准。
 pub const MAX_NODES: usize = 24;
 
@@ -73,6 +72,39 @@ pub fn placeholder_refs(task: &str) -> Vec<String> {
         let id = after[..close].split('.').next().unwrap_or("").trim();
         if !id.is_empty() && !out.iter().any(|item| item == id) {
             out.push(id.to_string());
+        }
+        rest = &after[close + 2..];
+    }
+    out
+}
+
+/// 制品占位符支持的字段。
+pub const ARTIFACT_FIELDS: [&str; 3] = ["id", "summary", "meta"];
+
+/// 从 task 里抽出 `{{artifacts.<别名>.<字段>}}` 的（别名, 字段）对。
+///
+/// 不写字段（`{{artifacts.notes}}`）按 `summary` 算——和渲染端一致。
+pub fn artifact_refs(task: &str) -> Vec<(String, String)> {
+    const PREFIX: &str = "{{artifacts.";
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut rest = task;
+    while let Some(start) = rest.find(PREFIX) {
+        let after = &rest[start + PREFIX.len()..];
+        let Some(close) = after.find("}}") else {
+            // 没闭合：当作没写完，不再往后找（半截占位符不该变成假引用）。
+            break;
+        };
+        let inner = &after[..close];
+        let mut parts = inner.split('.');
+        let alias = parts.next().unwrap_or("").trim();
+        let field = parts.next().map(str::trim).unwrap_or("summary");
+        let field = if field.is_empty() { "summary" } else { field };
+        if !alias.is_empty()
+            && !out
+                .iter()
+                .any(|(known, known_field)| known == alias && known_field == field)
+        {
+            out.push((alias.to_string(), field.to_string()));
         }
         rest = &after[close + 2..];
     }
@@ -230,6 +262,97 @@ pub fn validate(plan: &DagPlan, known_agents: &[String]) -> Vec<Issue> {
         }
     }
 
+    // ---- 制品引用 ----
+    let node_ids: HashSet<&str> = plan.nodes.iter().map(|node| node.id.as_str()).collect();
+    for node in &plan.nodes {
+        // 产出 key：会出现在索引与占位符建议里，字符集必须收窄。
+        let key = node.artifact_key();
+        if !valid_id(&key) {
+            issues.push(error(
+                Some(&node.id),
+                format!("产出制品 key「{key}」不合法：只能用字母、数字、连字符与下划线"),
+            ));
+        }
+
+        let reachable = ancestors(plan, &node.id);
+        let mut aliases: Vec<String> = Vec::new();
+        for input in &node.input_artifacts {
+            let alias = input.alias.trim();
+            if !valid_id(alias) {
+                issues.push(error(
+                    Some(&node.id),
+                    format!("制品别名「{alias}」不合法：只能用字母、数字、连字符与下划线"),
+                ));
+            } else if node_ids.contains(alias) {
+                // 隐式别名就是上游节点 id；撞名会让人分不清取的是哪个。
+                issues.push(error(
+                    Some(&node.id),
+                    format!("制品别名「{alias}」和节点 id 撞名：占位符会分不清该取哪个"),
+                ));
+            } else if aliases.iter().any(|known| known == alias) {
+                issues.push(error(
+                    Some(&node.id),
+                    format!("制品别名「{alias}」重复了"),
+                ));
+            } else {
+                aliases.push(alias.to_string());
+            }
+
+            match plan.node(&input.from) {
+                None => issues.push(error(
+                    Some(&node.id),
+                    format!("制品引用的节点「{}」不存在", input.from),
+                )),
+                Some(source) => {
+                    if !reachable.contains(&input.from) {
+                        issues.push(error(
+                            Some(&node.id),
+                            format!(
+                                "制品引用了「{}」，但它不是上游（制品只能取祖先的产出）",
+                                input.from
+                            ),
+                        ));
+                    }
+                    // 主产出 key 能静态确认；工具写入的 key（strings 等）运行时才有，
+                    // 拦死会让合法的图跑不起来，所以只提醒。
+                    let wanted = if input.key.trim().is_empty() {
+                        source.artifact_key()
+                    } else {
+                        input.key.trim().to_string()
+                    };
+                    if wanted != source.artifact_key() {
+                        issues.push(warning(
+                            Some(&node.id),
+                            format!(
+                                "要「{}」的 {} 制品，但它的主产出是 {}：这个 key 得由工具写入，运行时才确认",
+                                input.from,
+                                wanted,
+                                source.artifact_key()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut known_names = reachable.clone();
+        known_names.extend(aliases.iter().cloned());
+        for (alias, field) in artifact_refs(&node.task) {
+            if !known_names.contains(&alias) {
+                issues.push(error(
+                    Some(&node.id),
+                    format!("占位符引用了未声明的制品「{alias}」（只能取上游产物，或在「制品」里声明）"),
+                ));
+            }
+            if !ARTIFACT_FIELDS.contains(&field.as_str()) {
+                issues.push(error(
+                    Some(&node.id),
+                    format!("制品占位符不支持 .{field}（只有 id / summary / meta）"),
+                ));
+            }
+        }
+    }
+
     // ---- Agent 引用 ----
     if !known_agents.is_empty() {
         if plan.defaults.agent.trim().is_empty() {
@@ -300,6 +423,8 @@ mod tests {
             timeout_secs: None,
             gate: None,
             position: None,
+            input_artifacts: Vec::new(),
+            output_artifact_key: String::new(),
         }
     }
 

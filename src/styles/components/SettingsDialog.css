@@ -785,6 +785,37 @@
   text-overflow: ellipsis;
 }
 
+/* 领域标签（`bin:static` / `artifact` / `mcp`）：只在名字右侧占一小格，
+   超出就省略——它的作用是分类扫视，不是把全名念完。 */
+.tool-chip-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 62px;
+  overflow: hidden;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 状态点的颜色同时承载风险档：只读是 accent，可写转琥珀，能跑命令转红。
+   不加字、不加行，扫视时颜色先到位，细节留给 tooltip。 */
+.tool-chip-dot.risk-write {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 16%, transparent);
+}
+
+.tool-chip-dot.risk-exec,
+.tool-chip-dot.risk-attack {
+  background: var(--red);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 16%, transparent);
+}
+
 /* 亮着的点带一圈光晕；关掉的点只剩一道细描边。 */
 .tool-chip-dot {
   flex: none;

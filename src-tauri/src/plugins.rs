@@ -414,6 +414,15 @@ fn register_server_tools(server: &str, spec: &ServerSpec, client: Arc<StdioClien
             // 不交给子代理：外部工具的能力边界说不清，先不扩散。
             delegable: false,
             enabled_by_default: spec.trusted,
+            // 外部工具的能力边界我们不知道：一律按"只读以外"标成 write，
+            // 网络按 outbound（MCP server 通常要联网），沙箱不声明。
+            meta: tools::ToolMeta {
+                tags: &["mcp"],
+                risk: tools::Risk::Write,
+                network: tools::Network::Outbound,
+                sandbox: None,
+                scope: tools::ToolScope::Any,
+            },
             run: ToolImpl::Boxed(run),
         };
 

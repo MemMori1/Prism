@@ -542,6 +542,14 @@ export interface ToolView {
   /** 外部工具的来源（`mcp.<server>`），内置为空 */
   owner: string | null
   description: string
+  /** 领域标签，如 `bin:static` / `artifact` / `mcp`。 */
+  tags: string[]
+  /** read | write | exec | attack */
+  risk: string
+  /** none | outbound | isolated */
+  network: string
+  /** code | malware */
+  sandbox: string | null
 }
 
 /** 新增 / 编辑一个模型服务；`apiKey` 留空 = 沿用已存的密钥。 */
@@ -666,6 +674,15 @@ export interface DagDefaults {
 }
 
 /** 一个节点 = 一次独立会话。`null` 字段表示"跟随 Agent profile / defaults"。 */
+/** 一条"要读上游哪个制品"的声明。不写也能用：上游主产出以节点 id 为别名。 */
+export interface DagArtifactInput {
+  from: string
+  /** 空 = 上游的主产出 key。 */
+  key: string
+  /** 占位符里用的名字：`{{artifacts.<as>.summary}}`。 */
+  as: string
+}
+
 export interface DagNode {
   id: string
   title: string
@@ -679,6 +696,38 @@ export interface DagNode {
   timeoutSecs: number | null
   gate: DagGate | null
   position: DagPosition | null
+  /** 显式声明的上游制品引用（可省）。 */
+  inputArtifacts: DagArtifactInput[]
+  /** 本节点产出落到哪个制品 key；空 = report。 */
+  outputArtifactKey: string
+}
+
+/** 一个节点产物在磁盘上的引用。 */
+export interface ArtifactRef {
+  id: string
+  dagId: string
+  nodeId: string
+  /** 语义键：report / strings / hashes / meta。 */
+  key: string
+  /** text / json / binary / image。 */
+  kind: string
+  name: string
+  size: number
+  sha256: string
+  /** 血缘：派生件指向原始样本。 */
+  parentId: string | null
+  createdAt: number
+}
+
+export interface DagArtifactList {
+  items: ArtifactRef[]
+  bytes: number
+}
+
+export interface DagArtifactText {
+  artifact: ArtifactRef
+  text: string
+  truncated: boolean
 }
 
 export interface DagPlan {
@@ -758,6 +807,8 @@ export interface DagNodeRun {
   tokensOut: number
   /** 工具调用摘要（`read_file src/x.rs`），给过程感。 */
   steps: string[]
+  /** 主产出落制品的结果；写入失败或正文为空时为 null。 */
+  artifact: ArtifactRef | null
 }
 
 /** 一次运行：计划的动态影子。事件 `dag.run` 推的就是整份快照。 */

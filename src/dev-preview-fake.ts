@@ -15,6 +15,7 @@
  */
 import type {
   AgentProfile,
+  ArtifactRef,
   DagNode,
   DagPlan,
   DagRun,
@@ -151,6 +152,8 @@ function fakeNode(
     timeoutSecs: null,
     gate: null,
     position: null,
+    inputArtifacts: [],
+    outputArtifactKey: '',
     ...extra,
   }
 }
@@ -707,6 +710,32 @@ const FAKE_STEPS: Record<string, string[]> = {
 
 let runTimer = 0
 
+/** 假制品表：预览里点「查看全文」要能看见东西，否则面板是空的。 */
+const fakeArtifacts: ArtifactRef[] = []
+const fakeArtifactText = new Map<string, string>()
+let artifactSeq = 0
+
+function makeArtifact(dagId: string, nodeId: string, key: string, text: string): ArtifactRef {
+  artifactSeq += 1
+  const id = `art-20261022-${String(artifactSeq).padStart(6, '0')}`
+  const artifact: ArtifactRef = {
+    id,
+    dagId,
+    nodeId,
+    key,
+    kind: 'text',
+    name: `${key}.md`,
+    size: new TextEncoder().encode(text).length,
+    // 假哈希：只要位数像就行，界面只显示前 12 位。
+    sha256: `9f2c${String(artifactSeq).padStart(4, '0')}4b7e1a8d3c5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9`,
+    parentId: null,
+    createdAt: Date.now(),
+  }
+  fakeArtifacts.unshift(artifact)
+  fakeArtifactText.set(id, text)
+  return artifact
+}
+
 function emitRun(run: DagRun): void {
   for (const listener of eventListeners) {
     if (listener.event !== 'dag.run') continue
@@ -753,6 +782,8 @@ function stepRun(): void {
     node.finishedAt = Date.now()
     node.output = `（预览假数据）${node.title} 完成。\n\n- 读了 3 个文件\n- 改了 1 个文件\n\n结论：链路已接上，剩下的是收尾。`
     node.steps = FAKE_STEPS[node.id] ?? ['read_file src/App.vue']
+    // 每个成功节点都落一份制品：面板上能看见 key / 大小 / 哈希 / 引用。
+    node.artifact = makeArtifact(run.planId, node.id, node.id === 'research' ? 'report' : 'report', node.output)
     node.tokensIn += 1_800
     node.tokensOut += 420
   }
@@ -810,6 +841,7 @@ function startRun(plan: DagPlan): DagRun {
       tokensIn: 0,
       tokensOut: 0,
       steps: [],
+      artifact: null,
     })),
   }
   fakeRun = run
@@ -1194,15 +1226,15 @@ index 1a2b3c4..5d6e7f8 100644
       // 与 `engines/native/tools.rs` 的 TOOLS 保持同一顺序和数量，
       // 否则预览里的密度和真机差得远，看不出网格几列合适。
       return [
-        { name: 'read_file', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '读取文件' },
-        { name: 'list_files', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '列出目录' },
-        { name: 'grep', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '按内容搜索' },
-        { name: 'write_file', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '写入文件' },
-        { name: 'edit_file', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '局部改文件' },
-        { name: 'run_command', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '执行命令' },
-        { name: 'task_status', origin: 'builtin', permission: 'write', enabled: false, owner: null, description: '查看后台任务' },
-        { name: 'task', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '委派给子代理' },
-        { name: 'fs__read_file', origin: 'plugin', permission: 'write', enabled: false, owner: 'mcp.fs', description: 'Read a file from disk' },
+        { name: 'read_file', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '读取文件', tags: [], risk: 'read', network: 'none', sandbox: null },
+        { name: 'list_files', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '列出目录', tags: [], risk: 'read', network: 'none', sandbox: null },
+        { name: 'grep', origin: 'builtin', permission: 'read-only', enabled: true, owner: null, description: '按内容搜索', tags: [], risk: 'read', network: 'none', sandbox: null },
+        { name: 'write_file', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '写入文件', tags: [], risk: 'write', network: 'none', sandbox: null },
+        { name: 'edit_file', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '局部改文件', tags: [], risk: 'write', network: 'none', sandbox: null },
+        { name: 'run_command', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '执行命令', tags: ['exec'], risk: 'exec', network: 'none', sandbox: null },
+        { name: 'task_status', origin: 'builtin', permission: 'write', enabled: false, owner: null, description: '查看后台任务', tags: [], risk: 'write', network: 'none', sandbox: null },
+        { name: 'task', origin: 'builtin', permission: 'write', enabled: true, owner: null, description: '委派给子代理', tags: [], risk: 'write', network: 'none', sandbox: null },
+        { name: 'fs__read_file', origin: 'plugin', permission: 'write', enabled: false, owner: 'mcp.fs', description: 'Read a file from disk', tags: ['mcp'], risk: 'write', network: 'outbound', sandbox: null },
         { name: 'fs__list_directory', origin: 'plugin', permission: 'write', enabled: false, owner: 'mcp.fs', description: 'List directory contents' },
       ]
     case 'native_tool_toggle':
@@ -1341,6 +1373,23 @@ index 1a2b3c4..5d6e7f8 100644
     }
     case 'plugins_list':
       return fakePlugins.map(item => JSON.parse(JSON.stringify(item)))
+    case 'dag_artifacts': {
+      const dagId = String(args.dagId ?? '')
+      const items = fakeArtifacts
+        .filter(item => item.dagId === dagId)
+        .map(item => JSON.parse(JSON.stringify(item)))
+      return { items, bytes: items.reduce((sum, item) => sum + item.size, 0) }
+    }
+    case 'dag_artifact_get': {
+      const id = String(args.id ?? '')
+      const artifact = fakeArtifacts.find(item => item.id === id)
+      if (!artifact) throw new Error(`没有这个制品：${id}`)
+      return {
+        artifact: JSON.parse(JSON.stringify(artifact)),
+        text: fakeArtifactText.get(id) ?? '',
+        truncated: false,
+      }
+    }
     case 'dag_runners':
       // 预览里假装三类执行器都装了：真实情况由 `dag.executor.*` 插件决定。
       return ['codex', 'dsh', 'native', 'opencode']

@@ -117,7 +117,7 @@ pub fn spec() -> Value {
 /// 子代理的工具清单（测试用；生产路径由 `run` 直接按 `EnabledTools` 推导）。
 #[cfg(test)]
 pub fn specs_for_with(enabled: &tools::EnabledTools, agent: AgentType) -> Vec<Value> {
-    tools::specs_for(enabled, agent.max_permission())
+    tools::specs_for(enabled, agent.max_permission(), false)
 }
 
 /// `task` 工具的执行入口：从统一的 `ToolContext` 取出子代理需要的全部输入。
@@ -363,7 +363,7 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
     };
 
     let enabled = tools::EnabledTools::from_config();
-    let specs = tools::specs_for(&enabled, agent.max_permission());
+    let specs = tools::specs_for(&enabled, agent.max_permission(), false);
     let mut messages = vec![
         json!({ "role": "system", "content": agent.system_prompt(ctx.directory) }),
         json!({ "role": "user", "content": prompt }),
@@ -516,6 +516,7 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
                             model: Some(req.model),
                             permission: Some(req.permission.as_str()),
                             enabled: &enabled,
+                            dag: None,
                             should_stop: stop,
                         },
                         &call.name,
@@ -584,7 +585,18 @@ mod tests {
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str())
             .collect();
-        assert_eq!(names, vec!["read_file", "list_files", "grep"]);
+        // 只读工具自动进探索档：新加的 bin.* 样本分析工具也是只读，所以一起出现。
+        assert_eq!(
+            names,
+            vec![
+                "read_file",
+                "list_files",
+                "grep",
+                "bin.meta.identify",
+                "bin.hash.compute",
+                "bin.strings.extract",
+            ]
+        );
 
         let general = specs_for_with(&tools::EnabledTools::all(), AgentType::General);
         let names: Vec<&str> = general

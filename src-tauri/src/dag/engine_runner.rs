@@ -377,6 +377,7 @@ mod tests {
 
         let request = NodeRequest {
             run_id: "run".to_string(),
+            dag_id: "dag-test".to_string(),
             node_id: "n1".to_string(),
             profile: AgentProfile {
                 id: "reviewer".to_string(),
@@ -427,6 +428,7 @@ mod tests {
 
         let request = NodeRequest {
             run_id: "run-test".to_string(),
+            dag_id: "dag-test".to_string(),
             node_id: "ping".to_string(),
             profile: AgentProfile {
                 id: "ping".to_string(),

@@ -720,6 +720,7 @@ fn run_turns(
                         model: Some(model),
                         permission: Some(permission.as_str()),
                         enabled: &enabled,
+                        dag: None,
                         should_stop: &|| slot.stopped(),
                     },
                     &call.name,

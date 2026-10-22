@@ -37,6 +37,9 @@ chrono = "0.4.45"
 # DeepSeek Harness 的会话日志是 append-only 的多帧 zstd。必须用 `stream::read::Decoder`
 # 这类"连续解多帧"的接口：只解第一帧的话，读到的是 header 那一行，看起来像空日志。
 zstd = "0.13"
+sha2 = "0.10.9"
+sha1 = "0.10.7"
+md-5 = "0.10.6"
 
 # run_command 结束时要连同命令拉起的子进程一起收掉：按进程组发信号要用到它。
 [target.'cfg(unix)'.dependencies]

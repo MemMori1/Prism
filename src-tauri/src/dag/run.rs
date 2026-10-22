@@ -92,6 +92,8 @@ pub struct NodeRun {
     pub tokens_out: i64,
     /// 工具调用摘要（`read_file src/x.rs` 这种），给运行面板做过程感。
     pub steps: Vec<String>,
+    /// 主产出落制品的结果。写入失败或正文为空时为 `None`（正文仍在 `output` 里）。
+    pub artifact: Option<super::artifact::ArtifactRef>,
 }
 
 /// 一次运行。
@@ -137,6 +139,7 @@ impl DagRun {
                     tokens_in: 0,
                     tokens_out: 0,
                     steps: Vec::new(),
+                    artifact: None,
                 })
                 .collect(),
         }
@@ -164,10 +167,12 @@ pub struct RunHandle {
     /// 是否把记录写到 `~/.prism/dags/runs/`。单测用临时/内存模式，
     /// 否则跑一次测试就往用户的真实目录里丢一堆假运行记录。
     persist: bool,
+    /// 制品仓库。`None` = 不落制品（老环境或单测没给），下游退回内联正文。
+    artifacts: Option<super::artifact::ArtifactStore>,
 }
 
 impl RunHandle {
-    fn new(run: DagRun, notify: Notifier, persist: bool) -> RunHandle {
+    fn new(run: DagRun, notify: Notifier, persist: bool, artifacts: Option<super::artifact::ArtifactStore>) -> RunHandle {
         RunHandle {
             state: Mutex::new(run),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -175,7 +180,34 @@ impl RunHandle {
             warned: AtomicBool::new(false),
             notify,
             persist,
+            artifacts,
         }
+    }
+
+    /// 把节点正文落成制品。正文为空返回 `Ok(None)`（空产出没有引用价值）。
+    ///
+    /// 写入失败**不把节点判失败**：正文还在运行记录里，判失败等于丢掉已经
+    /// 花钱跑出来的结果。调用方把它降级成一条 step。
+    pub fn save_artifact(
+        &self,
+        dag_id: &str,
+        node_id: &str,
+        key: &str,
+        text: &str,
+    ) -> Result<Option<super::artifact::ArtifactRef>, String> {
+        let Some(store) = self.artifacts.as_ref() else {
+            return Ok(None);
+        };
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        store
+            .put_text(dag_id, node_id, key, text, None)
+            .map(Some)
+    }
+
+    pub fn artifact_store(&self) -> Option<&super::artifact::ArtifactStore> {
+        self.artifacts.as_ref()
     }
 
     pub fn id(&self) -> String {
@@ -302,6 +334,7 @@ impl RunHandle {
                 node.error = None;
                 node.output.clear();
                 node.steps.clear();
+                node.artifact = None;
             },
             true,
         );
@@ -331,7 +364,14 @@ impl RunHandle {
         );
     }
 
-    pub fn mark_succeeded(&self, node_id: &str, output: NodeOutput) {
+    /// 成功：一次状态迁移同时写正文与制品引用，只落一次盘、只广播一次
+    /// （拆成两次会推两份快照，前端会看到"有正文但没制品"的中间态）。
+    pub fn mark_succeeded(
+        &self,
+        node_id: &str,
+        output: NodeOutput,
+        artifact: Option<super::artifact::ArtifactRef>,
+    ) {
         self.update(
             node_id,
             |node| {
@@ -342,9 +382,18 @@ impl RunHandle {
                 node.tokens_out += output.tokens_out;
                 node.steps = output.steps;
                 node.error = None;
+                node.artifact = artifact;
             },
             true,
         );
+    }
+
+    /// 某节点的主产制品引用（下游拼提示词时用）。
+    pub fn artifact_of(&self, node_id: &str) -> Option<super::artifact::ArtifactRef> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|run| run.node(node_id).and_then(|node| node.artifact.clone()))
     }
 
     pub fn mark_skipped(&self, node_id: &str, reason: String) {
@@ -429,6 +478,8 @@ pub struct DagHub {
     latest: Mutex<HashMap<String, String>>,
     /// 是否落盘。见 [`RunHandle`] 里同名字段的说明。
     persist: bool,
+    /// 制品仓库：真机是 `~/.prism/artifacts`，单测指到临时目录（不污染用户数据）。
+    artifacts: Option<super::artifact::ArtifactStore>,
 }
 
 impl Default for DagHub {
@@ -437,6 +488,7 @@ impl Default for DagHub {
             runs: Mutex::new(HashMap::new()),
             latest: Mutex::new(HashMap::new()),
             persist: true,
+            artifacts: super::artifact::ArtifactStore::global().ok(),
         }
     }
 }
@@ -445,8 +497,15 @@ impl DagHub {
     /// 只在内存里跑（单测用）：不写 `~/.prism`。
     #[cfg(test)]
     pub fn ephemeral() -> Self {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "prism-dag-artifacts-{}-{seq}",
+            std::process::id()
+        ));
         DagHub {
             persist: false,
+            artifacts: Some(super::artifact::ArtifactStore::at(dir)),
             ..DagHub::default()
         }
     }
@@ -484,7 +543,12 @@ impl DagHub {
         }
 
         let run = DagRun::build(&plan, new_run_id(&plan.id));
-        let handle = Arc::new(RunHandle::new(run.clone(), notify.clone(), self.persist));
+        let handle = Arc::new(RunHandle::new(
+            run.clone(),
+            notify.clone(),
+            self.persist,
+            self.artifacts.clone(),
+        ));
         {
             let mut runs = self.runs.lock().map_err(|_| "运行表被占用".to_string())?;
             runs.insert(run.id.clone(), handle.clone());

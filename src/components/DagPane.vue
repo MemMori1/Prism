@@ -5,7 +5,7 @@ import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
 import { NODE_H, NODE_W, edgePath, withOverrides } from '../dagLayout'
 import { executorBadge, permissionLabel, workspaceLabel } from '../agents'
-import { basename, formatDuration, formatTokens } from '../format'
+import { basename, formatBytes, formatDuration, formatTokens } from '../format'
 import SelectMenu from './SelectMenu.vue'
 import {
   isLive,
@@ -21,6 +21,7 @@ import {
 } from '../dagRun'
 import type {
   AgentProfile,
+  ArtifactRef,
   DagIssue,
   DagNode,
   DagNodeRun,
@@ -164,6 +165,8 @@ async function removePlan(): Promise<void> {
 
 /** 占位符写法。放在常量里而不是模板里：`{{ }}` 直接写在插值里会提前闭合插值。 */
 const PLACEHOLDER_HINT = '{{nodes.<id>.output}}'
+/** 制品占位符写法（同上，别直接写进模板）。 */
+const ARTIFACT_HINT = '{{artifacts.<上游>.summary}}'
 
 /** 与 Rust 侧 `dag::run::EVENT_NAME` 对齐；改名字两边都要改。 */
 const EVENT_NAME = 'dag.run'
@@ -174,6 +177,32 @@ const runBusy = ref(false)
 const now = ref(Date.now())
 let ticker = 0
 let unlisten: (() => void) | null = null
+
+/** 制品预览：点开节点的产物时按 id 取回正文。 */
+const artifactPreview = ref<{ ref: ArtifactRef; text: string; truncated: boolean } | null>(null)
+const artifactBusy = ref(false)
+
+async function openArtifact(ref: ArtifactRef): Promise<void> {
+  if (!plan.value) return
+  artifactBusy.value = true
+  try {
+    const data = await api.dagArtifactGet(plan.value.id, ref.id, 40_000)
+    artifactPreview.value = { ref: data.artifact, text: data.text, truncated: data.truncated }
+  } catch (error) {
+    // 取不到就明说：制品可能被手动清掉了，不要留一个空白弹层。
+    artifactPreview.value = {
+      ref,
+      text: `读取失败：${String(error)}`,
+      truncated: false,
+    }
+  } finally {
+    artifactBusy.value = false
+  }
+}
+
+function copyText(text: string): void {
+  void navigator.clipboard?.writeText(text)
+}
 
 const live = computed(() => isLive(run.value))
 const progress = computed(() => runProgress(run.value))
@@ -406,6 +435,8 @@ function addNode(): void {
     timeoutSecs: null,
     gate: null,
     position: null,
+    inputArtifacts: [],
+    outputArtifactKey: '',
   }
   plan.value.nodes.push(node)
   selectedNodeId.value = node.id
@@ -1003,6 +1034,18 @@ defineExpose({ reload: () => loadPlans(true) })
                 <option value="danger-full-access">{{ permissionLabel('danger-full-access') }}</option>
               </select>
             </label>
+            <label class="field">
+              <span class="field-label">产出制品 key <em>留空 = report</em></span>
+              <input
+                v-model="selectedNode.outputArtifactKey"
+                placeholder="report"
+                spellcheck="false"
+              />
+            </label>
+            <p class="hint small">
+              跑完的正文会自动存成制品，下游用 <code>{{ ARTIFACT_HINT }}</code> 取摘要与引用。
+              每个上游的主产出默认以「节点 id」为别名，不用配。
+            </p>
             <div class="field">
               <span class="field-label">生效值</span>
               <div class="kv"><span>Agent</span><b>{{ agentName(selectedNode.agent) }}</b></div>
@@ -1050,6 +1093,31 @@ defineExpose({ reload: () => loadPlans(true) })
                 </div>
               </div>
 
+              <div v-if="selectedRun.artifact" class="run-artifact">
+                <div class="run-steps-title">制品</div>
+                <div class="art-row">
+                  <span class="art-key">{{ selectedRun.artifact.key }}</span>
+                  <span class="art-meta mono">{{ selectedRun.artifact.kind }} · {{ formatBytes(selectedRun.artifact.size) }}</span>
+                  <span class="art-sha mono" :title="selectedRun.artifact.sha256">
+                    {{ selectedRun.artifact.sha256.slice(0, 12) }}
+                  </span>
+                </div>
+                <div class="art-id mono" :title="selectedRun.artifact.id">{{ selectedRun.artifact.id }}</div>
+                <div class="art-actions">
+                  <button
+                    class="ghost-btn tiny"
+                    :disabled="artifactBusy"
+                    @click="openArtifact(selectedRun.artifact)"
+                  >
+                    {{ artifactBusy ? '读取中…' : '查看全文' }}
+                  </button>
+                  <button class="ghost-btn tiny" @click="copyText(selectedRun.artifact.id)">复制 id</button>
+                  <span v-if="selectedRun.artifact.parentId" class="art-parent mono">
+                    派生自 {{ selectedRun.artifact.parentId }}
+                  </span>
+                </div>
+              </div>
+
               <div v-if="selectedRun.output" class="run-output">
                 <div class="run-steps-title">产出</div>
                 <pre class="run-pre">{{ selectedRun.output }}</pre>
@@ -1069,6 +1137,25 @@ defineExpose({ reload: () => loadPlans(true) })
       </template>
       <p v-else class="hint">左侧选一个节点查看与修改</p>
     </aside>
+
+    <div v-if="artifactPreview" class="planner-backdrop" @click.self="artifactPreview = null">
+      <div class="artifact-card">
+        <div class="artifact-head">
+          <div>
+            <div class="planner-kicker">制品 · {{ artifactPreview.ref.key }}</div>
+            <div class="artifact-title">{{ artifactPreview.ref.name }}</div>
+          </div>
+          <button class="ghost-btn" @click="artifactPreview = null">关闭</button>
+        </div>
+        <div class="artifact-meta mono">
+          {{ formatBytes(artifactPreview.ref.size) }} · sha256 {{ artifactPreview.ref.sha256 }}
+        </div>
+        <pre class="artifact-pre">{{ artifactPreview.text }}</pre>
+        <div v-if="artifactPreview.truncated" class="artifact-note">
+          只显示前 4 万字符：全文在 <code>~/.prism/artifacts/</code> 下，按 id 可以继续取。
+        </div>
+      </div>
+    </div>
 
     <div v-if="plannerOpen" class="planner-backdrop" @click.self="plannerOpen = false">
       <div class="planner-card">
