@@ -90,12 +90,18 @@ if (settingsIndex !== null) {
 const dagAction = params.get('dag')
 if (dagAction) {
   window.setTimeout(() => {
-    if (dagAction === 'planner') {
+    if (dagAction === 'planner' || dagAction === 'planner-menu') {
       // 空状态与左栏底部各有一个入口，按文字找更稳（不依赖它是第几个按钮）。
       const button = Array.from(document.querySelectorAll<HTMLElement>('button')).find(
         item => item.textContent?.trim() === '发起需求分析',
       )
       button?.click()
+      if (dagAction === 'planner-menu') {
+        // 再点开目录下拉，确认「选择文件夹…」动作行也在弹层里。
+        window.setTimeout(() => {
+          ;(document.querySelector('.planner-body .sel-trigger') as HTMLElement | null)?.click()
+        }, 400)
+      }
       return
     }
     ;(document.querySelector('.primary-btn.run') as HTMLElement | null)?.click()

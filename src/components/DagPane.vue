@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listen } from '@tauri-apps/api/event'
+import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
 import { NODE_H, NODE_W, edgePath, withOverrides } from '../dagLayout'
 import { executorBadge, permissionLabel, workspaceLabel } from '../agents'
-import { formatDuration, formatTokens } from '../format'
+import { basename, formatDuration, formatTokens } from '../format'
+import SelectMenu from './SelectMenu.vue'
 import {
   isLive,
   nodeElapsed,
@@ -292,45 +294,54 @@ const plannerOpen = ref(false)
 const plannerGoal = ref('')
 const plannerProject = ref('')
 const plannerMax = ref(6)
-/** 目录不在已归档的项目里时，退回手输（新克隆的仓库还没被扫到）。 */
-const plannerCustomProject = ref(false)
+/** 归档之外、这次手动挑的目录（新克隆的仓库还没被引擎扫到）。 */
+const extraProjects = ref<{ value: string; label: string; hint?: string }[]>([])
 
-const CUSTOM_PROJECT = '__custom__'
-
-/** 太长的工作区路径塞不进行宽 440 的弹窗，保留末尾两级就够认。 */
-function shortPath(path: string): string {
-  return path.length <= 44 ? path : `…${path.slice(-43)}`
-}
-
-const projectChoices = computed(() => {
+/**
+ * 目录选项：已归档的项目 + 本次新挑的目录。
+ *
+ * 值就是绝对路径（计划里存的是路径，不是项目 id），label 用项目名，
+ * 路径放进 hint —— 同名项目靠第二行区分。和工作台的新建页同一套交互。
+ */
+const projectOptions = computed(() => {
   const seen = new Set<string>()
-  const list: { value: string; label: string }[] = []
+  const list: { value: string; label: string; hint?: string }[] = []
   for (const item of props.projects) {
-    const value = item.worktree?.trim()
-    if (!value || seen.has(value)) continue
-    seen.add(value)
-    list.push({
-      value,
-      label: item.name ? `${item.name} · ${shortPath(value)}` : shortPath(value),
-    })
+    const path = item.worktree?.trim()
+    if (!path || seen.has(path)) continue
+    seen.add(path)
+    list.push({ value: path, label: item.name || basename(path), hint: path })
+  }
+  for (const item of extraProjects.value) {
+    if (!seen.has(item.value)) list.push(item)
   }
   return list
 })
 
-function onProjectPick(event: Event): void {
-  const value = (event.target as HTMLSelectElement).value
-  if (value !== CUSTOM_PROJECT) return
-  plannerCustomProject.value = true
-  plannerProject.value = ''
+/** 弹层底部「选择文件夹…」：挑完直接成为当前目录，再挑一次也不会重复入列。 */
+async function pickProjectFolder(): Promise<void> {
+  try {
+    const picked = await openDirectoryDialog({
+      directory: true,
+      multiple: false,
+      title: '选择项目目录',
+    })
+    if (typeof picked !== 'string' || !picked) return
+    if (!projectOptions.value.some(option => option.value === picked)) {
+      extraProjects.value = [
+        ...extraProjects.value,
+        { value: picked, label: basename(picked) || picked, hint: picked },
+      ]
+    }
+    plannerProject.value = picked
+  } catch (cause) {
+    report(cause)
+  }
 }
 
 function openPlanner(): void {
   plannerGoal.value = plan.value?.goal ?? ''
-  const project = plan.value?.project || defaultProject.value
-  plannerProject.value = project
-  // 计划的目录可能已经不在归档里（手输过 / 项目被移走）：这时直接给输入框，
-  // 而不是让用户对着一个"选中第一项"的下拉框猜当前用的是哪个目录。
-  plannerCustomProject.value = !projectChoices.value.some(choice => choice.value === project)
+  plannerProject.value = plan.value?.project || defaultProject.value
   plannerOpen.value = true
 }
 
@@ -1075,36 +1086,17 @@ defineExpose({ reload: () => loadPlans(true) })
           </label>
           <div class="field">
             <span class="field-label">项目目录</span>
-            <select
-              v-if="projectChoices.length && !plannerCustomProject"
-              :value="plannerProject"
-              class="project-select"
-              @change="onProjectPick"
-            >
-              <option
-                v-for="choice in projectChoices"
-                :key="choice.value"
-                :value="choice.value"
-              >
-                {{ choice.label }}
-              </option>
-              <option :value="CUSTOM_PROJECT">手动输入路径…</option>
-            </select>
-            <template v-else>
-              <input
-                v-model="plannerProject"
-                :placeholder="defaultProject || '/path/to/project'"
-                spellcheck="false"
-              />
-              <button
-                v-if="projectChoices.length"
-                type="button"
-                class="link-btn"
-                @click="plannerCustomProject = false"
-              >
-                从已归档的项目里选
-              </button>
-            </template>
+            <SelectMenu
+              v-model="plannerProject"
+              :options="projectOptions"
+              placeholder="选择或新增目录…"
+              :title="plannerProject || '项目目录'"
+              action-label="选择文件夹…"
+              @action="pickProjectFolder"
+            />
+            <p v-if="plannerProject" class="path-hint" :title="plannerProject">
+              {{ plannerProject }}
+            </p>
           </div>
           <div class="pc-row">
             <label class="field">
