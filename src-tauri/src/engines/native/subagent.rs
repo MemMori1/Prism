@@ -580,6 +580,11 @@ mod tests {
 
     #[test]
     fn explore_cannot_write_and_nobody_can_spawn_grandchildren() {
+        /// schema 里是 wire 名，期望值写内部名再归一。
+        fn has_in(names: &[&str], wanted: &str) -> bool {
+            names.iter().any(|name| tools::wire_name(wanted) == *name)
+        }
+
         let explore = specs_for_with(&tools::EnabledTools::all(), AgentType::Explore);
         let names: Vec<&str> = explore
             .iter()
@@ -587,11 +592,13 @@ mod tests {
             .collect();
         // 不对账具体名字：规则是"只读工具才进探索档"，那就直接验规则。
         // 这样新增只读工具不会假报失败，而写工具一旦漏进来一定会被抓到。
+        // 名字按 wire 形式比对：schema 里 `bin.meta.identify` 已经变成
+        // `bin_meta_identify`，内部名不该在这个断言里出现。
         let all = tools::builtin_tools();
         for name in &names {
             let def = all
                 .iter()
-                .find(|item| item.name == *name)
+                .find(|item| item.name == *name || item.wire_name() == *name)
                 .unwrap_or_else(|| panic!("探索档出现了未注册的工具：{name}"));
             assert_eq!(
                 def.permission,
@@ -599,11 +606,12 @@ mod tests {
                 "探索档只该有只读工具，{name} 不是"
             );
         }
+        let has = |wanted: &str| has_in(&names, wanted);
         for expected in ["read_file", "grep", "bin.meta.identify", "bin.pack.detect"] {
-            assert!(names.contains(&expected), "探索档缺少 {expected}");
+            assert!(has(expected), "探索档缺少 {expected}：{names:?}");
         }
         for forbidden in ["write_file", "edit_file", "run_command"] {
-            assert!(!names.contains(&forbidden), "探索档不该有 {forbidden}");
+            assert!(!has(forbidden), "探索档不该有 {forbidden}");
         }
 
         let general = specs_for_with(&tools::EnabledTools::all(), AgentType::General);
@@ -611,9 +619,9 @@ mod tests {
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str())
             .collect();
-        assert!(names.contains(&"write_file"), "{names:?}");
-        assert!(names.contains(&"run_command"), "{names:?}");
-        assert!(!names.contains(&"task"), "子代理不能再开子代理：{names:?}");
+        assert!(has_in(&names, "write_file"), "{names:?}");
+        assert!(has_in(&names, "run_command"), "{names:?}");
+        assert!(!has_in(&names, "task"), "子代理不能再开子代理：{names:?}");
     }
 
     #[test]

@@ -510,14 +510,18 @@ fn filter_specs(specs: Vec<Value>, selection: &ToolSelection) -> Vec<Value> {
                 .and_then(|value| value.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if selection.deny.iter().any(|item| item == name) {
+            // schema 里是 wire 名（`bin_meta_identify`），白名单里是内部名
+            // （`bin.meta.identify`）——两边都压平再比，否则带点号的工具会被
+            // 白名单全部筛掉：模型看不到工具，节点只会回一句"我做不到"。
+            let listed = |item: &String| tools::wire_name(item) == name;
+            if selection.deny.iter().any(listed) {
                 return false;
             }
             let in_shared = match &selection.shared {
                 None => true,
-                Some(list) => list.iter().any(|item| item == name),
+                Some(list) => list.iter().any(listed),
             };
-            in_shared || selection.private.iter().any(|item| item == name)
+            in_shared || selection.private.iter().any(listed)
         })
         .collect()
 }
@@ -722,6 +726,38 @@ mod tests {
             .map(|spec| spec["function"]["name"].as_str().unwrap_or_default().to_string())
             .collect();
         assert_eq!(names, vec!["read_file"]);
+    }
+
+    /// 白名单里写的是内部名（`bin.meta.identify`），schema 里是 wire 名。
+    ///
+    /// 两边不归一，带点号的工具会被静默筛空：模型手上一个分析工具都没有，
+    /// 只能回"我做不到"——这是"agent 不干活"的第二种成因，比 400 更难查。
+    #[test]
+    fn dotted_tools_survive_the_agent_allow_list() {
+        let specs = vec![
+            serde_json::json!({"function": {"name": "read_file"}}),
+            serde_json::json!({"function": {"name": "bin_meta_identify"}}),
+            serde_json::json!({"function": {"name": "prism_dag_node_add"}}),
+        ];
+        let selection = ToolSelection {
+            shared: Some(vec!["read_file".to_string(), "bin.meta.identify".to_string()]),
+            private: Vec::new(),
+            deny: Vec::new(),
+        };
+        let names: Vec<String> = filter_specs(specs, &selection)
+            .into_iter()
+            .map(|spec| spec["function"]["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(names, vec!["read_file", "bin_meta_identify"]);
+
+        // deny 走同一个归一逻辑：写内部名也能挡住 wire 名。
+        let specs = vec![serde_json::json!({"function": {"name": "bin_meta_identify"}})];
+        let selection = ToolSelection {
+            shared: None,
+            private: Vec::new(),
+            deny: vec!["bin.meta.identify".to_string()],
+        };
+        assert!(filter_specs(specs, &selection).is_empty());
     }
 
     #[test]

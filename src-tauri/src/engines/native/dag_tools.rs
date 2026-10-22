@@ -813,10 +813,17 @@ mod tests {
         };
         let chat = names(false);
         assert!(
-            !chat.iter().any(|name| name.starts_with("prism.dag.")),
+            !chat.iter().any(|name| name.starts_with("prism_dag_")),
             "聊天里不该出现改图工具：{chat:?}"
         );
         let inside = names(true);
+        // schema 里是 wire 名（`prism_dag_plan_read`），期望值写内部名再归一——
+        // 断言的是"这条工具在不在"，不绑定分隔符长什么样。
+        let has = |wanted: &str| {
+            inside
+                .iter()
+                .any(|name| super::super::tools::wire_name(wanted) == *name)
+        };
         for expected in [
             "prism.dag.plan.read",
             "prism.dag.node.add",
@@ -826,10 +833,7 @@ mod tests {
             "prism.dag.edge.remove",
             "prism.dag.validate",
         ] {
-            assert!(
-                inside.iter().any(|name| name == expected),
-                "DAG 作用域里应有 {expected}"
-            );
+            assert!(has(expected), "DAG 作用域里应有 {expected}");
         }
     }
 

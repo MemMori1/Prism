@@ -438,8 +438,21 @@ pub struct ToolDef {
 
 impl ToolDef {
     /// 发给模型的声明。
+    ///
+    /// 名字在这里统一换成 [`wire_name`](Self::wire_name)：内部名可以带点分层
+    /// （`bin.meta.identify`），但 OpenAI / Anthropic / Gemini 的函数名都只接受
+    /// `[A-Za-z0-9_-]`，点号会让整个请求 400，模型一次都轮不到。
     pub fn schema_value(&self) -> Value {
-        self.schema.render()
+        let mut value = self.schema.render();
+        if let Some(function) = value.get_mut("function").and_then(Value::as_object_mut) {
+            function.insert("name".to_string(), json!(self.wire_name()));
+        }
+        value
+    }
+
+    /// 模型侧看到的工具名：非法字符一律换成下划线。
+    pub fn wire_name(&self) -> String {
+        wire_name(&self.name)
     }
 
     pub fn call(&self, ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
@@ -448,6 +461,23 @@ impl ToolDef {
             ToolImpl::Boxed(run) => run(ctx, args),
         }
     }
+}
+
+/// 把内部工具名压成 provider 接受的形状。
+///
+/// 允许的字符集来自 OpenAI 的 `^[a-zA-Z0-9_-]+$`（Anthropic 与 Gemini 同样
+/// 只收这个范围）。点号是唯一的越界来源，所以 `bin.meta.identify` 变成
+/// `bin_meta_identify` 这种一眼还能读回来的形式。
+pub fn wire_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- 工具声明
@@ -843,13 +873,18 @@ impl ToolRegistry {
 
 /// 按名字取登记项：先内置，后外部。
 pub fn find(name: &str) -> Option<Arc<ToolDef>> {
-    if let Some(def) = builtin_tools().iter().find(|tool| tool.name == name) {
+    // 模型回传的是 wire 名（`bin_meta_identify`），代码里写的是内部名
+    // （`bin.meta.identify`）。两种都要认，否则工具声明得通、调用却报
+    // 「没有这个工具」。
+    let wanted = wire_name(name);
+    let hit = |tool: &Arc<ToolDef>| tool.name == name || wire_name(&tool.name) == wanted;
+    if let Some(def) = builtin_tools().iter().find(|tool| hit(tool)) {
         return Some(def.clone());
     }
     ToolRegistry::global()
         .dynamic()
         .into_iter()
-        .find(|tool| tool.name == name)
+        .find(|tool| hit(tool))
 }
 
 /// 全部登记项（内置在前，外部在后）。
@@ -1713,6 +1748,45 @@ mod tests {
                 "task"
             ]
         );
+    }
+
+    /// provider 的函数名只接受 `[A-Za-z0-9_-]`。
+    ///
+    /// 带点号的名字会让整个请求 400——工具一个都发不出去，模型连一句
+    /// "我没有这个工具"都说不了。逆向任务就是在这里挂掉的。
+    #[test]
+    fn every_tool_name_is_accepted_by_providers() {
+        let mut seen = std::collections::HashSet::new();
+        for tool in builtin_tools() {
+            let wire = tool.wire_name();
+            assert!(!wire.is_empty() && wire.len() <= 64, "{} 的 wire 名超长", tool.name);
+            assert!(
+                wire
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
+                "{} → {wire} 含非法字符",
+                tool.name
+            );
+            assert!(seen.insert(wire.clone()), "wire 名重复：{wire}");
+            assert_eq!(
+                tool.schema_value()["function"]["name"],
+                json!(wire),
+                "{} 的 schema 名没跟着换",
+                tool.name
+            );
+        }
+    }
+
+    /// 模型回传的是 wire 名，执行层得认回来，否则"声明得通、调用不存在"。
+    #[test]
+    fn wire_names_resolve_back_to_dotted_tools() {
+        let tool = find("bin.meta.identify").expect("内置工具应该存在");
+        assert_eq!(tool.wire_name(), "bin_meta_identify");
+        assert_eq!(
+            find("bin_meta_identify").map(|hit| hit.name.to_string()),
+            Some("bin.meta.identify".to_string())
+        );
+        assert!(find("bin_meta_identify_extra").is_none(), "不该模糊匹配");
     }
 
     /// 关掉的工具要从 schema 里消失（省 token，也不诱导模型调用）。
