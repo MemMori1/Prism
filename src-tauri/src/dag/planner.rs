@@ -54,9 +54,12 @@ fn system_prompt(max_nodes: usize) -> String {
 
 规则：
 1. 节点数 2 到 {max_nodes} 个；每个节点原子、可独立验证。
-2. 只读调研的节点用 shared；会改文件的节点用 worktree。
+2. workspace 默认一律 shared。只有「要编辑项目源码、需要独立分支和 diff」的
+   节点才用 worktree——它本质是 git worktree，**项目目录不是 git 仓库时节点
+   会直接失败**。分析样本、脱壳、写报告、产出制品（走 prism.artifact.put）
+   都算 shared，不要因为"会产出文件"就选 worktree。
 3. 下游只依赖它真正需要的上游，不要串成一条长链；能并行的就并行。
-4. 最后一个节点是验证/汇总，依赖所有写节点，gate 设为 true。
+4. 最后一个节点是验证/汇总，依赖前面所有产出结论的节点，gate 设为 true。
 5. task 必须自足：子 Agent 看不到别的节点上下文。需要上游结论时用占位符
    {{{{nodes.<id>.output}}}}，且只能引用自己的上游（祖先）。
 6. 不要生成"安装依赖"这类环境节点，除非目标里明确提到。
@@ -167,6 +170,11 @@ pub(crate) fn from_json(
         known.first().cloned().unwrap_or_else(|| "general".to_string())
     };
 
+    // 只读文件系统，不调 git 命令：规划阶段便宜到可以每个计划查一次。
+    let git_ready = crate::gitinfo::git_info(std::path::Path::new(project))
+        .repo_root
+        .is_some();
+
     let mut nodes: Vec<DagNode> = Vec::new();
     for (index, raw) in raw_nodes.iter().take(max_nodes).enumerate() {
         let id = slug(text_of(raw, "id").unwrap_or(""), &format!("node-{}", index + 1));
@@ -229,7 +237,15 @@ pub(crate) fn from_json(
             task,
             depends_on,
             agent,
-            workspace: workspace_of(raw),
+            workspace: workspace_of(raw).map(|workspace| {
+                // 非 git 仓库跑不了 `git worktree add`：这里直接改成 shared，
+                // 别把一张注定在第一个节点就崩的图交给用户。
+                if workspace == Workspace::Worktree && !git_ready {
+                    Workspace::Shared
+                } else {
+                    workspace
+                }
+            }),
             tools: None,
             permission: None,
             retry: Retry::default(),
@@ -412,6 +428,18 @@ mod tests {
         crate::agents::builtin()
     }
 
+    /// 造一个"看起来像 git 仓库"的目录。
+    ///
+    /// `git_info` 是纯文件系统判断（`.git` 是目录就算仓库），所以不必真的
+    /// `git init`——测试不该依赖机器上装没装 git。
+    fn pseudo_repo(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("prism-{name}-{}", std::process::id()));
+        let dot_git = dir.join(".git");
+        std::fs::create_dir_all(&dot_git).expect("建 .git");
+        std::fs::write(dot_git.join("HEAD"), "ref: refs/heads/main\n").expect("写 HEAD");
+        dir.to_string_lossy().to_string()
+    }
+
     #[test]
     fn extracts_json_from_chatty_output() {
         let text = "好的，这是计划：\n```json\n{\"name\":\"x\",\"nodes\":[]}\n```\n需要我调整吗？";
@@ -444,7 +472,7 @@ mod tests {
                   "dependsOn": ["impl"], "gate": true }
             ]
         });
-        let plan = from_json(&value, "加自动更新", "/tmp/p", &agents(), 8).unwrap();
+        let plan = from_json(&value, "加自动更新", &pseudo_repo("plan-git"), &agents(), 8).unwrap();
         assert_eq!(plan.nodes.len(), 3);
         assert_eq!(plan.name, "加自动更新");
         assert_eq!(plan.nodes[1].workspace, Some(Workspace::Worktree));
@@ -456,6 +484,25 @@ mod tests {
             issues.iter().all(|issue| issue.level != Level::Error),
             "{:?}",
             issues.iter().map(|issue| &issue.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// 非 git 仓库跑不了 `git worktree add`：这种节点必须在规划期就改成 shared，
+    /// 否则整条 DAG 会在它上面 fail-fast，前面几个节点白跑。
+    #[test]
+    fn downgrades_worktree_when_project_is_not_a_repo() {
+        let value = json!({
+            "nodes": [
+                { "id": "unpack", "title": "脱壳", "task": "判壳并脱壳",
+                  "agent": "unpacker", "workspace": "worktree" },
+                { "id": "report", "title": "汇总", "task": "写报告",
+                  "agent": "sec-assist", "dependsOn": ["unpack"], "workspace": "worktree" }
+            ]
+        });
+        let plan = from_json(&value, "逆向 Husk.ipa", "/tmp/not-a-repo", &agents(), 8).unwrap();
+        assert!(
+            plan.nodes.iter().all(|node| node.workspace == Some(Workspace::Shared)),
+            "非 git 仓库里的 worktree 应当降级为 shared"
         );
     }
 

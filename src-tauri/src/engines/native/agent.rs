@@ -160,11 +160,15 @@ fn now_ms() -> i64 {
 }
 
 fn new_message_id() -> String {
+    // 同一纳秒内连发两条会撞出同一个 id（单测就是这么撞上的）。时间戳负责
+    // "大体有序"，自增序号负责"绝对不重"——前端拿它当列表 key。
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or(0);
-    format!("m{nanos}")
+    format!("m{nanos}-{seq}")
 }
 
 fn emit(app: &AppHandle, event_type: &str, data: Value) {

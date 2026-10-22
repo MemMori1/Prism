@@ -155,6 +155,14 @@ impl Permission {
             Permission::WriteWorkspace => true,
         }
     }
+
+    /// 给人和模型看的档位名（与 `agents::Permission` 的写法保持一致）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Permission::ReadOnly => "read-only",
+            Permission::WriteWorkspace => "workspace-write",
+        }
+    }
 }
 
 /// 风险等级。`permission` 管的是"能不能写文件"，风险管的是"这东西伤不伤人"，
@@ -612,6 +620,29 @@ fn task_status_schema() -> Value {
     })
 }
 
+fn tools_list_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "tools_list",
+            "description": "列出此刻真正能调用的工具（已按权限档、工作区作用域和设置里的开关过滤），以及被挡住的原因。不确定自己有什么能力、或想找某个专用工具时先调它，不要凭印象猜工具名。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tag": {
+                        "type": "string",
+                        "description": "只看带某个标签的工具，如 bin:static / bin:dyn-sandbox / dag:planner / artifact"
+                    },
+                    "include_blocked": {
+                        "type": "boolean",
+                        "description": "是否列出被挡住的工具及原因，默认 true"
+                    }
+                }
+            }
+        }
+    })
+}
+
 // ---------------------------------------------------------------- 注册表
 
 /// 内置工具的登记项。懒构建一次，之后所有查询共享同一批 `Arc`。
@@ -705,6 +736,18 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
                 "",
                 true,
                 run_task_status,
+            ),
+            // 自省：让模型查"我现在有什么工具"，而不是凭印象猜名字。
+            builtin(
+                "tools.list",
+                "查询可用工具",
+                tools_list_schema,
+                Permission::ReadOnly,
+                None,
+                None,
+                "",
+                true,
+                run_tools_list,
             ),
             // 子代理：声明与执行都在 subagent 模块，这里只做登记。
             // `delegable: false` 是扁平编排的保证——子代理开不出孙代理。
@@ -894,14 +937,35 @@ fn all_tools() -> Vec<Arc<ToolDef>> {
     tools
 }
 
+/// 按「开关 + 权限 + 作用域（+ 是否可委派）」筛出此刻真正可用的登记项。
+///
+/// [`specs`]、[`specs_for`] 和自省工具 `tools.list` 都走这里：过滤逻辑只写
+/// 一份，"发给模型的清单"和"模型问到的清单"才不会各说各话。
+pub fn visible(
+    enabled: &EnabledTools,
+    max: Permission,
+    dag: bool,
+    delegable_only: bool,
+) -> Vec<Arc<ToolDef>> {
+    all_tools()
+        .into_iter()
+        .filter(|tool| {
+            (!delegable_only || tool.delegable)
+                && tool.permission.within(max)
+                && enabled.is_on(tool)
+                && (dag || tool.meta.scope == ToolScope::Any)
+        })
+        .collect()
+}
+
 /// 发给模型的工具声明（受当前开关与作用域约束）。
 ///
 /// 关掉的工具不进 schema：模型看不到就不会调，也省一份 schema 的 token。
 /// `scope = Dag` 的工具在这里一律不发——聊天里没有 DAG 作用域，发了也只会失败。
 pub fn specs(enabled: &EnabledTools) -> Vec<Value> {
-    all_tools()
+    // `WriteWorkspace` 是本层最高档（`within` 对它恒为真），等价于"不按权限筛"。
+    visible(enabled, Permission::WriteWorkspace, false, false)
         .into_iter()
-        .filter(|tool| enabled.is_on(tool) && tool.meta.scope == ToolScope::Any)
         .map(|tool| tool.schema_value())
         .collect()
 }
@@ -913,14 +977,8 @@ pub fn specs(enabled: &EnabledTools) -> Vec<Value> {
 ///
 /// `dag = true` 表示有 DAG 作用域，制品类工具才进清单。
 pub fn specs_for(enabled: &EnabledTools, max: Permission, dag: bool) -> Vec<Value> {
-    all_tools()
+    visible(enabled, max, dag, true)
         .into_iter()
-        .filter(|tool| {
-            tool.delegable
-                && tool.permission.within(max)
-                && enabled.is_on(tool)
-                && (dag || tool.meta.scope == ToolScope::Any)
-        })
         .map(|tool| tool.schema_value())
         .collect()
 }
@@ -1000,6 +1058,152 @@ fn run_task_status(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
         session_id: ctx.session_id,
     });
     ToolResult::plain(task_status(args, runtime.as_ref()))
+}
+
+fn run_tools_list(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    ToolResult::plain(tools_list(ctx, args))
+}
+
+/// 自省：这一轮模型究竟能调用什么。
+///
+/// 与 [`visible`] 同源，所以"自报的清单"和"真发出去的 schema"不会漂——这
+/// 正是它存在的意义：模型不该靠猜自己有没有某个工具。
+fn tools_list(ctx: &ToolContext<'_>, args: &Value) -> ToolOutcome {
+    let tag = args
+        .get("tag")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let include_blocked = args
+        .get("include_blocked")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    // 上下文里存的是审批档字符串（read-only / ask / full）。映射回工具权限上限，
+    // 与 DAG runner 的 cap 保持一致：只有 read-only 会挡住写类工具。
+    let cap = match ctx.permission {
+        Some("read-only") => Permission::ReadOnly,
+        _ => Permission::WriteWorkspace,
+    };
+    let dag = ctx.dag.is_some();
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut blocked: Vec<String> = Vec::new();
+    for tool in all_tools() {
+        if let Some(tag) = tag {
+            if !tool
+                .meta
+                .tags
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(tag))
+            {
+                continue;
+            }
+        }
+        let reason = if !ctx.enabled.is_on(&tool) {
+            Some("已在设置里关闭".to_string())
+        } else if tool.meta.scope == ToolScope::Dag && !dag {
+            Some("只在 DAG 节点里可用".to_string())
+        } else if !tool.permission.within(cap) {
+            Some(format!(
+                "需要 {} 档权限（当前 {}）",
+                tool.permission.as_str(),
+                cap.as_str()
+            ))
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => blocked.push(format!("- {}：{reason}", tool.wire_name())),
+            None => lines.push(describe_tool(&tool)),
+        }
+    }
+
+    let filter = tag.map(|tag| format!("，标签={tag}")).unwrap_or_default();
+    let mut text = if lines.is_empty() {
+        format!(
+            "当前没有可用工具（权限档 {}，作用域 {}{filter}）。",
+            cap.as_str(),
+            if dag { "DAG 节点" } else { "普通会话" }
+        )
+    } else {
+        format!(
+            "当前可用 {} 个工具（权限档 {}，作用域 {}{filter}）：\n{}",
+            lines.len(),
+            cap.as_str(),
+            if dag { "DAG 节点" } else { "普通会话" },
+            lines.join("\n")
+        )
+    };
+    if include_blocked && !blocked.is_empty() {
+        text.push_str(&format!(
+            "\n\n被挡住 {} 个（这轮不在工具清单里，硬调会失败）：\n{}",
+            blocked.len(),
+            blocked.join("\n")
+        ));
+    }
+    ToolOutcome::ok(text)
+}
+
+/// 一条工具的自我说明：模型侧名字、干什么、要什么参数、有什么门槛。
+fn describe_tool(tool: &ToolDef) -> String {
+    let wire = tool.wire_name();
+    let mut line = format!("- {wire}");
+    if wire != tool.name.as_ref() {
+        line.push_str(&format!("（内部名 {}）", tool.name));
+    }
+    if !tool.blurb.is_empty() {
+        line.push_str(&format!("：{}", tool.blurb));
+    }
+    let params = params_of(tool);
+    if !params.is_empty() {
+        line.push_str(&format!("｜参数：{params}（* = 必填）"));
+    }
+    let mut notes: Vec<String> = Vec::new();
+    if tool.permission != Permission::ReadOnly {
+        notes.push(format!("需 {} 档", tool.permission.as_str()));
+    }
+    if !tool.meta.tags.is_empty() {
+        notes.push(tool.meta.tags.join("/"));
+    }
+    if tool.meta.scope == ToolScope::Dag {
+        notes.push("仅 DAG".to_string());
+    }
+    if !tool.delegable {
+        notes.push("子代理不可用".to_string());
+    }
+    if !notes.is_empty() {
+        line.push_str(&format!("〔{}〕", notes.join("，")));
+    }
+    line
+}
+
+/// 参数名摘要（必填加 `*`）。只列名字不列 JSON Schema：模型要的是"能不能
+/// 喂得上"，完整 schema 它本来就有。
+fn params_of(tool: &ToolDef) -> String {
+    let schema = tool.schema.render();
+    let Some(params) = schema.pointer("/function/parameters") else {
+        return String::new();
+    };
+    let Some(props) = params.get("properties").and_then(Value::as_object) else {
+        return String::new();
+    };
+    let required: Vec<&str> = params
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    props
+        .keys()
+        .map(|key| {
+            if required.contains(&key.as_str()) {
+                format!("{key}*")
+            } else {
+                key.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// 工具执行时的运行时上下文：后台任务要 AppHandle 才能进注册表 / 发事件。
@@ -1728,12 +1932,12 @@ mod tests {
         // 注册表现在连 `task`（子代理）一起给出——原来它是 agent 层单独 push 的，
         // 模型看到的清单没变，但"事实来源"只有一个。
         //
-        // 只比前 8 项：内置工具永远排在前面，后面可能跟着插件在别的用例里
+        // 只比前 9 项：内置工具永远排在前面，后面可能跟着插件在别的用例里
         // 注册进来的外部工具（注册表是进程级的，测试并行跑）。
         let names: Vec<String> = specs(&EnabledTools::all())
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str().map(str::to_string))
-            .take(8)
+            .take(9)
             .collect();
         assert_eq!(
             names,
@@ -1745,9 +1949,57 @@ mod tests {
                 "edit_file",
                 "run_command",
                 "task_status",
+                "tools_list",
                 "task"
             ]
         );
+    }
+
+    /// 自省工具要说真话：报出来的清单必须和 `specs` 的口径一致。
+    fn list_with(permission: Option<&str>, arguments: &str) -> String {
+        let enabled = EnabledTools::all();
+        let never = || false;
+        let ctx = ToolContext {
+            app: None,
+            session_id: "",
+            directory: "/tmp",
+            call_id: "",
+            provider: None,
+            model: None,
+            permission,
+            enabled: &enabled,
+            dag: None,
+            should_stop: &never,
+        };
+        let outcome = super::execute(&ctx, "tools.list", arguments).outcome;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        outcome.text
+    }
+
+    #[test]
+    fn tools_list_reports_only_what_can_run_now() {
+        let text = list_with(Some("workspace-write"), "{}");
+        assert!(text.contains("当前可用"), "{text}");
+        assert!(text.contains("- read_file"), "只读工具应当在清单里：{text}");
+        assert!(text.contains("- tools_list"), "自省工具自己也要能被看到：{text}");
+        // 非 DAG 会话：制品工具没作用域，必须明确报"用不了"而不是假装能调。
+        assert!(text.contains("只在 DAG 节点里可用"), "{text}");
+    }
+
+    #[test]
+    fn tools_list_hides_write_tools_in_read_only() {
+        let text = list_with(Some("read-only"), "{}");
+        assert!(
+            text.contains("被挡住") && text.contains("write_file：需要 workspace-write 档权限"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn tools_list_filters_by_tag() {
+        let text = list_with(Some("workspace-write"), r#"{"tag":"exec"}"#);
+        assert!(text.contains("- run_command"), "{text}");
+        assert!(!text.contains("- read_file"), "tag 过滤不该漏出无关工具：{text}");
     }
 
     /// provider 的函数名只接受 `[A-Za-z0-9_-]`。

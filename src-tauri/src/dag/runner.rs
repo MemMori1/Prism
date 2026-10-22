@@ -501,6 +501,12 @@ fn permission_label(permission: Permission) -> &'static str {
 ///
 /// `shared: None` 表示"该档权限下的全部公用工具"，不是"没有工具"——这个
 /// 区别在 `agents::ToolSelection` 那里已经讲清，这里只是照着执行。
+/// 元工具：回答"我现在有什么能力"，因此**不参与白名单裁剪**。
+///
+/// 白名单是给具体工种配能力的；自省工具被裁掉，模型就失去在被裁剪之后自查
+/// 的手段——恰好是最需要它的时候用不上。`deny` 仍然优先（显式禁就是禁）。
+const META_TOOLS: &[&str] = &["tools_list"];
+
 fn filter_specs(specs: Vec<Value>, selection: &ToolSelection) -> Vec<Value> {
     specs
         .into_iter()
@@ -516,6 +522,9 @@ fn filter_specs(specs: Vec<Value>, selection: &ToolSelection) -> Vec<Value> {
             let listed = |item: &String| tools::wire_name(item) == name;
             if selection.deny.iter().any(listed) {
                 return false;
+            }
+            if META_TOOLS.contains(&name) {
+                return true;
             }
             let in_shared = match &selection.shared {
                 None => true,
@@ -768,5 +777,37 @@ mod tests {
         cancelled.store(true, Ordering::SeqCst);
         assert!(stop.hit());
         assert_eq!(stop.reason(), "运行被取消");
+    }
+
+    /// 安全工种的显式白名单里没写 `tools.list`，它也必须活下来：模型在被裁剪
+    /// 之后还得能自查"我到底有什么"。deny 仍然优先。
+    #[test]
+    fn self_inspection_tool_survives_the_allow_list() {
+        let specs = vec![
+            serde_json::json!({"function": {"name": "read_file"}}),
+            serde_json::json!({"function": {"name": "tools_list"}}),
+            serde_json::json!({"function": {"name": "write_file"}}),
+        ];
+        let selection = ToolSelection {
+            shared: Some(vec!["read_file".to_string()]),
+            private: Vec::new(),
+            deny: Vec::new(),
+        };
+        let names: Vec<String> = filter_specs(specs, &selection)
+            .into_iter()
+            .map(|spec| spec["function"]["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(names, vec!["read_file", "tools_list"]);
+
+        let specs = vec![serde_json::json!({"function": {"name": "tools_list"}})];
+        let denied = ToolSelection {
+            shared: None,
+            private: Vec::new(),
+            deny: vec!["tools.list".to_string()],
+        };
+        assert!(
+            filter_specs(specs, &denied).is_empty(),
+            "显式 deny 应当压过元工具例外"
+        );
     }
 }

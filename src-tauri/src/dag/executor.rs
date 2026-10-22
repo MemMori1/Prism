@@ -452,6 +452,15 @@ fn prepare_directory(
             Ok(dir.display().to_string())
         }
         crate::agents::Workspace::Worktree => {
+            // 非 git 仓库不可能建 worktree。规划期已经改写过新计划的这类节点，
+            // 但存盘的旧计划、手写的计划仍可能带 worktree —— 运行期兜底成共享目录，
+            // 别让一个工作区语义上的小事把整条 DAG 判死。
+            if crate::gitinfo::git_info(std::path::Path::new(&plan.project))
+                .repo_root
+                .is_none()
+            {
+                return Ok(plan.project.clone());
+            }
             let dir = crate::engines::opencode::search::prism_dir()
                 .ok_or_else(|| "找不到 ~/.prism 目录".to_string())?
                 .join("dags/worktrees")
@@ -459,6 +468,20 @@ fn prepare_directory(
                 .join(&node.id);
             std::fs::create_dir_all(dir.parent().unwrap_or(&dir))
                 .map_err(|error| format!("建 worktree 目录失败：{error}"))?;
+            // 上一次运行可能留下同名目录：先摘掉再建，否则 git 会以
+            // "already exists" 拒绝，重跑同一个计划就永远起不来。
+            if dir.exists() {
+                let _ = std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        &plan.project,
+                        "worktree",
+                        "remove",
+                        "--force",
+                        &dir.display().to_string(),
+                    ])
+                    .output();
+            }
             let branch = format!("prism/{}/{}", plan.id, node.id);
             let output = std::process::Command::new("git")
                 .args([
@@ -568,6 +591,22 @@ mod tests {
             input_artifacts: Vec::new(),
             output_artifact_key: String::new(),
         }
+    }
+
+    /// 旧计划、手写计划、导入的计划都可能存着 `workspace: worktree`，但目标
+    /// 目录根本不是 git 仓库（桌面上的样本文件夹就是典型）。运行期必须降级到
+    /// 共享目录，不能让 `git worktree add` 的一次失败把整条 DAG 判死。
+    #[test]
+    fn worktree_degrades_to_shared_outside_git() {
+        let mut target = node("unpack", &[]);
+        target.workspace = Some(Workspace::Worktree);
+        let mut dag = plan(vec![target.clone()], 1, FailurePolicy::FailFast);
+        dag.project = std::env::temp_dir()
+            .join("prism-no-git-here")
+            .display()
+            .to_string();
+        let dir = prepare_directory(&dag, &target, &profile("unpacker")).expect("不该报错");
+        assert_eq!(dir, dag.project, "非 git 仓库的 worktree 应当落回共享目录");
     }
 
     fn plan(nodes: Vec<DagNode>, max_parallel: u8, policy: FailurePolicy) -> DagPlan {
