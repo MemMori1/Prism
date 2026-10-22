@@ -208,6 +208,9 @@ const fakePlugins: PluginInfo[] = [
   { id: 'routines', requires: ['engine.host'], state: 'active', reason: null },
   { id: 'tools.mcp', requires: [], state: 'active', reason: null },
   { id: 'dag.executor.native', requires: ['engine.native'], state: 'active', reason: null },
+  { id: 'dag.executor.codex', requires: ['engine.codex'], state: 'active', reason: null },
+  { id: 'dag.executor.dsh', requires: ['engine.dsh'], state: 'active', reason: null },
+  { id: 'dag.executor.opencode', requires: ['engine.opencode'], state: 'active', reason: null },
 ]
 
 let fakePlans: DagPlan[] = [fakePlan()]
@@ -1338,6 +1341,9 @@ index 1a2b3c4..5d6e7f8 100644
     }
     case 'plugins_list':
       return fakePlugins.map(item => JSON.parse(JSON.stringify(item)))
+    case 'dag_runners':
+      // 预览里假装三类执行器都装了：真实情况由 `dag.executor.*` 插件决定。
+      return ['codex', 'dsh', 'native', 'opencode']
     case 'plugin_set_enabled': {
       const target = fakePlugins.find(item => item.id === String(args.id))
       if (target) {

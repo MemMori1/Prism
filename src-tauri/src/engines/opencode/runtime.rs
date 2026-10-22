@@ -263,7 +263,7 @@ impl Runtime {
     }
 
     #[cfg(test)]
-    fn unattached() -> Self {
+    pub(crate) fn unattached() -> Self {
         Self::build(None)
     }
 
@@ -623,6 +623,25 @@ impl Engine for Runtime {
 
     fn send_prompt(&self, session_id: &str, text: &str) -> Result<String, String> {
         Runtime::send_prompt(self, session_id, text)
+    }
+
+    /// OpenCode 的模型挂在会话上（`/api/session/{id}/model`），所以要先设再发。
+    ///
+    /// 模型值约定写成 `provider/model`：OpenCode 内部是两级引用，只给 model id
+    /// 时无法确定 provider（不同 provider 有同名模型），这里不做猜测。
+    fn send_prompt_with_model(
+        &self,
+        session_id: &str,
+        text: &str,
+        model: Option<&str>,
+    ) -> Result<String, String> {
+        if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+            let (provider, id) = model.split_once('/').ok_or_else(|| {
+                format!("OpenCode 的模型要写成 provider/model（收到的是 {model}）")
+            })?;
+            self.set_session_model(session_id, provider.trim(), id.trim(), None)?;
+        }
+        self.send_prompt_rich(session_id, text, &[])
     }
 
     fn interrupt(&self, session_id: &str) -> Result<(), String> {

@@ -44,6 +44,7 @@ pub fn run() {
             ipc::dag_run_approve,
             ipc::dag_run_latest,
             ipc::dag_run_get,
+            ipc::dag_runners,
             ipc::plugins_list,
             ipc::plugin_set_enabled,
             ipc::cli_version,
@@ -135,6 +136,22 @@ pub fn run() {
                 Arc::new(plugins::Routines::new(app.handle().clone())),
                 // 编排的执行器：往注册表里登记 native，没有它「运行」会直接说不支持。
                 Arc::new(plugins::DagExecutorPlugin::new(app.handle().clone())),
+                // 外部引擎执行器：每个引擎一个开关，关掉某个不影响别的。
+                Arc::new(plugins::EngineExecutor::new(
+                    "dag.executor.codex",
+                    &["engine.codex"],
+                    "codex",
+                )),
+                Arc::new(plugins::EngineExecutor::new(
+                    "dag.executor.dsh",
+                    &["engine.dsh"],
+                    "dsh",
+                )),
+                Arc::new(plugins::EngineExecutor::new(
+                    "dag.executor.opencode",
+                    &["engine.opencode"],
+                    "opencode",
+                )),
             ];
 
             let mut kernel = Kernel::new(app.handle().clone());

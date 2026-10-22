@@ -24,6 +24,8 @@ Tauri 2 + Vue 3 + Rust 桌面应用（macOS / Windows x64）。引擎原始数�
 - **搜索**：本地 FTS5 trigram 索引，中文子串即查即中。
 - **用量**：跨引擎 token 明细、每日曲线、模型分布、成本估算、Codex 配额实时值。
 - **工坊**：四家引擎的技能 / 命令 / 子代理 / 记忆 / 插件只读浏览；MCP 配置列出并探活。
+- **Agent 面板**：内置 8 个 preset + 自定义。每个 Agent 有执行器、模型、系统提示、工具策略（公用白名单 / 私有 / deny）、权限档与工作区；改内置即覆盖，删掉即还原。
+- **编排**：一句需求交给 Planner 拆成 DAG，画布上改节点再跑。每个节点按自己 Agent 的执行器跑（native / dsh / codex / opencode 可混用），失败重试、人工闸门、取消都内建，运行记录落盘。执行器是插件（`dag.executor.*`），没装会在开跑前报错，不会静默降级。
 - **自动化**：cron 定时任务，到点用引擎跑提示词，日志可回看会话。
 - **托盘**：关窗 ≠ 退出，定时任务与通知继续跑。
 
@@ -88,7 +90,7 @@ open "http://localhost:1521/dev-preview.html?view=archive&theme=light"
 URL 参数控制落点：`view=`（归档 / 工作台 / agents / dag / workshop）、`theme=`（light / dark）、
 `state=`（bound / fresh / legacy）、`settings=6`（开设置第 7 个分类）、
 `tasks=open|files|terminal|chooser`、`dag=run|planner`（在编排页点一次运行 / 打开规划弹窗）、
-`workshop=插件`（切到工坊的插件清单）、`drive=flow`（自驱点一遍并把探针写进 `<pre id="probe">`，
+`agents=执行器`（切到 Agent 详情的执行器标签）、`workshop=插件`（切到工坊的插件清单）、`drive=flow`（自驱点一遍并把探针写进 `<pre id="probe">`，
 无头 Chrome 读 `--dump-dom` 即可断言）。
 
 `dev-preview-fake.ts` 是那个假后端，在 `tsconfig.include` 范围内，`pnpm build` 的类型检查会覆盖它。
@@ -107,6 +109,7 @@ src-tauri/src/       Rust 后端；ipc.rs 命令入口，engines/{opencode,codex
 - Claude Code 只有历史浏览，运行轴等本机 CLI。
 - 搜索索引目前只覆盖 OpenCode 归档。
 - 原生 Agent 暂无逐条权限审批（只有目录守卫）、不支持图片输入。
+- 外部引擎执行器（dsh / codex / opencode）只管「开会话 → 发消息 → 收正文」：工具策略与权限档由各引擎自己的配置决定，Prism 不接管；节点里弹审批时没人点，超时（30 分钟）会打断并报超时。
 - 定时任务需要 Prism 进程在跑（关窗只是隐藏窗口）。
 
 路线图与里程碑见 [docs/ROADMAP.md](docs/ROADMAP.md)。

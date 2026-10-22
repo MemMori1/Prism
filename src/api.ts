@@ -251,6 +251,8 @@ export const api = {
   /** 某张计划最近一次运行（进程重启后从磁盘捡回来）。 */
   dagRunLatest: (planId: string) => invoke<DagRun | null>('dag_run_latest', { planId }),
   dagRunGet: (runId: string) => invoke<DagRun | null>('dag_run_get', { runId }),
+  /** 已装的节点执行器 id：Agent 编辑器据此标出"这个引擎现在跑不了"。 */
+  dagRunners: () => invoke<string[]>('dag_runners'),
 
   // ---- 插件清单 ----
   pluginsList: () => invoke<PluginInfo[]>('plugins_list'),

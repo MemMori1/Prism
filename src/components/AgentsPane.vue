@@ -40,6 +40,26 @@ const tagFilter = ref<string | null>(null)
 const tab = ref<'identity' | 'executor' | 'tools' | 'preview'>('identity')
 
 const toolNames = ref<string[]>([])
+/**
+ * 已装的节点执行器（`dag.executor.*` 插件登记的 id）。
+ *
+ * 编辑器里仍然允许选任意引擎——关掉插件是**下次启动生效**的，配置不该因为
+ * 一个开关就被改写。这里只负责把"现在跑不了"标出来，别让人点了运行才知道。
+ */
+const runners = ref<string[]>([])
+
+const EXECUTORS = ['native', 'dsh', 'codex', 'opencode', 'claude'] as const
+
+function runnerReady(executor: string): boolean {
+  return runners.value.includes(executor)
+}
+
+/** 该执行器的特殊要求（目前只有 OpenCode 的模型写法）。 */
+function modelHint(executor: string): string {
+  if (executor === 'opencode') return 'provider/model，如 anthropic/claude-sonnet-4'
+  if (executor === 'native') return '留空跟随全局默认'
+  return '留空跟随该引擎的默认模型'
+}
 
 const visible = computed(() =>
   filterAgents(agents.value, {
@@ -103,6 +123,14 @@ async function loadTools(): Promise<void> {
     toolNames.value = (await api.toolList()).filter(tool => tool.enabled).map(tool => tool.name)
   } catch {
     // 工具清单只是预览用的"上限"，取不到就不显示全部可选，不影响编辑。
+  }
+}
+
+async function loadRunners(): Promise<void> {
+  try {
+    runners.value = await api.dagRunners()
+  } catch {
+    // 取不到就当作"都不知道"：不标任何红字，也绝不拦保存。
   }
 }
 
@@ -227,6 +255,7 @@ watch(term, () => {
 onMounted(() => {
   void load()
   void loadTools()
+  void loadRunners()
 })
 
 defineExpose({ reload: () => load(true) })
@@ -432,19 +461,22 @@ defineExpose({ reload: () => load(true) })
             <label class="field">
               <span class="field-label">执行器</span>
               <select v-model="draft.executor">
-                <option value="native">{{ executorLabel('native') }}</option>
-                <option value="dsh">{{ executorLabel('dsh') }}</option>
-                <option value="codex">{{ executorLabel('codex') }}</option>
-                <option value="opencode">{{ executorLabel('opencode') }}</option>
-                <option value="claude">{{ executorLabel('claude') }}</option>
+                <option v-for="id in EXECUTORS" :key="id" :value="id">
+                  {{ executorLabel(id) }}{{ runnerReady(id) ? '' : '（未装执行器插件）' }}
+                </option>
               </select>
             </label>
+            <div v-if="!runnerReady(draft.executor)" class="tip warn">
+              没有 {{ draft.executor }} 的节点执行器：编排跑到该 Agent 的节点时会直接
+              报错。去「工坊 → 插件」启用
+              <code>dag.executor.{{ draft.executor }}</code>（下次启动生效）。
+            </div>
             <div v-if="!supportsPrivateTools(draft.executor)" class="tip warn">
               外部引擎自己管工具：Prism 只能通过会话参数影响它，私有工具与系统提示
               不会像原生引擎那样强制生效。
             </div>
             <label class="field">
-              <span class="field-label">模型 <em>留空跟随全局默认</em></span>
+              <span class="field-label">模型 <em>{{ modelHint(draft.executor) }}</em></span>
               <input v-model="draft.model" placeholder="deepseek-chat" spellcheck="false" />
             </label>
             <label class="field">

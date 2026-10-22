@@ -232,7 +232,7 @@ artifact/…               节点自己写的交付文件（可选）
 
 ## 4. Agent 与「自己的空间」
 
-### 4.1 Agent profile（`~/.prism/dags/agents.json`）
+### 4.1 Agent profile（`~/.prism/agents/user/<id>.json`）
 
 Agent 是**配置**，不是代码：
 
@@ -254,8 +254,8 @@ Agent 是**配置**，不是代码：
 }
 ```
 
-内置 profile（`explore` / `general` / `verifier`）由 `dag.presets` 插件提供；
-用户可复制、改写、新增。Planner 拿到的 Agent 目录就是这个文件的投影。
+内置 presets 编译在 `agents.rs` 里；同 id 的 user 文件覆盖内置，删文件即还原。
+Planner 拿到的 Agent 目录就是这个注册表的投影。
 
 ### 4.2 工作区提供者
 
@@ -363,15 +363,26 @@ maxTurns, tokenBudget }`，由 `send` 一路传到 `run_turns`；不传时保持
 
 ### 5.4 引擎执行器的边界（必须说清）
 
-| 执行器 | 系统提示 | 工具白名单 | 私有工具 | 工作区 |
-|---|---|---|---|---|
-| `native` | ✅ | ✅ Prism 侧强制 | ✅ | ✅ |
-| `engine`（opencode/codex/dsh） | ⚠️ 拼进首条 prompt | ⚠️ 取决于引擎配置 | ⚠️ 仅支持 `mcpServers` 的引擎 | ✅ 通过 cwd |
-| `shell` | — | — | — | ✅ |
+| 执行器 | 系统提示 | 工具白名单 | 私有工具 | 工作区 | 权限档 |
+|---|---|---|---|---|---|
+| `native` | ✅ | ✅ Prism 侧强制 | ✅ | ✅ | ✅ 执行器内拦截 |
+| `codex` / `dsh` / `opencode` | ⚠️ 拼进首条 prompt | ❌ 引擎自己管 | ❌ | ✅ 通过 cwd | ❌ 见下 |
 
 外部引擎的工具是它自己管的，Prism 只能通过会话参数（如 ACP `session/new`
 的 `mcpServers`）影响，不能像 native 那样在每次调用前拦。UI 要在 Agent
 编辑器里标出「此执行器不支持私有工具」，Planner 也不会给这类节点派私有工具。
+
+**权限档不下传**：`read-only / workspace-write / danger-full-access` 只约束原生
+执行器——dsh 的 sandbox、Codex 的 approval、OpenCode 的配置各有各的开关，
+硬把 Prism 的档位翻译过去等于假装控制住了。要收紧就去改对应引擎自己的配置。
+
+**无人值守的审批**：节点线程没人看屏幕，引擎弹 `permission.asked` 就没人点。
+执行器不自动放行，只把它记进节点步骤（运行面板上能看见"卡在等授权"），
+到硬上限（30 分钟）后打断并报超时。
+
+**模型覆盖**：节点按 Agent 的 `model` 传下去，三家写法不同——`dsh` 是会话级
+config option、`codex` 是 thread 参数、`opencode` 是 `provider/model` 两级引用
+（只给 model id 无法确定 provider，执行器会直接报错而不是猜）。
 
 ### 5.5 权限上限
 
@@ -392,26 +403,26 @@ JSON 配置（Agent / 计划）。这和第 3 条内核约束一致。
 `lib.rs` 清单加一行；关掉插件 = 从清单去掉，依赖它的计划在运行前报
 「缺少执行器 xxx」，而不是运行到一半崩。
 
-### 6.2 新插件
+### 6.2 插件（实际装配，`plugins.rs` / `lib.rs`）
 
 | 插件 id | requires | 提供 | 关停时 |
 |---|---|---|---|
-| `dag.core` | — | `DagStore` / `Scheduler` / IPC 状态 | 取消全部 run，落盘 `interrupted` |
-| `dag.executor.native` | `dag.core` | `NodeRunner` id=`native` | 释放节点工具集 |
-| `dag.executor.engine` | `dag.core`, `engine.host` | `NodeRunner` id=`engine` | 中断跑在该引擎上的节点 |
-| `dag.executor.shell` | `dag.core` | `NodeRunner` id=`shell`（后置） | 杀进程组 |
-| `dag.workspace.worktree` | `dag.core` | `WorkspaceProvider` id=`worktree` | 不自动删工作树（交用户） |
-| `dag.planner.llm` | `dag.core` | `Planner` id=`llm` | 取消规划请求 |
-| `dag.presets` | `dag.core` | 内置 Agent / 模板 | — |
-| `dag.agents.mcp` | `dag.core`, `tools.mcp` | 私有 MCP 工具 | 撤销 `agent:*` 工具 |
+| `dag.executor.native` | `engine.native` | `NodeRunner` id=`native` | 从注册表撤掉 |
+| `dag.executor.codex` | `engine.codex` | `NodeRunner` id=`codex` | 立即打断该引擎上跑着的节点 |
+| `dag.executor.dsh` | `engine.dsh` | `NodeRunner` id=`dsh` | 立即打断该引擎上跑着的节点 |
+| `dag.executor.opencode` | `engine.opencode` | `NodeRunner` id=`opencode` | 立即打断该引擎上跑着的节点 |
 
-装配顺序：引擎 → `engine.host` → `tools.mcp` → `dag.core` → 各 executor /
-workspace / planner。`dag.core` 先 `manage(DagState)`，后面的插件用
-`ctx.app().state::<DagState>()` 注册能力，`ctx.on_shutdown` 反注册；撤销栈
-逆序执行，正好保证「执行器先撤、core 最后收 run」。
+引擎执行器**一个引擎一个插件**，而不是合成一个 `dag.executor.engine`：这样
+「编排别用 Codex」只关一个开关，Codex 聊天照常；反过来关掉 `engine.codex`，
+执行器随 `requires` 级联关掉，不会留一个指向空引擎的注册项。
 
-需要在 `KernelCtx` 上加一个只读的 `app()`（或 `try_state`），这是本次唯一
-的内核改动；引擎注册表那条路径不动。
+调度、并发、重试、闸门、占位符替换都在 `dag::executor` 里，**与执行器无关**：
+加一个引擎 = 实现 `NodeRunner`（外部引擎直接用 `dag::engine_runner::EngineRunner`）
++ 在清单里加一行。计划里出现的执行器没装，`dag_run` 会在**开跑前**报错并列出
+已装的，而不是静默降级成 native。
+
+装配顺序：各 `engine.*` → `engine.host` → 其余 → 各 `dag.executor.*`。
+撤销栈逆序执行，正好保证「执行器先撤、引擎最后停」。
 
 ### 6.3 注册表
 
@@ -601,6 +612,7 @@ dag_run_cancel(runId)                        停止（节点在下次调用前�
 dag_run_approve(runId, nodeId, allowed)      人工闸门的答复
 dag_run_latest(planId)                       最近一次运行（重启后从磁盘捡）
 dag_run_get(runId)                           按 id 取（刷新用）
+dag_runners()                                已装的节点执行器 id（Agent 编辑器标红用）
 plugins_list / plugin_set_enabled            内核装配清单与开关（下次启动生效）
 ```
 
@@ -675,15 +687,21 @@ plugins_list / plugin_set_enabled            内核装配清单与开关（下�
 | D2 | Agent 注册表 + `dag.executor.native`（真跑节点，不是 stub） | ✅ 已完成 |
 | D3 | `dag_plan`（LLM 拆图）+ 规划弹窗 | ✅ 已完成 |
 | D5 | 失败策略 / 重试 / 闸门 / 取消 / 运行条 / 运行记录落盘 | ✅ 已完成 |
-| D4 | 多引擎执行器（dsh / codex / opencode 各一个 `NodeRunner`） | ⬜ 未做 |
+| D4 | 多引擎执行器（dsh / codex / opencode 各一个 `NodeRunner`） | ✅ 已完成 |
 | D5 | worktree 产物 diff、审批卡通知跳转、模板市场 | ⬜ 未做 |
 
-D4 之所以还没做，是因为它的形状已经定了、只差实现：`dag::runner::NodeRunner`
-是唯一入口，注册表按 Agent 的 `executor` 查表（`runner::register` / `get`），
-加一个引擎 = 新写一个 `NodeRunner` + 在 `plugins.rs` 里加一行 `register`。
-**调度层不需要改一行**——并发、重试、闸门、占位符替换全在 `dag::executor` 里，
-与执行器无关。没装对应执行器的节点会**在开跑前**报错并列出已装的，
-而不是静默降级成 native。
+D4 的落地形状：`dag/engine_runner.rs` 里的 `EngineRunner` 是**一个**通用执行器，
+按持有的 `Arc<dyn Engine>` 分别注册成 `codex` / `dsh` / `opencode`。它只做
+「开会话 → 发提示词 → 从事件流认领这一轮的文本 → 等终态」，四件事全在
+`Engine` trait 上，所以再加引擎不用动这一层。
+
+文本从事件流取，规则两条：`session.text.delta` 累加、`session.text.ended`
+用整段覆盖；一轮里可能有多条助手消息（工具调用前后各一段），交付物取**最后
+一段非空文本**——那是这一轮的结论，前面的是过程。
+
+外部引擎不回报 token 用量（各家协议没有统一字段），节点卡上的用量显示 `—`，
+而不是编一个数。测试覆盖：增量累加、多消息取末段、`ended` 覆盖、空白段跳过、
+工具步骤摘要、prompt 拼装。
 
 ### D1 内核 + 画布（约 2 天）
 
@@ -710,13 +728,15 @@ D4 之所以还没做，是因为它的形状已经定了、只差实现：`dag:
 - 计划校验实时提示；模板（功能开发 / 调研 / 重构 / 修 bug）；
 - 验收：一句目标生成 3–8 节点计划，人工改一个 Agent 后能跑通。
 
-### D4 多引擎执行器（约 2 天）
+### D4 多引擎执行器（已完成）
 
-- `dag.executor.engine`：复用 `Engine` trait（create_session → send_prompt →
-  subscribe → interrupt），抽一个 `session_run` helper 给 routines / DAG 共用；
-- 能力矩阵：哪些引擎支持系统提示 / MCP / 私有工具；
-- 混合计划：调研用 dsh，实现用 native，验证用 codex；
-- 验收：一张图里至少两种引擎，节点会话都能在归档打开。
+- `dag/engine_runner.rs`：`EngineRunner` 复用 `Engine` trait（subscribe →
+  create_session → send_prompt_with_model → interrupt）；
+- 三个插件 `dag.executor.{codex,dsh,opencode}`，各自 `requires` 对应引擎；
+- 能力矩阵见 §5.4（外部引擎不接管工具策略，权限档不下传）；
+- 混合计划：调研用 dsh，实现用 native，验证用 codex —— 每个节点按 Agent 的
+  `executor` 逐节点解析，不是"整张图共用一个"；
+- 验收：一张图里至少两种引擎，节点步骤里带会话 id，可在归档里打开那一轮。
 
 ### D5 治理与打磨（约 2–3 天）
 

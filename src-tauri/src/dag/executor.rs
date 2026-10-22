@@ -31,6 +31,41 @@ use crate::agents::AgentProfile;
 /// 回到循环顶部重新算一遍"谁能跑"。
 const TICK: Duration = Duration::from_millis(150);
 
+/// 起跑前检查：这张图里每个节点的执行器都装了吗。
+///
+/// 为什么不等到节点出队时再说：一张图可能十几分钟、几十块钱，用户不该在
+/// 第三个节点卡住时才发现"这个 Agent 的执行器没装"——那时候前面的已经白跑了。
+/// 逐节点的解析逻辑仍在 [`build_request`] 里（它是唯一的事实），这里只是把
+/// 同一个判断提前做一遍，好让错误在"点了运行"这一刻就出现。
+pub fn preflight(plan: &DagPlan, profiles: &[AgentProfile]) -> Result<(), String> {
+    let installed = super::runner::installed();
+    if installed.is_empty() {
+        return Err(
+            "没有节点执行器：在工坊里启用任意 dag.executor.* 插件（下次启动生效）".to_string(),
+        );
+    }
+    let known = installed.join("、");
+    for node in &plan.nodes {
+        let agent_id = node
+            .agent
+            .clone()
+            .unwrap_or_else(|| plan.defaults.agent.clone());
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.id == agent_id)
+            .ok_or_else(|| {
+                format!("节点「{}」的 Agent「{agent_id}」不在注册表里", node.id)
+            })?;
+        if super::runner::get(&profile.executor).is_none() {
+            return Err(format!(
+                "节点「{}」要用 {} 执行器，但没装这个插件（已装：{known}）",
+                node.id, profile.executor
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 跑一张图。返回时所有节点的状态都已经落定（除了一直没人确认的闸门）。
 pub fn execute(
     plan: DagPlan,

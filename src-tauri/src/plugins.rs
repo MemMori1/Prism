@@ -425,6 +425,59 @@ fn register_server_tools(server: &str, spec: &ServerSpec, client: Arc<StdioClien
     registered
 }
 
+/// DAG 的**引擎**执行器：把一个外部引擎接成节点执行器插件。
+///
+/// 每个引擎一个插件实例，而不是塞进 `dag.executor.native` 里一起管——这样
+/// 「我不想让编排用 Codex」只关一个开关，`engine.codex` 的聊天照常可用；
+/// 反过来关掉 `engine.codex`，这个执行器跟着级联关掉，不会留一个指向空引擎
+/// 的注册项。`requires` 声明的就是这层因果。
+pub struct EngineExecutor {
+    id: &'static str,
+    requires: &'static [&'static str],
+    engine: &'static str,
+}
+
+impl EngineExecutor {
+    pub const fn new(
+        id: &'static str,
+        requires: &'static [&'static str],
+        engine: &'static str,
+    ) -> Self {
+        Self {
+            id,
+            requires,
+            engine,
+        }
+    }
+}
+
+impl Plugin for EngineExecutor {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn requires(&self) -> &'static [&'static str] {
+        self.requires
+    }
+
+    fn setup(&self, ctx: &mut KernelCtx<'_>) -> Result<(), String> {
+        // 从"已登记的引擎"里取，而不是再去 new 一个：多引擎各自 manage 一个实例
+        // 就会变成两条运行轴（两个 serve 进程），事件与打断都各说各话。
+        let engine = ctx
+            .engines()
+            .iter()
+            .find(|engine| engine.id() == self.engine)
+            .cloned()
+            .ok_or_else(|| format!("{} 依赖的 {} 引擎没登记", self.id, self.engine))?;
+        let runner = std::sync::Arc::new(crate::dag::engine_runner::EngineRunner::new(engine));
+        // 执行器 id 就是引擎 id（`EngineRunner::id` 直接转给引擎），撤销时按它找。
+        let runner_id = self.engine;
+        crate::dag::runner::register(runner);
+        ctx.on_shutdown(move || crate::dag::runner::unregister(runner_id));
+        Ok(())
+    }
+}
+
 /// DAG 节点执行器：把「一个 Agent + 一段任务」跑成「一段报告」。
 ///
 /// 它本身不调度——调度在 `dag::executor` 里，与执行器无关。这个插件只做一件事：

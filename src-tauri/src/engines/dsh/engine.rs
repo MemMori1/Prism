@@ -94,6 +94,17 @@ impl Engine for Runtime {
         Runtime::send_prompt(self, session_id, text)
     }
 
+    /// dsh 的模型是会话级配置：先改 config option 再发（`send_prompt_with` 已经
+    /// 把这件事做好了，改失败只打日志、不吞掉这一轮）。
+    fn send_prompt_with_model(
+        &self,
+        session_id: &str,
+        text: &str,
+        model: Option<&str>,
+    ) -> Result<String, String> {
+        Runtime::send_prompt_with(self, session_id, text, model, None)
+    }
+
     fn interrupt(&self, session_id: &str) -> Result<(), String> {
         Runtime::interrupt(self, session_id)
     }

@@ -109,6 +109,17 @@ if (workshopMode) {
   }, 900)
 }
 
+/** 截图用：?agents=executor 切到 Agent 详情里的「执行器」标签（看可用性提示）。 */
+const agentsTab = params.get('agents')
+if (agentsTab) {
+  window.setTimeout(() => {
+    const tabs = document.querySelectorAll<HTMLElement>('.insp-tabs button')
+    tabs.forEach(button => {
+      if (button.textContent?.trim() === agentsTab) button.click()
+    })
+  }, 900)
+}
+
 const app = createApp(App)
 installRenderErrorHooks(app)
 app.mount('#app')

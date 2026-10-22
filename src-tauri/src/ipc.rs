@@ -1753,15 +1753,22 @@ pub fn dag_run(
 
     let plan = dag::store::get(&id)?;
     let agents = agents::list();
-    // 执行器由插件注册（`dag.executor.native`），这里只确认"装没装"：
-    // 一个都没装就直说，别让用户等一张永远跑不动的图。
-    if dag::runner::installed().is_empty() {
-        return Err("没有节点执行器：在工坊里启用 dag.executor.native（下次启动生效）".to_string());
-    }
+    // 执行器由插件注册（`dag.executor.*`）：装没装、哪个 Agent 缺，一次说清。
+    // 一个都没装时也走这条路——报错文案就在 preflight 里。
+    dag::executor::preflight(&plan, &agents)?;
     let notify = std::sync::Arc::new(move |run: &dag::DagRun| {
         let _ = app.emit(dag::run::EVENT_NAME, run);
     });
     hub.start(plan, &agents, None, notify)
+}
+
+/// 已装的节点执行器 id（Agent 编辑器据此把"跑不了"的引擎标出来）。
+#[tauri::command]
+pub fn dag_runners() -> Vec<String> {
+    dag::runner::installed()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// 停止一次运行。正在跑的节点会在下一次工具/模型调用前收手。

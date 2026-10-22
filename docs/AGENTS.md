@@ -224,48 +224,50 @@ impl AgentRegistry {
 
 一句话：**DAG Planner 负责「谁先谁后」，Agent 注册表负责「每个是谁」**。
 
-## 7. 插件化装配（新增）
+## 7. 插件化装配（实际落地）
 
-沿用 DAG_PLANNER.md §6 的插件清单，Agent 面板额外依赖：
+Agent 注册表本身**不是插件**：它只读写 `~/.prism/agents/`，没有要收尾的副作用
+（无进程、无线程），做成插件反而多一层间接。真正参与装配的是执行器：
 
 | 插件 id | requires | 提供 | 关停时 |
 |---|---|---|---|
-| `dag.presets` | `dag.core` | 内置 Agent / 模板 | — |
-| `dag.agents.mcp` | `dag.core`, `tools.mcp` | 私有 MCP 工具 | 撤销 `agent:*` 工具 |
-| `dag.agents.ui` | `dag.core` | `agents` 视图 / IPC 薄壳 | 视图隐藏 |
+| `dag.executor.native` | `engine.native` | `NodeRunner` id=`native` | 从注册表撤掉 |
+| `dag.executor.codex` | `engine.codex` | `NodeRunner` id=`codex` | 打断该引擎上跑着的节点 |
+| `dag.executor.dsh` | `engine.dsh` | `NodeRunner` id=`dsh` | 打断该引擎上跑着的节点 |
+| `dag.executor.opencode` | `engine.opencode` | `NodeRunner` id=`opencode` | 打断该引擎上跑着的节点 |
 
-装配顺序不变：引擎 → `engine.host` → `tools.mcp` → `dag.core` → 各 executor
-/ workspace / planner → `dag.agents.ui`。
+Agent 编辑器通过 `dag_runners()` 拿已装执行器清单：选了没装执行器的引擎会
+当场标红并提示去工坊启用对应插件（`plugins.json` 改动**下次启动生效**，所以
+这里只提示、不改配置）。
 
-## 8. 实施顺序
+## 8. 实施顺序与状态
 
-### A1 Agent 数据与注册表（约 1.5 天）
+| 步 | 内容 | 状态 |
+|---|---|---|
+| A1 | `AgentProfile` / 注册表 / `~/.prism/agents/{builtin,user}/` / IPC | ✅ 已完成 |
+| A2 | `agents` 视图：三栏 + 卡片网格 + 四标签详情 + 复制/覆盖/删除 | ✅ 已完成 |
+| A3 | Planner 读注册表生成节点（`dag_plan`） | ✅ 已完成 |
+| A4 | 多引擎执行器（dsh / codex / opencode） | ✅ 已完成 |
 
-- `AgentProfile` / `AgentRegistry` / `~/.prism/agents/` 读写；
-- 内置 presets（`explore` / `general` 映射现有 `AgentType`）；
-- 工具 audience 扩展（`Shared` / `Private(agent)`，复用 DAG_PLANNER.md §5）；
-- IPC：`dag_agents` / `dag_agent_save` / `dag_agent_delete`；
-- 验收：手写 JSON 加一个 Agent，能在 `dag_agents` 里读到，删掉即消失。
+### A4 多引擎执行器（已完成）
 
-### A2 面板 UI（约 1.5 天）
+- `codex` / `dsh` / `opencode` 三类 Agent 都能当节点执行器，逐节点按 profile
+  的 `executor` 解析（混合图：调研用 dsh、实现用 native、验证用 codex）；
+- 能力矩阵见 DAG_PLANNER.md §5.4：外部引擎不接管工具策略、权限档不下传；
+- 模型覆盖沿 `Engine::send_prompt_with_model`：dsh 改会话 config、codex 传
+  thread 参数、opencode 走 `provider/model`；
+- 验收：一张图里两种引擎并行，节点步骤里带会话 id，可在归档打开那一轮。
 
-- `agents` 视图：三栏布局 + 卡片网格 + 详情/编辑；
-- 工具策略编辑器（公用白名单 / 私有 / deny / 权限档）；
-- 预览（「模型会看到的工具清单」只读）；
-- dev-preview 假后端补 `dag_agents` 等命令；
-- 验收：卡片网格正确渲染内置 + 自定义，编辑保存后刷新仍在。
+### A1–A3 落地要点
 
-### A3 Planner 接入（与 DAG_PLANNER D3 合并）
-
-- `PlanRequest.agents` 用注册表投影填充；
-- 规划弹窗里的「Agent 目录」来自注册表；
-- 验收：一句目标生成的 DAG，每个节点.agent 都是注册表里的 id。
-
-### A4 多引擎执行器（与 DAG_PLANNER D4 合并）
-
-- `engine(dsh)` 等 Agent 作为节点执行器；
-- 能力矩阵明示（系统提示 / 私有工具 / MCP 支持）；
-- 验收：一张图里 native + dsh 两种 Agent 并行。
+- `agents.rs`：`list / save / delete`，id 即文件名（小写字母数字与 `-` `_`，
+  上限 32），同 id 的 user 文件覆盖内置，删文件即还原；
+- 内置 8 个 preset 编译在代码里（`builtin()`），不会被升级改坏；
+- IPC 名字是 `agents_list` / `agent_save` / `agent_delete`（不是早期的
+  `dag_agents`——Agent 不是 DAG 的私有物，编排只是它的使用方之一）；
+- 面板四标签：身份 / 执行器 / 工具 / 预览，脏检查用整份 JSON 比较，
+  复制走 JSON 深拷贝（响应式代理过不了 `structuredClone`）；
+- Planner 通过 `dag_plan` 读注册表，生成的节点 `agent` 一律是注册表里的 id。
 
 ## 9. 测试与验收
 

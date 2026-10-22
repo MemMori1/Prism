@@ -72,6 +72,23 @@ pub trait Engine: Send + Sync {
         Err(format!("{} 引擎暂不支持发送消息", self.id()))
     }
 
+    /// 同上，但带一个模型覆盖（DAG 节点按 Agent 的 `model` 指定）。
+    ///
+    /// 默认实现刻意分两种情况：没指定模型就等价于 [`Engine::send_prompt`]；
+    /// 指定了却没法应用则**报错**。悄悄用默认模型跑完更糟——用户以为省钱的
+    /// 配置生效了，账却记在最贵那个模型上，而且没有任何地方会提醒他。
+    fn send_prompt_with_model(
+        &self,
+        session_id: &str,
+        text: &str,
+        model: Option<&str>,
+    ) -> Result<String, String> {
+        if model.map(str::trim).is_some_and(|value| !value.is_empty()) {
+            return Err(format!("{} 引擎暂不支持按节点指定模型", self.id()));
+        }
+        self.send_prompt(session_id, text)
+    }
+
     /// 打断正在跑的一轮。
     fn interrupt(&self, _session_id: &str) -> Result<(), String> {
         Err(format!("{} 引擎暂不支持打断", self.id()))

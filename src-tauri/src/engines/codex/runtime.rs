@@ -642,6 +642,16 @@ impl Engine for Runtime {
         Runtime::send_prompt(self, session_id, text)
     }
 
+    /// Codex 的模型是 `thread/start` 级参数，`send_prompt_with` 会带上它。
+    fn send_prompt_with_model(
+        &self,
+        session_id: &str,
+        text: &str,
+        model: Option<&str>,
+    ) -> Result<String, String> {
+        Runtime::send_prompt_with(self, session_id, text, model, None)
+    }
+
     fn interrupt(&self, session_id: &str) -> Result<(), String> {
         Runtime::interrupt(self, session_id)
     }
