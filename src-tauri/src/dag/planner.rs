@@ -467,6 +467,46 @@ mod tests {
         assert!(plan.nodes[0].depends_on.is_empty(), "悬空依赖应当被删掉");
     }
 
+    /// 真机验证：拿真实目标让 Planner 调一次模型，断言产出的图能过校验。
+    ///
+    /// `cargo test --lib -- --ignored plans_a_real_goal`（会消耗少量额度，不走 CI）。
+    /// 单测只能证明"给定 JSON 能拼成图"，证明不了"模型真的会给这个形状"。
+    #[test]
+    #[ignore = "真机：会调用配置里的模型服务，消耗额度"]
+    fn plans_a_real_goal() {
+        let goal = "给设置页加自动更新：检查新版本、显示下载进度、下载完重启安装";
+        let project = env!("CARGO_MANIFEST_DIR");
+        let plan = draft(goal, project, &agents(), 6).expect("Planner 应当能拆出计划");
+        println!("计划名：{}", plan.name);
+        for node in &plan.nodes {
+            println!(
+                "  {} | {} | agent={:?} | deps={:?} | gate={}",
+                node.id,
+                node.title,
+                node.agent,
+                node.depends_on,
+                node.needs_gate()
+            );
+        }
+        assert!(
+            (2..=6).contains(&plan.nodes.len()),
+            "节点数越界：{}",
+            plan.nodes.len()
+        );
+        // 节点上限是"请求的上限"，不是"必须凑满"；只要求至少能分出一个下游。
+        assert!(
+            plan.nodes.iter().any(|node| !node.depends_on.is_empty()),
+            "一个依赖都没有，等于没拆图"
+        );
+        let known: Vec<String> = agents().into_iter().map(|agent| agent.id).collect();
+        let issues = validate::validate(&plan, &known);
+        assert!(
+            issues.iter().all(|issue| issue.level != Level::Error),
+            "模型给的图没通过校验：{:?}",
+            issues.iter().map(|issue| &issue.message).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn node_count_is_capped() {
         let nodes: Vec<Value> = (0..12)

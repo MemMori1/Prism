@@ -289,6 +289,21 @@ const STREAM_POLL: Duration = Duration::from_millis(200);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 #[cfg(test)]
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// 实际生效的空闲上限。
+///
+/// 测试里默认 400ms 是为了让「服务端卡住」那个用例不用等五分钟；但同一份
+/// 二进制里跑真机用例（`--ignored`）时，400ms 连思考型模型的首字都等不到。
+/// 所以给一个环境变量口子：`PRISM_STREAM_IDLE_MS=60000` 放宽，生产不受影响。
+fn idle_timeout() -> Duration {
+    #[cfg(test)]
+    if let Ok(raw) = std::env::var("PRISM_STREAM_IDLE_MS") {
+        if let Ok(ms) = raw.trim().parse::<u64>() {
+            return Duration::from_millis(ms.clamp(100, 3_600_000));
+        }
+    }
+    STREAM_IDLE_TIMEOUT
+}
 /// 单轮流式请求的兜底上限（正常写代码远用不到，防的是永远不结束的流）。
 const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(3600);
 
@@ -383,6 +398,7 @@ pub fn chat(
     });
 
     let mut last = Instant::now();
+    let idle = idle_timeout();
     loop {
         check_stop(should_stop)?;
         match receiver.recv_timeout(STREAM_POLL) {
@@ -414,10 +430,10 @@ pub fn chat(
                 return Err(failed(error));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if last.elapsed() > STREAM_IDLE_TIMEOUT {
+                if last.elapsed() > idle {
                     return Err(failed(format!(
                         "模型 {} 秒没有任何响应，已放弃这一轮（网络或服务端卡住了）",
-                        STREAM_IDLE_TIMEOUT.as_secs()
+                        idle.as_secs()
                     )));
                 }
             }

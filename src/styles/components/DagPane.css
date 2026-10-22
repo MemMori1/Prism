@@ -79,6 +79,26 @@
   border-top: 1px solid var(--border);
 }
 
+/* 左栏底部两个入口：等高，别一个 30 一个 28 看着像没对齐。 */
+.pane-foot .primary-btn,
+.pane-foot .ghost-btn.wide {
+  width: 100%;
+  height: 30px;
+  font-size: 11px;
+}
+
+/* 顶部一排是同一个工具条：静态稿里全 26px，主次只靠颜色区分。
+   混着 24 与 30 会显得按钮高高低低没对齐。 */
+.head-actions .ghost-btn,
+.head-actions .primary-btn {
+  width: auto;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 7px;
+  font-size: 10.5px;
+  line-height: 1;
+}
+
 .hint {
   margin: 6px 2px;
   color: var(--faint);
@@ -869,19 +889,21 @@
   z-index: 20;
 }
 
+/* 尺寸与留白照 design/index.html 的 `.planner-card` / `.pc-*`：
+   460 宽、14px 圆角、底栏带底色。改这里前先看那页，别各画一套。 */
 .planner-card {
-  width: 440px;
-  max-width: 88%;
+  width: 460px;
+  max-width: 92%;
   max-height: 88%;
   overflow: auto;
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: 14px;
   background: var(--panel);
   box-shadow: var(--shadow-md);
 }
 
 .planner-head {
-  padding: 14px 16px 0;
+  padding: 16px 18px 0;
 }
 
 .planner-kicker {
@@ -893,30 +915,127 @@
 }
 
 .planner-title {
-  margin-top: 5px;
+  margin: 6px 0 2px;
   color: var(--text);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .planner-sub {
-  margin: 4px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 10.5px;
-  line-height: 1.65;
+  line-height: 1.6;
 }
 
 .planner-body {
-  padding: 12px 16px 4px;
+  padding: 14px 18px;
+}
+
+/* 弹窗里的输入框比右栏检查器松一档：8/10 内边距、11.5px 字、7px 圆角。 */
+.planner-body .field {
+  margin-bottom: 12px;
+}
+
+.planner-body .field-label {
+  margin-bottom: 5px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+.planner-body .field input,
+.planner-body .field textarea,
+.planner-body .field select {
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 11.5px;
+}
+
+.planner-body .field textarea {
+  min-height: 72px;
+  resize: none;
+}
+
+.planner-body .hint.small {
+  margin: 0;
+  font-size: 9.5px;
+}
+
+/* 两列字段：静态稿里「项目目录 / 规划模型」并排，窄屏自动落回单列。 */
+.pc-row {
+  display: flex;
+  gap: 10px;
+}
+
+.pc-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.readonly-field {
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--panel-2) 55%, transparent);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .planner-foot {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  padding: 10px 16px 14px;
+  padding: 12px 18px 16px;
   border-top: 1px solid var(--border);
-  margin-top: 8px;
+  background: var(--panel-2);
+}
+
+.planner-foot .grow {
+  flex: 1;
+}
+
+/* 底部按钮同高：`primary-btn` 默认 width:100%，在 flex 里会被拉长，
+   和旁边的「取消」凑成一高一矮。高度取静态稿的 30px。 */
+.planner-foot .primary-btn,
+.planner-foot .ghost-btn {
+  width: auto;
+  height: 30px;
+  padding: 0 14px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* 项目目录是下拉框：原生箭头在深浅主题下不一致，换成自绘的。 */
+.planner-body .field select.project-select {
+  appearance: none;
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%238a8f98' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 9px 6px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.link-btn {
+  margin-top: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
 }
 
 /* ---------- 运行 ---------- */

@@ -292,10 +292,45 @@ const plannerOpen = ref(false)
 const plannerGoal = ref('')
 const plannerProject = ref('')
 const plannerMax = ref(6)
+/** 目录不在已归档的项目里时，退回手输（新克隆的仓库还没被扫到）。 */
+const plannerCustomProject = ref(false)
+
+const CUSTOM_PROJECT = '__custom__'
+
+/** 太长的工作区路径塞不进行宽 440 的弹窗，保留末尾两级就够认。 */
+function shortPath(path: string): string {
+  return path.length <= 44 ? path : `…${path.slice(-43)}`
+}
+
+const projectChoices = computed(() => {
+  const seen = new Set<string>()
+  const list: { value: string; label: string }[] = []
+  for (const item of props.projects) {
+    const value = item.worktree?.trim()
+    if (!value || seen.has(value)) continue
+    seen.add(value)
+    list.push({
+      value,
+      label: item.name ? `${item.name} · ${shortPath(value)}` : shortPath(value),
+    })
+  }
+  return list
+})
+
+function onProjectPick(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value
+  if (value !== CUSTOM_PROJECT) return
+  plannerCustomProject.value = true
+  plannerProject.value = ''
+}
 
 function openPlanner(): void {
   plannerGoal.value = plan.value?.goal ?? ''
-  plannerProject.value = plan.value?.project || defaultProject.value
+  const project = plan.value?.project || defaultProject.value
+  plannerProject.value = project
+  // 计划的目录可能已经不在归档里（手输过 / 项目被移走）：这时直接给输入框，
+  // 而不是让用户对着一个"选中第一项"的下拉框猜当前用的是哪个目录。
+  plannerCustomProject.value = !projectChoices.value.some(choice => choice.value === project)
   plannerOpen.value = true
 }
 
@@ -1038,26 +1073,62 @@ defineExpose({ reload: () => loadPlans(true) })
             <span class="field-label">目标</span>
             <textarea v-model="plannerGoal" rows="4" placeholder="给设置页加自动更新：检查 / 下载进度 / 重启安装" />
           </label>
-          <label class="field">
+          <div class="field">
             <span class="field-label">项目目录</span>
-            <input v-model="plannerProject" :placeholder="defaultProject || '/path/to/project'" spellcheck="false" />
-          </label>
-          <label class="field">
-            <span class="field-label">节点上限 <em>2–24，默认 6</em></span>
-            <input v-model.number="plannerMax" type="number" min="2" max="24" />
-          </label>
+            <select
+              v-if="projectChoices.length && !plannerCustomProject"
+              :value="plannerProject"
+              class="project-select"
+              @change="onProjectPick"
+            >
+              <option
+                v-for="choice in projectChoices"
+                :key="choice.value"
+                :value="choice.value"
+              >
+                {{ choice.label }}
+              </option>
+              <option :value="CUSTOM_PROJECT">手动输入路径…</option>
+            </select>
+            <template v-else>
+              <input
+                v-model="plannerProject"
+                :placeholder="defaultProject || '/path/to/project'"
+                spellcheck="false"
+              />
+              <button
+                v-if="projectChoices.length"
+                type="button"
+                class="link-btn"
+                @click="plannerCustomProject = false"
+              >
+                从已归档的项目里选
+              </button>
+            </template>
+          </div>
+          <div class="pc-row">
+            <label class="field">
+              <span class="field-label">节点上限 <em>2–24</em></span>
+              <input v-model.number="plannerMax" type="number" min="2" max="24" />
+            </label>
+            <div class="field">
+              <span class="field-label">候选 Agent</span>
+              <div class="readonly-field">{{ agents.length }} 个 · 内置 + 自定义</div>
+            </div>
+          </div>
           <p class="hint small">
-            用的是设置里「原生引擎」选中的模型服务。没配置会直接在这里报错。
+            规划用的是设置里「原生引擎」的当前模型；没配置会在这里直接报错。
           </p>
         </div>
         <div class="planner-foot">
+          <span class="grow" />
           <button class="ghost-btn" @click="plannerOpen = false">取消</button>
           <button
             class="primary-btn compact"
             :disabled="planning || !plannerGoal.trim()"
             @click="runPlanner"
           >
-            {{ planning ? '规划中…' : '生成草案' }}
+            {{ planning ? '规划中…' : '生成 DAG 草案' }}
           </button>
         </div>
       </div>

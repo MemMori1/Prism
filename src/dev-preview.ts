@@ -91,11 +91,15 @@ const dagAction = params.get('dag')
 if (dagAction) {
   window.setTimeout(() => {
     if (dagAction === 'planner') {
-      ;(document.querySelector('.pane-foot .primary-btn') as HTMLElement | null)?.click()
+      // 空状态与左栏底部各有一个入口，按文字找更稳（不依赖它是第几个按钮）。
+      const button = Array.from(document.querySelectorAll<HTMLElement>('button')).find(
+        item => item.textContent?.trim() === '发起需求分析',
+      )
+      button?.click()
       return
     }
     ;(document.querySelector('.primary-btn.run') as HTMLElement | null)?.click()
-  }, 1400)
+  }, 2000)
 }
 
 /** 截图用：?workshop=plugins 切到工坊的插件清单。 */
