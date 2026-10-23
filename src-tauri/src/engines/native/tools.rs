@@ -175,6 +175,9 @@ pub enum Risk {
     Write,
     /// 会执行任意代码 / 命令。
     Exec,
+    /// 会在远端页面上操作（点击 / 输入）：本地磁盘没动，但会改变远端状态。
+    /// 浏览器工具用这一档——它不是「只读浏览」，也不该冒充「执行命令」。
+    Act,
     /// 主动攻击类（POC 执行、爆破、提权）。**默认不发给任何 Agent**。
     /// 本期没有任何工具标这一档：位置先留着，接 POC 验证时才有地方写。
     #[allow(dead_code)]
@@ -187,6 +190,7 @@ impl Risk {
             Risk::Read => "read",
             Risk::Write => "write",
             Risk::Exec => "exec",
+            Risk::Act => "act",
             Risk::Attack => "attack",
         }
     }
@@ -767,6 +771,7 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
         // 制品工具（只在 DAG 作用域里出现）与安全研究线的本机工具。
         list.extend(super::artifact_tools::tools());
         list.extend(super::web::tools());
+        list.extend(super::browser_tools::tools());
         list.extend(super::forensics::tools());
         list.extend(super::analysis::tools());
         list.extend(super::dag_tools::tools());

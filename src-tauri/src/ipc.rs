@@ -1303,6 +1303,33 @@ pub async fn open_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 用系统默认浏览器打开一个 http(s) 地址。
+///
+/// 内嵌浏览器（`browser.rs`）建不出来时的退路：能看的还是能看，只是不在面板里。
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|error| format!("地址不合法：{error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("只支持 http(s) 地址".to_string());
+    }
+    let target = parsed.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        let opened = std::process::Command::new("open").arg(&target).spawn();
+        #[cfg(target_os = "windows")]
+        let opened = std::process::Command::new("cmd")
+            .args(["/C", "start", "", &target])
+            .spawn();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let opened = std::process::Command::new("xdg-open").arg(&target).spawn();
+        opened
+            .map(|_| ())
+            .map_err(|cause| format!("打开系统浏览器失败：{cause}"))
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
 /// 上下文明细：系统提示 / 工具 / 对话各占多少字符（原生引擎才有）。
 #[tauri::command]
 pub async fn context_stats(
@@ -1916,4 +1943,53 @@ pub fn plugin_set_enabled(
         }
     }
     kernel::set_enabled(&id, enabled)
+}
+
+// ---------------------------------------------------------------- 面板浏览器
+//
+// 一块挂在主窗口上的真 webview（见 `browser.rs`）。前端负责把内容区矩形报上来、
+// 在浮层出现时藏起来；Agent 的 `web.*` 工具复用同一块页面。
+
+/// 打开 / 切换地址（不存在就先创建那块 webview）。
+#[tauri::command]
+pub async fn browser_open(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<crate::browser::BrowserSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::browser::open(&app, &url))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 同步位置与尺寸（逻辑像素，相对窗口客户区）。
+#[tauri::command]
+pub async fn browser_bounds(
+    app: tauri::AppHandle,
+    bounds: crate::browser::Bounds,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::browser::set_bounds(&app, bounds))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 显示 / 隐藏。原生视图会盖住 DOM，弹窗出现时必须隐藏。
+#[tauri::command]
+pub async fn browser_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::browser::set_visible(&app, visible))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 后退 / 前进 / 刷新。
+#[tauri::command]
+pub async fn browser_history(app: tauri::AppHandle, direction: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::browser::history(&app, &direction))
+        .await
+        .map_err(|cause| cause.to_string())?
+}
+
+/// 当前状态（面板挂载时用它对齐，不必等事件）。
+#[tauri::command]
+pub fn browser_state() -> crate::browser::BrowserSnapshot {
+    crate::browser::snapshot()
 }

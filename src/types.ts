@@ -150,6 +150,15 @@ export interface ArtifactData {
   base64?: string
 }
 
+/** 面板浏览器的状态（`browser.state` 事件与控制命令的返回值）。 */
+export interface BrowserSnapshot {
+  url: string
+  title: string
+  loading: boolean
+  /** webview 是否已创建。 */
+  open: boolean
+}
+
 /** 单个会话的增补信息（星标 / 标签 / 自定义标题 / 已关闭）。 */
 export interface SessionAnnotation {
   title?: string

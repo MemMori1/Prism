@@ -318,6 +318,7 @@ const RISK_LABEL: Record<string, string> = {
   read: '只读',
   write: '可写',
   exec: '执行命令',
+  act: '远端操作',
   attack: '主动探测',
 }
 

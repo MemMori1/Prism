@@ -8,7 +8,12 @@ function tab(id: string, kind: PaneTab['kind']): PaneTab {
 
 describe('PANE_LABEL', () => {
   it('每种标签都有自己的名字', () => {
-    expect(PANE_LABEL).toEqual({ empty: '新标签页', files: '文件', term: '终端' })
+    expect(PANE_LABEL).toEqual({
+      empty: '新标签页',
+      files: '文件',
+      term: '终端',
+      web: '浏览器',
+    })
   })
 })
 
@@ -24,6 +29,12 @@ describe('pickTab', () => {
     const tabs = [tab('a', 'files'), tab('b', 'term')]
     expect(pickTab(tabs, 'b', 'files', 'c').tabId).toBe('a')
     expect(pickTab(tabs, 'b', 'term', 'c').tabId).toBe('b')
+  })
+
+  it('浏览器标签也能复用（不会开第二个浏览器）', () => {
+    const tabs = [tab('a', 'files'), tab('b', 'web')]
+    expect(pickTab(tabs, 'a', 'web', 'c').tabId).toBe('b')
+    expect(pickTab(tabs, 'a', 'web', 'c').tabs).toHaveLength(2)
   })
 
   it('没有同类型的就新建一个', () => {

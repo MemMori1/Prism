@@ -6,6 +6,7 @@ import type {
   AssetFile,
   AssetItem,
   BackgroundTask,
+  BrowserSnapshot,
   ChangeReport,
   ContextStats,
   CreatedSession,
@@ -131,6 +132,16 @@ export const api = {
     }),
   tagCreate: (name: string, color: string) =>
     invoke<AnnotationStore>('tag_create', { name, color }),
+  /** 面板浏览器：打开地址 / 同步矩形 / 显隐 / 导航 / 读状态。 */
+  browserOpen: (url: string) => invoke<BrowserSnapshot>('browser_open', { url }),
+  browserBounds: (bounds: { x: number; y: number; width: number; height: number }) =>
+    invoke<void>('browser_bounds', { bounds }),
+  browserVisible: (visible: boolean) => invoke<void>('browser_visible', { visible }),
+  browserHistory: (direction: 'back' | 'forward' | 'reload') =>
+    invoke<void>('browser_history', { direction }),
+  browserState: () => invoke<BrowserSnapshot>('browser_state'),
+  /** 用系统默认浏览器打开一个 http(s) 地址（内嵌浏览器不可用时的退路）。 */
+  openUrl: (url: string) => invoke<void>('open_url', { url }),
   /** 批量关闭 / 恢复会话（只写增补表，引擎数据不动）。 */
   annotationsSetHidden: (sessionIds: string[], hidden: boolean) =>
     invoke<AnnotationStore>('annotations_set_hidden', { sessionIds, hidden }),

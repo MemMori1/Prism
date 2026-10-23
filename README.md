@@ -18,7 +18,7 @@ Tauri 2 + Vue 3 + Rust 桌面应用（macOS / Windows x64）。引擎原始数�
 
 - **归档**：项目 / 会话 / 时间线三栏。diff、工具卡完整输入输出、权限卡、LaTeX、沙箱 HTML 都能看；每轮 token 与成本、上下文用量条。攒下来的空会话（没有任何 token 记录、也没加星标）可以在列表底部**一键关掉**，也随时一键恢复——只写 Prism 自己的增补表，引擎的会话数据一个字节不动。
 - **工作台**：多列并排盯多个会话，发送 / 插话 / 停止 / 审批都在列内；列宽可拖、布局持久化。
-- **面板**：侧边抽屉里开多个标签页（文件 / 终端，以后可加网页）。空标签页选入口，标签可拖动排序、多了横向滚；文件页能看变更 diff、预览、直接编辑保存。
+- **面板**：侧边抽屉里开多个标签页（文件 / 终端 / 浏览器）。空标签页选入口，标签可拖动排序、多了横向滚；文件页能看变更 diff、预览、直接编辑保存；浏览器页是一块**真 webview**（JS 渲染、登录态都在），地址栏能输入、能后退刷新，切走或弹窗时自动让位。设计与边界见 [docs/PANEL_BROWSER.md](docs/PANEL_BROWSER.md)。
 - **后台任务**：`run_command background=true` 立刻返回任务 id，进程进输入框上方的任务坞继续跑；可停止（整组 SIGTERM → SIGKILL）/ 重跑 / 在终端里看。
 - **赛马**：同一问题广播给 1–4 个会话同时跑，答案 / 用时 / token / 成本并排对比。
 - **搜索**：本地 FTS5 trigram 索引，中文子串即查即中。
@@ -58,6 +58,7 @@ DeepSeek Harness 走官方 ACP（`dsh --profile acp`，stdio JSON-RPC）：Prism
 | `task_status` | 查本会话的后台任务 / 看尾部输出 / 停止 |
 | `tools.list` | 自省：列出此刻真正能调用的工具（已按权限档、作用域、开关过滤）与被挡住的原因 |
 | `fetch` | 抓网页查文档 / CVE：只 GET + http(s)，默认 20s 超时、2 万字符上限，HTML 抽成正文（去脚本 / 样式 / 注释），标注最终 URL / 状态码 / 类型 / 大小 / 耗时 |
+| `browser.open` / `browser.read` / `browser.act` | 面板浏览器的三个动作：打开地址、读渲染后的正文与前 30 个链接、点按钮 / 填表单 / 前进后退 / 等元素。和用户在面板里看到的是同一页；`act` 标 `act` 风险档（会改远端状态） |
 | `task` | 子代理：隔离上下文跑子任务（`explore` 只读 / `general` 全开），只带回报告 |
 | `bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract` / `bin.pack.detect` | 样本静态预处理：格式与架构、三哈希、ASCII/UTF-16 字符串与可疑标记、加壳识别（38 条规则 + 节表结构信号 + 熵） |
 | `bin.json.jq` / `bin.xref.search` / `bin.importexport.list` / `bin.crypto.scan` / `bin.diff` | 静态分析：JSON 路径取值、交叉引用、导入导出表与高危 API、密码常量、两样本差异 |
@@ -66,6 +67,10 @@ DeepSeek Harness 走官方 ACP（`dsh --profile acp`，stdio JSON-RPC）：Prism
 
 `bin.*` 全部是纯 Rust 实现、只读、不出网、不依赖外部程序——装好就能用。需要 Ghidra / 沙箱的工具还没接，
 调用时会明确报「未接入」，不会返回空结果假装成功。
+
+`browser.*` 驱动的是面板里那块真 webview：需要 JS 渲染、登录态或点按钮时才用它，
+只读查文档仍优先 `fetch`（更快、有上限、不带登录态）。`browser.*` 不委派给子代理——
+一块浏览器只能有一个司机（见 [docs/PANEL_BROWSER.md](docs/PANEL_BROWSER.md)）。
 
 `fetch` 是唯一主动出站的工具，所以刻意做了两处收口：设置页里能单独关掉（悬停卡片会写「会出网」，关掉等于断网），
 安全研究线的七个工种白名单里一个都没给它——样本目录里的内容不可信，模型读到一个 URL 就能把本机信息带出去。
@@ -126,7 +131,8 @@ src-tauri/src/       Rust 后端；ipc.rs 命令入口，engines/{opencode,codex
 - Claude Code 只有历史浏览，运行轴等本机 CLI。
 - 搜索索引目前只覆盖 OpenCode 归档。
 - 原生 Agent 的审批按**动作**放行（写文件 / 改文件 / 跑命令），读类与 `fetch` 不弹卡；不支持图片输入。
-- `fetch` 只做 GET：需要 POST、下载文件、登录态或 JS 渲染的页面，改用 `run_command` 自己来。
+- `fetch` 只做 GET：需要 POST、下载文件、登录态或 JS 渲染的页面，改用面板浏览器或 `run_command`。
+- 面板浏览器依赖 Tauri 的子 webview（`unstable`）：拿不到就退化成「用系统浏览器打开」。没有截图、多标签与按会话隔离；Windows 上子视图的定位仍受 WebView2 限制。
 - 「关闭空会话」只作用于归档的会话列表：工作台里已打开的列、搜索结果不受影响（数据本来就没删）。
 - 外部引擎执行器（dsh / codex / opencode）只管「开会话 → 发消息 → 收正文」：工具策略与权限档由各引擎自己的配置决定，Prism 不接管；节点里弹审批时没人点，超时（30 分钟）会打断并报超时。
 - 定时任务需要 Prism 进程在跑（关窗只是隐藏窗口）。

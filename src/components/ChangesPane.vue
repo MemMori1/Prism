@@ -14,11 +14,13 @@ import type { PaneKind, PaneTab } from '../paneTabs'
 import { activeTaskCount } from '../tasks'
 import FilePane from './FilePane.vue'
 import TerminalPane from './TerminalPane.vue'
+import WebPane from './WebPane.vue'
 
 /** 外部（会话头 / 任务坞 / 聊天里的路径）要让侧栏打开什么。 */
 export type PaneIntent =
   | { kind: 'files'; path?: string | null }
   | { kind: 'term'; taskId?: string | null; newTask?: boolean }
+  | { kind: 'web'; url?: string | null }
 
 const props = defineProps<{
   /** 会话的工作目录；null＝文件页没东西可列。 */
@@ -144,12 +146,13 @@ function removeTab(id: string): void {
   activeId.value = next.activeId
 }
 
-/** 空标签里选「打开文件 / 打开终端」：就地替换这个标签的内容。 */
-function choose(kind: 'files' | 'term'): void {
+/** 空标签里选「打开文件 / 终端 / 浏览器」：就地替换这个标签的内容。 */
+function choose(kind: 'files' | 'term' | 'web'): void {
   const tab = active.value
   if (!tab) return
   tab.kind = kind
   tab.title = null
+  // 浏览器标签第一次打开时先把页面显示出来（地址栏空着等输入）。
 }
 
 function openFiles(path: string | null): void {
@@ -189,12 +192,28 @@ watch(
   },
 )
 
+function openWeb(url: string | null): void {
+  seq += 1
+  const picked = pickTab(tabs.value, activeId.value, 'web', `pane-${seq}`)
+  tabs.value = picked.tabs
+  const tab = tabs.value.find(item => item.id === picked.tabId)
+  if (!tab) return
+  tab.kind = 'web'
+  if (url) {
+    tab.url = url
+    tab.title = null
+  }
+  activeId.value = tab.id
+  revealTab()
+}
+
 watch(
   () => [props.intentTick ?? 0, props.intent] as const,
   () => {
     const intent = props.intent
     if (!intent) return
     if (intent.kind === 'files') openFiles(intent.path ?? null)
+    else if (intent.kind === 'web') openWeb(intent.url ?? null)
     else openTerminal(intent.taskId ?? null, intent.newTask === true)
   },
   { immediate: true },
@@ -273,6 +292,10 @@ onBeforeUnmount(() => {
               <rect x="3.2" y="4.5" width="17.6" height="15" rx="2" />
               <path d="m7.4 9.4 2.6 2.6-2.6 2.6M12.6 14.8h4" />
             </template>
+            <template v-else-if="tab.kind === 'web'">
+              <circle cx="12" cy="12" r="8.4" />
+              <path d="M3.6 12h16.8M12 3.6c2.2 2.5 3.3 5.4 3.3 8.4S14.2 18 12 20.4C9.8 18 8.7 15 8.7 12S9.8 6.1 12 3.6Z" />
+            </template>
             <template v-else>
               <!-- 空标签页用虚线方框：和右边那个「＋」按钮区分开，别让人以为也是按钮 -->
               <rect x="4.2" y="4.2" width="15.6" height="15.6" rx="3.4" stroke-dasharray="3 2.4" />
@@ -342,6 +365,17 @@ onBeforeUnmount(() => {
               <span class="pane-choice-name">打开终端</span>
               <span class="pane-choice-sub">跑后台任务，看完整输出，随时停止或重跑。</span>
             </button>
+
+            <button class="pane-choice" @click="choose('web')">
+              <span class="pane-choice-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="8.4" />
+                  <path d="M3.6 12h16.8M12 3.6c2.2 2.5 3.3 5.4 3.3 8.4S14.2 18 12 20.4C9.8 18 8.7 15 8.7 12S9.8 6.1 12 3.6Z" />
+                </svg>
+              </span>
+              <span class="pane-choice-name">打开浏览器</span>
+              <span class="pane-choice-sub">真 webview：JS 渲染、登录态都在，Agent 也能用。</span>
+            </button>
           </div>
 
           <p class="pane-empty-foot">
@@ -356,6 +390,13 @@ onBeforeUnmount(() => {
           :initial-path="tab.path"
           @title="tab.title = $event"
           @close="emit('close')"
+        />
+
+        <WebPane
+          v-else-if="tab.kind === 'web'"
+          :active="tab.id === activeId"
+          :initial-url="tab.url"
+          @title="tab.title = $event"
         />
 
         <TerminalPane

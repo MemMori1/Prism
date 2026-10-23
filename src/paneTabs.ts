@@ -6,7 +6,7 @@
  */
 
 /** 标签里装什么。`empty` = 刚点「＋」建出来、还没选内容。 */
-export type PaneKind = 'empty' | 'files' | 'term'
+export type PaneKind = 'empty' | 'files' | 'term' | 'web'
 
 export interface PaneTab {
   id: string
@@ -17,7 +17,9 @@ export interface PaneTab {
   taskId: string | null
   /** term：新建表单的触发计数，涨一次开一次表单。 */
   newTaskTick: number
-  /** 标签上显示的细名字（文件名 / 任务命令）；null = 用类型名。 */
+  /** web：这个标签想打开的地址（外部意图带进来的）；null = 沿用浏览器当前页。 */
+  url: string | null
+  /** 标签上显示的细名字（文件名 / 任务命令 / 网页标题）；null = 用类型名。 */
   title: string | null
 }
 
@@ -26,10 +28,11 @@ export const PANE_LABEL: Record<PaneKind, string> = {
   empty: '新标签页',
   files: '文件',
   term: '终端',
+  web: '浏览器',
 }
 
 export function makeTab(id: string, kind: PaneKind): PaneTab {
-  return { id, kind, path: null, taskId: null, newTaskTick: 0, title: null }
+  return { id, kind, path: null, taskId: null, newTaskTick: 0, url: null, title: null }
 }
 
 /**

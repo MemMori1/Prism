@@ -15,7 +15,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # devtools：让 release 构建也能开合开发者工具（debug 构建默认就有）。
 # 不想让线上包暴露调试入口的话，去掉这个特性即可——F12/按钮在 release 下会静默失效。
-tauri = { version = "2", features = ["tray-icon", "image-png", "devtools"] }
+# unstable：面板浏览器要把子 webview 挂进主窗口（`Window::add_child`），这块
+# 目前在 Tauri 里还标着 unstable。风险收在 `browser.rs` 一个模块里：
+# 创建失败就报错并回落到「用系统浏览器打开」，不会连累其它功能。
+tauri = { version = "2", features = ["tray-icon", "image-png", "devtools", "unstable"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

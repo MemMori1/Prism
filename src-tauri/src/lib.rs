@@ -1,6 +1,7 @@
 mod agents;
 mod annotations;
 mod artifact;
+mod browser;
 mod catalog;
 mod changes;
 mod dag;
@@ -89,6 +90,12 @@ pub fn run() {
             ipc::annotations_get,
             ipc::annotation_update,
             ipc::annotations_set_hidden,
+            ipc::browser_open,
+            ipc::browser_bounds,
+            ipc::browser_visible,
+            ipc::browser_history,
+            ipc::browser_state,
+            ipc::open_url,
             ipc::tag_create,
             ipc::tag_update,
             ipc::tag_delete,

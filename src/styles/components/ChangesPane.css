@@ -329,6 +329,9 @@
 
 .pane-choices {
   display: flex;
+  /* 三个入口（文件 / 终端 / 浏览器）：窄窗口时换行，别挤出抽屉。 */
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 14px;
 }
 

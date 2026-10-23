@@ -1267,6 +1267,18 @@ index 1a2b3c4..5d6e7f8 100644
       }
       return JSON.parse(JSON.stringify(annotationStore))
     }
+    case 'browser_state':
+      // 预览里没有真 webview：地址栏照常能输入，但页面不会渲染。
+      return { url: '', title: '', loading: false, open: false }
+    case 'browser_open': {
+      const url = String(args.url ?? '')
+      return { url, title: url, loading: false, open: false }
+    }
+    case 'browser_bounds':
+    case 'browser_visible':
+    case 'browser_history':
+    case 'open_url':
+      return null
     case 'git_info_batch':
       return {}
     case 'git_branches':

@@ -799,6 +799,7 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 16%, transparent);
 }
 
+.tool-chip-dot.risk-act,
 .tool-chip-dot.risk-exec,
 .tool-chip-dot.risk-attack {
   background: var(--red);
