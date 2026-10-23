@@ -1523,6 +1523,23 @@
   text-transform: uppercase;
 }
 
+/* 带操作的一行标题：左边「产出」，右边预览/原文与复制。
+   操作按钮要退回正常字号与大小写，别继承标题的 9.5px 大写。 */
+.run-steps-title.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-title-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 .run-steps {
   margin-bottom: 10px;
 }
@@ -1573,6 +1590,38 @@
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   background: var(--panel-2);
   color: var(--muted);
+}
+
+/* 按 markdown 读产出时：底色/滚动沿用上面那块区域，但排成正文——
+   等宽字体和 pre 的强制换行会让报告读起来像日志。 */
+.run-pre.md,
+.artifact-pre.md {
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  white-space: normal;
+  word-break: normal;
+}
+
+/* 右栏只有三百多宽，报告里的标题按正文尺寸缩一档，别一格一个大字。 */
+.run-pre.md h1,
+.run-pre.md h2 {
+  font-size: 13px;
+}
+
+.run-pre.md h3,
+.run-pre.md h4 {
+  font-size: 12px;
+}
+
+.artifact-pre.md h1,
+.artifact-pre.md h2 {
+  font-size: 15px;
+}
+
+.artifact-pre.md h3,
+.artifact-pre.md h4 {
+  font-size: 13px;
 }
 
 /* ---- 制品 ---- */
@@ -1657,6 +1706,14 @@
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px 8px;
+}
+
+/* 标题右边的动作：预览/原文、复制全文、关闭。 */
+.artifact-head-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
 }
 
 .artifact-title {

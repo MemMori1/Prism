@@ -816,7 +816,23 @@ function stepRun(): void {
     if (node.status !== 'running') continue
     node.status = 'succeeded'
     node.finishedAt = Date.now()
-    node.output = `（预览假数据）${node.title} 完成。\n\n- 读了 3 个文件\n- 改了 1 个文件\n\n结论：链路已接上，剩下的是收尾。`
+    node.output = [
+      `## ${node.title}`,
+      '',
+      '（预览假数据）这一节点跑完了：读 3 个文件、改 1 个。',
+      '',
+      '- 入口：`src/App.vue`',
+      '- 改动：`src/components/DagPane.vue`',
+      '',
+      '```ts',
+      'const html = renderMarkdown(report)',
+      '```',
+      '',
+      '| 项目 | 值 |',
+      '| --- | --- |',
+      '| 轮次 | 6 |',
+      '| 用时 | 2m14s |',
+    ].join('\n')
     node.steps = FAKE_STEPS[node.id] ?? ['read_file src/App.vue']
     // 每个成功节点都落一份制品：面板上能看见 key / 大小 / 哈希 / 引用。
     node.artifact = makeArtifact(run.planId, node.id, node.id === 'research' ? 'report' : 'report', node.output)

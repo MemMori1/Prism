@@ -7,6 +7,7 @@ import { NODE_H, NODE_W, edgePath, withOverrides } from '../dagLayout'
 import { executorBadge, permissionLabel, workspaceLabel } from '../agents'
 import { basename, formatBytes, formatDuration, formatTokens } from '../format'
 import { useBackdropDismiss } from '../dialogDismiss'
+import { renderMarkdown } from '../markdown'
 import SelectMenu from './SelectMenu.vue'
 import {
   isLive,
@@ -227,12 +228,23 @@ const livePre = ref<HTMLElement | null>(null)
 const artifactPreview = ref<{ ref: ArtifactRef; text: string; truncated: boolean } | null>(null)
 const artifactBusy = ref(false)
 
+/**
+ * 产出的看法：节点写的是 markdown，默认按渲染稿读（标题、列表、代码块、表格都在）；
+ * 要抠字、贴到别处时切「原文」。两个视图各记各的，切节点不会互相打回默认。
+ */
+const outputView = ref<'preview' | 'raw'>('preview')
+const artifactView = ref<'preview' | 'raw'>('preview')
+
+/** 制品能不能当 markdown 看：只有纯文本可以，json / 图片 / 二进制照旧原文。 */
+const artifactIsText = computed(() => artifactPreview.value?.ref.kind === 'text')
+
 async function openArtifact(ref: ArtifactRef): Promise<void> {
   if (!plan.value) return
   artifactBusy.value = true
   try {
     const data = await api.dagArtifactGet(plan.value.id, ref.id, 40_000)
     artifactPreview.value = { ref: data.artifact, text: data.text, truncated: data.truncated }
+    artifactView.value = 'preview'
   } catch (error) {
     // 取不到就明说：制品可能被手动清掉了，不要留一个空白弹层。
     artifactPreview.value = {
@@ -240,13 +252,24 @@ async function openArtifact(ref: ArtifactRef): Promise<void> {
       text: `读取失败：${String(error)}`,
       truncated: false,
     }
+    artifactView.value = 'raw'
   } finally {
     artifactBusy.value = false
   }
 }
 
-function copyText(text: string): void {
+/** 刚复制过的那个按钮；1.4 秒后复原——不然点了像没反应，会重复点。 */
+const copiedKey = ref('')
+let copiedTimer = 0
+
+function copyText(text: string, key = 'copy'): void {
   void navigator.clipboard?.writeText(text)
+  copiedKey.value = key
+  if (copiedTimer) window.clearTimeout(copiedTimer)
+  copiedTimer = window.setTimeout(() => {
+    copiedKey.value = ''
+    copiedTimer = 0
+  }, 1400)
 }
 
 const live = computed(() => isLive(run.value))
@@ -971,6 +994,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onPlannerEscape)
+  if (copiedTimer) {
+    window.clearTimeout(copiedTimer)
+    copiedTimer = 0
+  }
   if (plannerHoldTimer) {
     window.clearTimeout(plannerHoldTimer)
     plannerHoldTimer = 0
@@ -1501,7 +1528,12 @@ defineExpose({ reload: () => loadPlans(true) })
                   >
                     {{ artifactBusy ? '读取中…' : '查看全文' }}
                   </button>
-                  <button class="ghost-btn tiny" @click="copyText(selectedRun.artifact.id)">复制 id</button>
+                  <button
+                    class="ghost-btn tiny"
+                    @click="copyText(selectedRun.artifact.id, 'artifact-id')"
+                  >
+                    {{ copiedKey === 'artifact-id' ? '已复制' : '复制 id' }}
+                  </button>
                   <span v-if="selectedRun.artifact.parentId" class="art-parent mono">
                     派生自 {{ selectedRun.artifact.parentId }}
                   </span>
@@ -1515,8 +1547,31 @@ defineExpose({ reload: () => loadPlans(true) })
               </div>
 
               <div v-if="selectedRun.output" class="run-output">
-                <div class="run-steps-title">产出</div>
-                <pre class="run-pre">{{ selectedRun.output }}</pre>
+                <div class="run-steps-title row">
+                  <span>产出</span>
+                  <span class="run-title-actions">
+                    <button
+                      class="ghost-btn tiny"
+                      :title="outputView === 'preview' ? '看 markdown 原文' : '看渲染后的效果'"
+                      @click="outputView = outputView === 'preview' ? 'raw' : 'preview'"
+                    >
+                      {{ outputView === 'preview' ? '原文' : '预览' }}
+                    </button>
+                    <button
+                      class="ghost-btn tiny"
+                      title="复制这份报告的 markdown 原文"
+                      @click="copyText(selectedRun.output, 'output')"
+                    >
+                      {{ copiedKey === 'output' ? '已复制' : '复制' }}
+                    </button>
+                  </span>
+                </div>
+                <div
+                  v-if="outputView === 'preview'"
+                  class="run-pre md"
+                  v-html="renderMarkdown(selectedRun.output)"
+                ></div>
+                <pre v-else class="run-pre">{{ selectedRun.output }}</pre>
               </div>
               <p v-else-if="selectedRun.status === 'running'" class="hint small">正在跑，产出会陆续出现。</p>
             </template>
@@ -1546,12 +1601,33 @@ defineExpose({ reload: () => loadPlans(true) })
             <div class="planner-kicker">制品 · {{ artifactPreview.ref.key }}</div>
             <div class="artifact-title">{{ artifactPreview.ref.name }}</div>
           </div>
-          <button class="ghost-btn" @click="artifactPreview = null">关闭</button>
+          <div class="artifact-head-actions">
+            <button
+              v-if="artifactIsText"
+              class="ghost-btn tiny"
+              :title="artifactView === 'preview' ? '看原文' : '看渲染后的效果'"
+              @click="artifactView = artifactView === 'preview' ? 'raw' : 'preview'"
+            >
+              {{ artifactView === 'preview' ? '原文' : '预览' }}
+            </button>
+            <button
+              class="ghost-btn tiny"
+              @click="copyText(artifactPreview.text, 'artifact')"
+            >
+              {{ copiedKey === 'artifact' ? '已复制' : '复制全文' }}
+            </button>
+            <button class="ghost-btn" @click="artifactPreview = null">关闭</button>
+          </div>
         </div>
         <div class="artifact-meta mono">
           {{ formatBytes(artifactPreview.ref.size) }} · sha256 {{ artifactPreview.ref.sha256 }}
         </div>
-        <pre class="artifact-pre">{{ artifactPreview.text }}</pre>
+        <div
+          v-if="artifactIsText && artifactView === 'preview'"
+          class="artifact-pre md"
+          v-html="renderMarkdown(artifactPreview.text)"
+        ></div>
+        <pre v-else class="artifact-pre">{{ artifactPreview.text }}</pre>
         <div v-if="artifactPreview.truncated" class="artifact-note">
           只显示前 4 万字符：全文在 <code>~/.prism/artifacts/</code> 下，按 id 可以继续取。
         </div>
