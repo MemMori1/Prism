@@ -1393,6 +1393,22 @@ pub async fn annotation_update(
     .map_err(|cause| cause.to_string())?
 }
 
+/// 批量关闭 / 恢复会话（只写 Prism 的增补表，引擎数据不动）。
+#[tauri::command]
+pub async fn annotations_set_hidden(
+    session_ids: Vec<String>,
+    hidden: bool,
+) -> Result<AnnotationStore, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        annotations::mutate(|store| {
+            annotations::set_hidden(store, &session_ids, hidden);
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|cause| cause.to_string())?
+}
+
 /// 新建标签。
 #[tauri::command]
 pub async fn tag_create(name: String, color: String) -> Result<AnnotationStore, String> {

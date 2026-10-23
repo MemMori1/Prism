@@ -131,6 +131,9 @@ export const api = {
     }),
   tagCreate: (name: string, color: string) =>
     invoke<AnnotationStore>('tag_create', { name, color }),
+  /** 批量关闭 / 恢复会话（只写增补表，引擎数据不动）。 */
+  annotationsSetHidden: (sessionIds: string[], hidden: boolean) =>
+    invoke<AnnotationStore>('annotations_set_hidden', { sessionIds, hidden }),
   tagUpdate: (id: string, patch: { name?: string; color?: string }) =>
     invoke<AnnotationStore>('tag_update', {
       id,

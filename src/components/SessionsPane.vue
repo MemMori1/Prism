@@ -2,9 +2,18 @@
 import { computed, onMounted, ref } from 'vue'
 import type { ProjectItem, SessionSummary } from '../types'
 import { basename, formatTokens, relativeTime } from '../format'
-import { ensureAnnotations, isStarred, setStar, tagsOf, titleOf } from '../annotations'
+import {
+  ensureAnnotations,
+  isHidden,
+  isStarred,
+  setHidden,
+  setStar,
+  tagsOf,
+  titleOf,
+} from '../annotations'
 import SelectMenu from './SelectMenu.vue'
 import {
+  blankSessionIds,
   filterSessionsByRange,
   rangeToSince,
   sortSessions,
@@ -72,12 +81,55 @@ const newButtonTitle = computed(() => {
 
 const visibleSessions = computed(() =>
   sortSessions(
-    filterSessionsByRange(props.sessions, rangeToSince(rangeKey.value, Date.now())).filter(
-      session => !starOnly.value || isStarred(session.id),
-    ),
+    filterSessionsByRange(
+      // 先摘掉「已关闭」的，再按时间范围与星标筛：这样底部那条数字与列表一致。
+      props.sessions.filter(session => !isHidden(session.id)),
+      rangeToSince(rangeKey.value, Date.now()),
+    ).filter(session => !starOnly.value || isStarred(session.id)),
     sortKey.value,
   ),
 )
+
+/** 能一键关掉的空会话：跟当前时间范围同一口径（星标的不算、已关的不再关）。 */
+const blankIds = computed(() =>
+  blankSessionIds(
+    filterSessionsByRange(props.sessions, rangeToSince(rangeKey.value, Date.now())),
+    isHidden,
+    isStarred,
+  ),
+)
+
+/** 当前项目里被关掉的会话（给「恢复」用）。 */
+const hiddenCount = computed(() => props.sessions.filter(item => isHidden(item.id)).length)
+
+const closing = ref(false)
+
+async function closeBlanks(): Promise<void> {
+  const ids = blankIds.value
+  if (!ids.length || closing.value) return
+  closing.value = true
+  try {
+    await setHidden(ids, true)
+  } catch (cause) {
+    console.error('[prism] 关闭空会话失败', cause)
+  } finally {
+    closing.value = false
+  }
+}
+
+/** 恢复这个项目里所有被关掉的会话；只动显示，数据一直在。 */
+async function restoreHidden(): Promise<void> {
+  const ids = props.sessions.filter(item => isHidden(item.id)).map(item => item.id)
+  if (!ids.length || closing.value) return
+  closing.value = true
+  try {
+    await setHidden(ids, false)
+  } catch (cause) {
+    console.error('[prism] 恢复会话失败', cause)
+  } finally {
+    closing.value = false
+  }
+}
 
 function shortModel(model: string | null): string {
   if (!model) return ''
@@ -137,6 +189,9 @@ function shortModel(model: string | null): string {
       <div v-if="!project" class="pane-empty">从左侧选择一个项目</div>
       <div v-else-if="loading && !sessions.length" class="pane-empty">加载中…</div>
       <div v-else-if="!sessions.length" class="pane-empty">这个项目还没有会话</div>
+      <div v-else-if="!visibleSessions.length && hiddenCount" class="pane-empty">
+        这个项目的会话都关掉了（{{ hiddenCount }} 个）——下方面板可以恢复。
+      </div>
       <div v-else-if="!visibleSessions.length" class="pane-empty">
         {{ starOnly ? '还没有星标会话' : '该时间范围内没有会话' }}
       </div>
@@ -176,6 +231,33 @@ function shortModel(model: string | null): string {
             ↑{{ formatTokens(session.tokensOutput) }}
           </span>
         </span>
+      </button>
+    </div>
+
+    <!-- 空会话：一键收起 / 一键恢复。关掉只影响这张列表，引擎数据一个字节没动。 -->
+    <div v-if="blankIds.length || hiddenCount" class="blank-bar">
+      <span class="blank-text" :title="`这个项目共有 ${hiddenCount} 个会话被关掉`">
+        <template v-if="blankIds.length">{{ blankIds.length }} 个空会话</template>
+        <template v-if="blankIds.length && hiddenCount"> · </template>
+        <template v-if="hiddenCount">已关闭 {{ hiddenCount }} 个</template>
+      </span>
+      <button
+        v-if="hiddenCount"
+        class="blank-btn"
+        :disabled="closing"
+        title="把这个项目里关掉的会话重新列出来"
+        @click="restoreHidden"
+      >
+        恢复
+      </button>
+      <button
+        v-if="blankIds.length"
+        class="blank-btn primary"
+        :disabled="closing"
+        title="把没有 token 记录、也没加星标的会话从这个列表里收起来；不删数据，随时能恢复"
+        @click="closeBlanks"
+      >
+        {{ closing ? '…' : '关闭空会话' }}
       </button>
     </div>
   </aside>

@@ -60,6 +60,26 @@ export function tagIdsOf(sessionId: string): string[] {
   return annotationFor(sessionId)?.tags ?? []
 }
 
+/** 这个会话是不是被「关闭」了（从列表里收起来）。 */
+export function isHidden(sessionId: string): boolean {
+  return annotationFor(sessionId)?.hidden ?? false
+}
+
+/**
+ * 批量关闭 / 恢复会话，返回真正改了状态的条数。
+ *
+ * 只写 Prism 的增补表：引擎的会话数据是只读的，所以这里不删任何东西，
+ * 关掉只是列表里看不见，恢复随时可以。
+ */
+export async function setHidden(sessionIds: string[], hidden: boolean): Promise<number> {
+  const ids = sessionIds.filter(Boolean)
+  if (!ids.length) return 0
+  const changed = ids.filter(id => isHidden(id) !== hidden).length
+  if (!changed) return 0
+  await apply(api.annotationsSetHidden(ids, hidden))
+  return changed
+}
+
 /** 某会话的标签（保序；已删标签自动消失）。 */
 export function tagsOf(sessionId: string): TagDef[] {
   const ids = tagIdsOf(sessionId)

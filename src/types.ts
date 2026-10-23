@@ -150,11 +150,13 @@ export interface ArtifactData {
   base64?: string
 }
 
-/** 单个会话的增补信息（星标 / 标签 / 自定义标题）。 */
+/** 单个会话的增补信息（星标 / 标签 / 自定义标题 / 已关闭）。 */
 export interface SessionAnnotation {
   title?: string
   starred: boolean
   tags: string[]
+  /** 从归档列表里收起来了（只影响 Prism 的列表，引擎数据没删）。 */
+  hidden?: boolean
   updatedAt?: number
 }
 

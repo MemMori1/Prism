@@ -54,6 +54,23 @@ function summary(
   }
 }
 
+/** 空会话：建出来没跑过，token 与成本都是零——列表底部会提示可以一键关掉。 */
+function blankSummary(
+  engine: string,
+  id: string,
+  projectId: string,
+  ageMs: number,
+  directory: string,
+): SessionSummary {
+  return {
+    ...summary(engine, id, projectId, '新建会话', ageMs, directory),
+    cost: 0,
+    tokensInput: 0,
+    tokensOutput: 0,
+    tokensReasoning: 0,
+  }
+}
+
 const NATIVE_DIR = '/Users/example/hsbg-helper'
 const PRISM_DIR = '/Users/example/prism'
 
@@ -255,6 +272,9 @@ const store: Record<string, SessionSummary[]> = {
   [`native:${NATIVE_DIR}`]: [
     summary('native', 'native:n1', `native:${NATIVE_DIR}`, '修 README 的安装步骤', 3 * MIN, NATIVE_DIR),
     summary('native', 'native:n2', `native:${NATIVE_DIR}`, '顶部导航', 20 * MIN, NATIVE_DIR),
+    // 两个空会话：预览里用来验「一键关闭空会话」那条收拾条与恢复。
+    blankSummary('native', 'native:b1', `native:${NATIVE_DIR}`, 45 * MIN, NATIVE_DIR),
+    blankSummary('native', 'native:b2', `native:${NATIVE_DIR}`, 70 * MIN, NATIVE_DIR),
   ],
   [`opencode:${NATIVE_DIR}`]: [
     summary('opencode', 'oc1', `opencode:${NATIVE_DIR}`, '加个导出按钮', 6 * MIN, NATIVE_DIR),
@@ -579,7 +599,10 @@ if (scene === 'legacy') {
 const annotationStore: {
   version: number
   tags: Array<Record<string, unknown>>
-  sessions: Record<string, { title: string | null; starred: boolean; tags: string[] }>
+  sessions: Record<
+    string,
+    { title: string | null; starred: boolean; tags: string[]; hidden?: boolean }
+  >
 } = { version: 1, tags: [], sessions: {} }
 
 
@@ -1230,6 +1253,18 @@ index 1a2b3c4..5d6e7f8 100644
       if (args.title !== null && args.title !== undefined) entry.title = String(args.title)
       if (args.starred !== null && args.starred !== undefined) entry.starred = Boolean(args.starred)
       if (args.tags !== null && args.tags !== undefined) entry.tags = args.tags as string[]
+      return JSON.parse(JSON.stringify(annotationStore))
+    }
+    case 'annotation_set_hidden': {
+      // 归档里的「关闭空会话 / 恢复」走这里：只改 hidden 标记。
+      const ids = (args.sessionIds ?? []) as string[]
+      const hidden = Boolean(args.hidden)
+      for (const id of ids) {
+        const entry =
+          annotationStore.sessions[id] ??
+          (annotationStore.sessions[id] = { title: null, starred: false, tags: [] })
+        entry.hidden = hidden
+      }
       return JSON.parse(JSON.stringify(annotationStore))
     }
     case 'git_info_batch':

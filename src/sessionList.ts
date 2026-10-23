@@ -52,3 +52,32 @@ export function filterSessionsByRange(
   if (since === null) return sessions
   return sessions.filter(session => session.timeUpdated >= since)
 }
+
+/**
+ * 「空会话」：建出来之后一次都没真正跑过。
+ *
+ * 判据只看 token 与成本——列表里用户能看见的就是这两个数字，看到 `↓0 ↑0`
+ * 的那些行，点「关闭空会话」时预期关掉的就是它们。不猜标题（引擎会自己
+ * 起名，新建就有标题），也不去读时间线（那是几十次 IO，为了一个开关不值）。
+ */
+export function isBlankSession(session: SessionSummary): boolean {
+  return (
+    session.tokensInput <= 0 &&
+    session.tokensOutput <= 0 &&
+    session.tokensReasoning <= 0 &&
+    session.cost <= 0
+  )
+}
+
+/** 从会话列表里摘出空会话的 id（已关闭的、加过星标的不算）。 */
+export function blankSessionIds(
+  sessions: SessionSummary[],
+  isHidden: (id: string) => boolean,
+  isStarred: (id: string) => boolean,
+): string[] {
+  return sessions
+    .filter(session => isBlankSession(session))
+    // 星标是「我要留着」的明确表态，不参与折叠；已关闭的不必再关一次。
+    .filter(session => !isHidden(session.id) && !isStarred(session.id))
+    .map(session => session.id)
+}

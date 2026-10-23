@@ -88,6 +88,7 @@ pub fn run() {
             ipc::read_artifact,
             ipc::annotations_get,
             ipc::annotation_update,
+            ipc::annotations_set_hidden,
             ipc::tag_create,
             ipc::tag_update,
             ipc::tag_delete,

@@ -26,6 +26,12 @@ pub struct SessionAnnotation {
     pub starred: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// 「已关闭」：从归档列表里收起来。
+    ///
+    /// 只写 Prism 自己的增补表——引擎的会话数据一律只读，这里不做删除，
+    /// 所以关掉之后随时能恢复。
+    #[serde(default)]
+    pub hidden: bool,
     #[serde(default)]
     pub updated_at: i64,
 }
@@ -33,7 +39,7 @@ pub struct SessionAnnotation {
 impl SessionAnnotation {
     /// 没有任何增补内容时视为空（不落盘）。
     fn is_empty(&self) -> bool {
-        self.title.is_none() && !self.starred && self.tags.is_empty()
+        self.title.is_none() && !self.starred && self.tags.is_empty() && !self.hidden
     }
 }
 
@@ -169,8 +175,40 @@ pub fn update_session(
     Ok(())
 }
 
-fn normalize_color(color: &str) -> Result<String, String> {
-    let value = color.trim().to_ascii_lowercase();
+/// 批量设置「已关闭」（隐藏）标记。
+///
+/// 一次写盘处理一批：归档里攒下几十个空会话时，逐个调 `update_session`
+/// 会产生几十次读改写，没必要。返回真正改了状态的条数。
+pub fn set_hidden(store: &mut AnnotationStore, session_ids: &[String], hidden: bool) -> usize {
+    let mut changed = 0;
+    for raw in session_ids {
+        let id = raw.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if hidden {
+            let entry = store.sessions.entry(id.to_string()).or_default();
+            if !entry.hidden {
+                entry.hidden = true;
+                entry.updated_at = now_ms();
+                changed += 1;
+            }
+        } else if let Some(entry) = store.sessions.get_mut(id) {
+            if entry.hidden {
+                entry.hidden = false;
+                entry.updated_at = now_ms();
+                changed += 1;
+            }
+        }
+    }
+    // 恢复之后如果这条记录只剩一个 hidden=false，就没有留着的意义了。
+    if !hidden {
+        store.sessions.retain(|_, entry| !entry.is_empty());
+    }
+    changed
+}
+
+fn normalize_color(color: &str) -> Result<String, String> {    let value = color.trim().to_ascii_lowercase();
     let valid = value.len() == 7
         && value.starts_with('#')
         && value[1..].chars().all(|ch| ch.is_ascii_hexdigit());
@@ -366,9 +404,54 @@ mod tests {
         assert_eq!(store.sessions["s2"].tags, vec![b]);
     }
 
+    /// 一键关闭空会话：只动 hidden 标记，星标与标题不丢；恢复之后如果这条
+    /// 记录本来就只有 hidden，就整条清掉（不留空壳）。
     #[test]
-    fn unknown_tag_ids_are_dropped() {
+    fn hiding_sessions_keeps_other_fields_and_clears_on_restore() {
         let mut store = AnnotationStore::default();
+        update_session(&mut store, "s-blank", None, None, None).expect("空记录");
+        update_session(&mut store, "s-star", None, Some(true), None).expect("星标");
+        assert!(!store.sessions.contains_key("s-blank"), "没内容不落盘");
+
+        let ids = vec!["s-blank".to_string(), "s-star".to_string(), "  ".to_string()];
+        assert_eq!(set_hidden(&mut store, &ids, true), 2, "空白 id 跳过");
+        assert!(store.sessions["s-blank"].hidden);
+        assert!(store.sessions["s-star"].hidden);
+        assert!(store.sessions["s-star"].starred, "隐藏不该动星标");
+
+        // 再关一次不算改动（否则按钮的反馈会一直说「改了 N 个」）。
+        assert_eq!(set_hidden(&mut store, &ids, true), 0);
+
+        set_hidden(&mut store, &ids, false);
+        assert!(!store.sessions.contains_key("s-blank"), "只剩 hidden 的记录恢复后清掉");
+        assert!(!store.sessions["s-star"].hidden);
+        assert!(store.sessions["s-star"].starred);
+        assert!(store.sessions.contains_key("s-star"), "有星标的记录要留着");
+    }
+
+    /// 恢复只影响传进来的那些：别把没点到的空会话一起放出来。
+    #[test]
+    fn restore_only_touches_given_ids() {
+        let mut store = AnnotationStore::default();
+        set_hidden(&mut store, &["a".into(), "b".into()], true);
+        set_hidden(&mut store, &["a".into()], false);
+        assert!(!store.sessions.contains_key("a"));
+        assert!(store.sessions["b"].hidden, "没点到的保持关闭");
+    }
+
+    #[test]
+    fn hidden_flag_survives_round_trip() {
+        let path = temp_path("hidden");
+        let mut store = AnnotationStore::default();
+        set_hidden(&mut store, &["opencode:ses_9".into()], true);
+        save(&path, &store).expect("保存");
+        let loaded = load(&path);
+        assert!(loaded.sessions["opencode:ses_9"].hidden);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unknown_tag_ids_are_dropped() {        let mut store = AnnotationStore::default();
         update_session(
             &mut store,
             "s1",

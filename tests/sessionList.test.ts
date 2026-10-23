@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { filterSessionsByRange, rangeToSince, sortSessions } from '../src/sessionList'
+import {
+  blankSessionIds,
+  filterSessionsByRange,
+  isBlankSession,
+  rangeToSince,
+  sortSessions,
+} from '../src/sessionList'
 import type { SessionSummary } from '../src/types'
 
 function makeSession(partial: Partial<SessionSummary> & { id: string }): SessionSummary {
@@ -77,5 +83,46 @@ describe('filterSessionsByRange', () => {
 
   it('按更新时间的下限过滤', () => {
     expect(filterSessionsByRange(sessions, 200).map(s => s.id)).toEqual(['new'])
+  })
+})
+
+describe('isBlankSession', () => {
+  it('没有任何 token 与成本 = 空会话', () => {
+    expect(isBlankSession(makeSession({ id: 'blank' }))).toBe(true)
+  })
+
+  it('有任意一路 token 就不算空', () => {
+    expect(isBlankSession(makeSession({ id: 'a', tokensInput: 1 }))).toBe(false)
+    expect(isBlankSession(makeSession({ id: 'b', tokensOutput: 1 }))).toBe(false)
+    expect(isBlankSession(makeSession({ id: 'c', tokensReasoning: 1 }))).toBe(false)
+  })
+
+  it('有成本也不算空（引擎只记了钱没记 token 的情况）', () => {
+    expect(isBlankSession(makeSession({ id: 'paid', cost: 0.0001 }))).toBe(false)
+  })
+})
+
+describe('blankSessionIds', () => {
+  const sessions = [
+    makeSession({ id: 'blank-1' }),
+    makeSession({ id: 'blank-2' }),
+    makeSession({ id: 'used', tokensInput: 800 }),
+    makeSession({ id: 'starred-blank' }),
+    makeSession({ id: 'closed-blank' }),
+  ]
+  const hidden = (id: string) => id === 'closed-blank'
+  const starred = (id: string) => id === 'starred-blank'
+
+  it('只收空会话，且排除已关闭与星标', () => {
+    expect(blankSessionIds(sessions, hidden, starred)).toEqual(['blank-1', 'blank-2'])
+  })
+
+  it('星标是「我要留着」的表态，不参与一键关闭', () => {
+    // 上面那条已经证明被排除了；这里单独再钉一次，防止有人把过滤条件删掉。
+    expect(blankSessionIds([sessions[3]], hidden, starred)).toEqual([])
+  })
+
+  it('没有可关的就返回空数组', () => {
+    expect(blankSessionIds([sessions[2]], hidden, starred)).toEqual([])
   })
 })
