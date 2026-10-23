@@ -1278,10 +1278,12 @@ pub async fn workshop_read(path: String) -> Result<workshop::AssetFile, String> 
     let target = path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (content, truncated) = workshop::read_text(Path::new(&target), 200_000)?;
+        let findings = native::guard::scan_text(&content);
         Ok(workshop::AssetFile {
             path: target,
             content,
             truncated,
+            findings,
         })
     })
     .await

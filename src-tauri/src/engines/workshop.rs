@@ -48,6 +48,12 @@ pub struct AssetFile {
     pub path: String,
     pub content: String,
     pub truncated: bool,
+    /// 内容检测结果（提示词注入 / 危险命令 / 外传意图）。
+    ///
+    /// 技能与命令是**外部内容**——写的人不受我们约束，所以在展示之前先过一遍
+    /// 规则（规则本体在 `native::guard`，与命令闸门共用同一套）。
+    #[serde(default)]
+    pub findings: Vec<crate::engines::native::guard::Hit>,
 }
 
 /// 命令层装配的引擎根集合。

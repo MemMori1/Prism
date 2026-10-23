@@ -90,6 +90,15 @@ const visibleItems = computed(() => {
 
 const isMarkdown = computed(() => selected.value?.path.toLowerCase().endsWith('.md') ?? false)
 
+/**
+ * 内容检测结果：技能 / 命令是外部内容，写的人不受我们约束。
+ * 有 block 就标成「已拦下」的语气，只有 ask 就标「需要留意」。
+ */
+const findings = computed(() => fileContent.value?.findings ?? [])
+const scanLevel = computed(() =>
+  findings.value.some(item => item.level === 'block') ? 'block' : 'ask',
+)
+
 const previewHtml = computed(() => {
   const file = fileContent.value
   return file ? renderMarkdown(file.content) : ''
@@ -583,6 +592,23 @@ onMounted(load)
           <p v-if="fileLoading" class="hint">读取中…</p>
           <p v-else-if="fileError" class="hint error">{{ fileError }}</p>
           <template v-else-if="fileContent">
+            <div v-if="findings.length" class="scan-card" :class="`is-${scanLevel}`">
+              <div class="scan-head">
+                <span class="scan-tag">{{ scanLevel === 'block' ? '有危险内容' : '需要留意' }}</span>
+                <span class="scan-title">
+                  检测到 {{ findings.length }} 条：这份内容来自外部，用之前先看清
+                </span>
+              </div>
+              <ul class="scan-list">
+                <li v-for="(item, index) in findings.slice(0, 5)" :key="index">
+                  <span class="scan-rule mono">{{ item.rule }}</span>
+                  <span class="scan-detail">{{ item.detail }}</span>
+                </li>
+              </ul>
+              <p v-if="findings.length > 5" class="scan-more">
+                还有 {{ findings.length - 5 }} 条，同类问题通常成串出现
+              </p>
+            </div>
             <div v-if="isMarkdown" class="md" v-html="previewHtml" />
             <pre v-else class="raw">{{ fileContent.content }}</pre>
             <p v-if="fileContent.truncated" class="hint">

@@ -21,6 +21,7 @@ Tauri 2 + Vue 3 + Rust 桌面应用（macOS / Windows x64）。引擎原始数�
 - **面板**：侧边抽屉里开多个标签页（文件 / 终端 / 浏览器）。空标签页选入口，标签可拖动排序、多了横向滚；文件页能看变更 diff、预览、直接编辑保存；浏览器页是一块**真 webview**（JS 渲染、登录态都在），地址栏能输入、能后退刷新，切走或弹窗时自动让位；新开时先给一页起始页，列着**最近打开的页面与文件**，点一下就回去。设计与边界见 [docs/PANEL_BROWSER.md](docs/PANEL_BROWSER.md)。
 - **图片输入**：输入框里直接粘贴截图、拖进来或点「图片」选文件，发出去前显示成缩略图 chip（悬停看大图，× 移除）。图片落盘到会话目录，时间线里能看到原图（点开交给系统看图程序）。只在 Prism 原生引擎、且该模型在「设置 → 模型服务」里打开了「图片」开关时可用。
 - **压缩上下文**：原生会话里输入 `/compact`（可附一句要求，例如 `/compact 只留 API 契约与待办`）——历史按 4 万字符分段压成一份「交接摘要」，然后**重写会话文件**：下一次请求真的少发几万字符，而不是挂个标记假装省了。原文先备份成 `messages.jsonl.bak`；整个过程就发生在会话时间轴上——「会话压缩已开始 · 12 条消息 · 41203 字符」→ 可展开的摘要卡 → 「会话压缩已结束 · 41203 → 1830 字符」，进度显示在最后那条 live 块里（第 2/3 段），取消则补一行「会话压缩已取消」。这三行是 `role = system`，不发给模型、不花 token；一轮还在跑时不能压缩（会明确拒绝，不排队）。设计见 [docs/COMPACT.md](docs/COMPACT.md)。
+- **脚本运行时**：`run_script` 在**自己的环境**里跑模型写的脚本（python / node / sh / powershell）——脚本落在 `~/.prism/sandbox/`，子进程只拿到白名单环境变量（密钥一律不带），macOS 上套 seatbelt：只能写工作目录与临时目录、个人目录连读都挡、网络默认关；申请不到沙箱会**降级并明说**，不假装隔离。删除走 `trash`（移进 `~/.prism/trash/`，带 manifest 可找回）；`rm -rf ~`、格式化磁盘、`curl … | sh`、读 `~/.ssh/id_rsa` 这些先被拦下或要你点头。设计见 [docs/RUNTIME_SANDBOX.md](docs/RUNTIME_SANDBOX.md)。
 - **后台任务**：`run_command background=true` 立刻返回任务 id，进程进输入框上方的任务坞继续跑；可停止（整组 SIGTERM → SIGKILL）/ 重跑 / 在终端里看。
 - **赛马**：同一问题广播给 1–4 个会话同时跑，答案 / 用时 / token / 成本并排对比。
 - **搜索**：本地 FTS5 trigram 索引，中文子串即查即中。
@@ -56,7 +57,9 @@ DeepSeek Harness 走官方 ACP（`dsh --profile acp`，stdio JSON-RPC）：Prism
 |---|---|
 | `read_file` / `list_files` / `grep` | 读文件、列目录、正则搜（都被限制在工作目录内） |
 | `write_file` / `edit_file` | 整文件写、按片段替换，同样只允许工作目录内 |
-| `run_command` | 跑命令，默认 120s 超时；`background: true` 转后台任务 |
+| `run_command` | 跑命令，默认 120s 超时；`background: true` 转后台任务。**执行前过闸门**：`rm -rf ~` / 格式化 / 删受保护目录直接拒，提权与 `curl \| sh` 要审批 |
+| `run_script` | 在受控环境里跑一段脚本（python / node / sh / powershell）：脚本落 `~/.prism/sandbox/`、环境变量白名单、macOS seatbelt（写入限工作目录与临时目录、禁网）、默认 60s 超时 |
+| `trash` | 删除走回收站：移到 `~/.prism/trash/<时间戳>/` 并写 `manifest.json`，一次最多 10 项 |
 | `task_status` | 查本会话的后台任务 / 看尾部输出 / 停止 |
 | `tools.list` | 自省：列出此刻真正能调用的工具（已按权限档、作用域、开关过滤）与被挡住的原因 |
 | `fetch` | 抓网页查文档 / CVE：只 GET + http(s)，默认 20s 超时、2 万字符上限，HTML 抽成正文（去脚本 / 样式 / 注释），标注最终 URL / 状态码 / 类型 / 大小 / 耗时 |
@@ -135,6 +138,8 @@ src-tauri/src/       Rust 后端；ipc.rs 命令入口，engines/{opencode,codex
 - 原生 Agent 的审批按**动作**放行（写文件 / 改文件 / 跑命令），读类与 `fetch` 不弹卡；不支持图片输入。
 - 图片只支持原生引擎，且要模型自己开了「图片」开关（模型服务卡片上的小标签）；执行中不能排队图片（排队只存文字）。
 - `/compact` 是有损的：原文只留在 `messages.jsonl.bak`（只存最近一次），会话里从此只有摘要；摘要写歪了就把那个文件换回去再重压一次。
+- **沙箱只在 macOS 是真的**：Windows 没有 `sandbox-exec` 等价物，只有策略层（命令检测 + 受保护路径 + 环境清洗），结果头会明写「无 OS 级隔离」。
+- 策略层是启发式，不是安全边界：`bash -c "$(echo … | base64 -d)"` 这类绕法能过。它的作用是拦住「顺手一删」，不是防定向攻击。
 - `fetch` 只做 GET：需要 POST、下载文件、登录态或 JS 渲染的页面，改用面板浏览器或 `run_command`。
 - 面板浏览器依赖 Tauri 的子 webview（`unstable`）：拿不到就退化成「用系统浏览器打开」。没有截图、多标签与按会话隔离；Windows 上子视图的定位仍受 WebView2 限制。
 - 「关闭空会话」只作用于归档的会话列表：工作台里已打开的列、搜索结果不受影响（数据本来就没删）。

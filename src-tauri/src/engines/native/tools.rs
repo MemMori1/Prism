@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 use super::store::StoredTokens;
+use super::{approval, guard, runtime};
 use crate::tasks::{SpawnRequest, TaskInfo, TasksState};
 
 /// 单次工具输出的字符上限（超出截断，避免一轮就把上下文撑爆）。
@@ -599,9 +600,53 @@ fn run_command_schema() -> Value {
                 "properties": {
                     "command": { "type": "string" },
                     "timeout_ms": { "type": "integer", "description": "前台执行的超时毫秒，默认 120000（background=true 时不生效）" },
-                    "background": { "type": "boolean", "description": "true = 转后台：立即返回，输出进任务坞 / 终端页，用 task_status 查" }
+                    "background": { "type": "boolean", "description": "true = 转后台：立即返回，输出进任务坞 / 终端页，用 task_status 查" },
+                    "dangerouslyDisableSandbox": { "type": "boolean", "description": "关掉（本来就没有的）沙箱限制。会单独弹一次审批；没有正当理由不要用" }
                 },
                 "required": ["command"]
+            }
+        }
+    })
+}
+
+fn run_script_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "run_script",
+            "description": "在受控环境里跑一段脚本（python / node / sh / powershell）。脚本落在 ~/.prism/sandbox/，子进程只拿到白名单环境变量（密钥一律不带），macOS 上套 seatbelt 沙箱：只能写工作目录与临时目录，个人目录不可读，网络默认关。一次性的分析、转格式、算哈希用它；要留下脚本文件就用 write_file。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": { "type": "string", "description": "python / node / sh / powershell" },
+                    "code": { "type": "string", "description": "脚本正文" },
+                    "purpose": { "type": "string", "description": "一句话说明这段脚本干什么（显示在审批卡上）" },
+                    "timeout_ms": { "type": "integer", "description": "超时毫秒，默认 60000，上限 600000" },
+                    "network": { "type": "boolean", "description": "允许联网。默认关；打开会单独弹审批" },
+                    "dangerouslyDisableSandbox": { "type": "boolean", "description": "关掉 OS 级沙箱（逐次审批）。没有正当理由不要用" }
+                },
+                "required": ["language", "code", "purpose"]
+            }
+        }
+    })
+}
+
+fn trash_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "trash",
+            "description": "把文件 / 目录移进 Prism 的回收站（~/.prism/trash/，带 manifest.json 可原样挪回），不是删除。删除任何东西都该走它；个人目录（桌面 / 下载 / 文稿）里的内容只能这样处理，直接 rm 会被拦下。一次最多 10 项。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "要回收的路径（相对工作目录或绝对路径，最多 10 个）"
+                    }
+                },
+                "required": ["paths"]
             }
         }
     })
@@ -730,6 +775,45 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
                     scope: ToolScope::Any,
                 },
                 run_run_command,
+            ),
+            builtin_full(
+                "run_script",
+                "跑脚本",
+                run_script_schema,
+                Permission::WriteWorkspace,
+                Some("run"),
+                Some("purpose"),
+                "跑脚本需要授权",
+                true,
+                // 会执行任意代码：风险档 exec；沙箱标 code（macOS 真隔离，Windows 只有策略层）。
+                ToolMeta {
+                    tags: &["exec", "script"],
+                    risk: Risk::Exec,
+                    // 默认断网，但 `network: true` 能打开（要单独审批）。
+                    // 声明成 Outbound 是为了让设置页如实提示「会出网」，而不是假装不能。
+                    network: Network::Outbound,
+                    sandbox: Some(Sandbox::Code),
+                    scope: ToolScope::Any,
+                },
+                run_run_script,
+            ),
+            builtin_full(
+                "trash",
+                "移入回收站",
+                trash_schema,
+                Permission::WriteWorkspace,
+                Some("edit"),
+                Some("paths"),
+                "移入回收站需要授权",
+                true,
+                ToolMeta {
+                    tags: &["fs"],
+                    risk: Risk::Write,
+                    network: Network::None,
+                    sandbox: None,
+                    scope: ToolScope::Any,
+                },
+                run_trash,
             ),
             builtin(
                 "task_status",
@@ -1047,16 +1131,136 @@ fn run_edit_file(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
 }
 
 fn run_run_command(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
-    let runtime = ctx.app.map(|app| ToolRuntime {
+    ToolResult::plain(run_command(ctx, args))
+}
+
+/// 额外审批：危险命令 / 关沙箱 / 联网，都要人点一次头。
+///
+/// 走的是与工具本身同一个审批闸门（`approval::gate`），所以「只读」档直接拒、
+/// 「完全访问」档直接放行——档位是用户的明确选择，这里不越权改它的语义。
+fn confirm(
+    ctx: &ToolContext<'_>,
+    action: &str,
+    resources: Vec<String>,
+    message: &str,
+) -> Result<(), String> {
+    let Some(app) = ctx.app else {
+        return Err(format!(
+            "{message}：这一步需要人工确认，但当前没有可用的审批通道（DAG / 子代理里请换个做法）"
+        ));
+    };
+    let mode = approval::parse(ctx.permission);
+    let verdict = approval::gate(
         app,
-        session_id: ctx.session_id,
-    });
-    ToolResult::plain(run_command(
-        Path::new(ctx.directory),
-        args,
+        ctx.session_id,
+        mode,
+        action,
+        resources,
+        message.to_string(),
+        ctx.call_id,
         ctx.should_stop,
-        runtime.as_ref(),
-    ))
+    );
+    match verdict {
+        approval::Verdict::Allow => Ok(()),
+        approval::Verdict::Deny(reason) => Err(reason),
+    }
+}
+
+fn run_run_script(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    let Some(language) = str_arg(args, "language") else {
+        return ToolResult::fail("缺少 language（python / node / sh / powershell）");
+    };
+    let Some(code) = args.get("code").and_then(Value::as_str) else {
+        return ToolResult::fail("缺少 code（脚本正文）");
+    };
+    let lang = match runtime::Lang::parse(language) {
+        Ok(lang) => lang,
+        Err(error) => return ToolResult::fail(error),
+    };
+    let purpose = str_arg(args, "purpose").unwrap_or("").trim().to_string();
+    let network = bool_arg(args, "network");
+    let disable = bool_arg(args, "dangerouslyDisableSandbox");
+
+    // 两个开关都要人点头：联网 = 数据可能出去；关沙箱 = 直接以你的身份跑。
+    if disable {
+        if let Err(reason) = confirm(
+            ctx,
+            "unsandbox",
+            vec![purpose.clone()],
+            "关掉沙箱跑脚本（以你的身份直接执行）",
+        ) {
+            return ToolResult::fail(reason);
+        }
+    }
+    if network {
+        if let Err(reason) = confirm(ctx, "network", vec![purpose.clone()], "允许脚本联网（数据可能出网）") {
+            return ToolResult::fail(reason);
+        }
+    }
+
+    let options = runtime::Options {
+        timeout_ms: int_arg(args, "timeout_ms").unwrap_or(60_000),
+        network,
+        disable_sandbox: disable,
+    };
+    match runtime::run(lang, code, Path::new(ctx.directory), &options, ctx.should_stop) {
+        Ok(outcome) => {
+            let mut text = outcome.text;
+            if outcome.timed_out {
+                text.push_str("\n提示：脚本超时了。拆小一点，或把长任务改成 run_command background=true。\n");
+            }
+            let meta = json!({
+                "sandbox": if outcome.isolated { "seatbelt" } else { "none" },
+                "exit": outcome.exit,
+                "timedOut": outcome.timed_out,
+            });
+            let body = if outcome.ok {
+                ToolOutcome::ok(text)
+            } else {
+                ToolOutcome::fail(text)
+            };
+            ToolResult {
+                outcome: body,
+                meta: Some(meta),
+                tokens: None,
+            }
+        }
+        Err(error) => ToolResult::fail(error),
+    }
+}
+
+fn run_trash(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    let list = args.get("paths").and_then(Value::as_array).cloned().unwrap_or_default();
+    if list.is_empty() {
+        return ToolResult::fail("缺少 paths（要回收的路径列表）");
+    }
+    let mut targets = Vec::new();
+    for item in &list {
+        let Some(raw) = item.as_str() else { continue };
+        match resolve(Path::new(ctx.directory), raw) {
+            Ok(path) => targets.push(path),
+            Err(error) => return ToolResult::fail(error),
+        }
+    }
+    if targets.is_empty() {
+        return ToolResult::fail("paths 里没有可用的路径");
+    }
+    match guard::trash(&targets) {
+        Ok(receipt) => {
+            let lines: Vec<String> = receipt
+                .items
+                .iter()
+                .map(|item| format!("{} → {}", item.from, item.to))
+                .collect();
+            ToolResult::plain(ToolOutcome::ok(format!(
+                "已移入回收站 {}（{} 项，可从 manifest.json 找回）：\n{}",
+                receipt.dir,
+                receipt.items.len(),
+                lines.join("\n")
+            )))
+        }
+        Err(error) => ToolResult::fail(error),
+    }
 }
 
 fn run_task_status(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
@@ -1454,9 +1658,19 @@ fn write_file(root: &Path, args: &Value) -> ToolOutcome {
             return ToolOutcome::fail(format!("创建目录失败：{error}"));
         }
     }
+    // 覆盖前先备份：手滑写掉一份文件，至少还能从 ~/.prism/backups/ 找回来。
+    // 只备份「有过内容」的普通文件，且不超过 5 MB——备份不该比正文还贵。
+    let mut backup_note = String::new();
+    if let Ok(meta) = std::fs::metadata(&target) {
+        if meta.is_file() && meta.len() > 0 && meta.len() <= 5 * 1024 * 1024 {
+            if let Ok(dir) = guard::backup(std::slice::from_ref(&target)) {
+                backup_note = format!("\n原件已备份到 {}", dir.display());
+            }
+        }
+    }
     match std::fs::write(&target, content) {
         Ok(()) => ToolOutcome::ok(format!(
-            "已写入 {}（{} 行）",
+            "已写入 {}（{} 行）{backup_note}",
             target.display(),
             content.lines().count()
         )),
@@ -1544,19 +1758,53 @@ fn edit_file(root: &Path, args: &Value) -> ToolOutcome {
     }
 }
 
-fn run_command(
-    root: &Path,
-    args: &Value,
-    should_stop: &dyn Fn() -> bool,
-    runtime: Option<&ToolRuntime<'_>>,
-) -> ToolOutcome {
+fn run_command(ctx: &ToolContext<'_>, args: &Value) -> ToolOutcome {
+    let root = Path::new(ctx.directory);
+    let should_stop = ctx.should_stop;
+    let runtime = ctx.app.map(|app| ToolRuntime {
+        app,
+        session_id: ctx.session_id,
+    });
     let Some(command) = str_arg(args, "command") else {
         return ToolOutcome::fail("缺少 command");
     };
+
+    // 闸门：先看这条命令要干什么，再决定要不要人点头。
+    // Block = 不可逆的破坏（删根目录、格式化磁盘）→ 直接拒并给替代做法；
+    // Ask = 危险但可能正当（提权、抓网执行、读凭据）→ 走审批，人点了才跑。
+    let report = guard::inspect(command, root);
+    match &report.verdict {
+        guard::Verdict::Block(_) => {
+            return ToolOutcome::fail(format!(
+                "{}。\n换个做法：要删东西用 trash 工具（可恢复）；要改受保护目录请在 Prism 外面自己动手。",
+                report.explain()
+            ))
+        }
+        guard::Verdict::Ask(_) => {
+            if let Err(denied) =
+                confirm(ctx, "danger", vec![command.to_string()], &report.explain())
+            {
+                return ToolOutcome::fail(denied);
+            }
+        }
+        guard::Verdict::Allow => {}
+    }
+    // 关沙箱是显式要求：命令级没有沙箱可关，但这句话本身要人点头，
+    // 免得模型把「危险命令 + 关沙箱」当默认组合。
+    if bool_arg(args, "dangerouslyDisableSandbox") {
+        if let Err(denied) = confirm(
+            ctx,
+            "unsandbox",
+            vec![command.to_string()],
+            "关掉沙箱执行命令（以你的身份直接跑）",
+        ) {
+            return ToolOutcome::fail(denied);
+        }
+    }
     // 后台模式：进 TasksState（和用户在终端页起的任务是同一条通道），立即返回。
     // 长命令不再占住这一轮，也不需要 120s 超时；进度由 task_status 查。
     if bool_arg(args, "background") {
-        return spawn_background_task(runtime, root, command);
+        return spawn_background_task(runtime.as_ref(), root, command);
     }
     let timeout = Duration::from_millis(
         int_arg(args, "timeout_ms")
@@ -1943,12 +2191,12 @@ mod tests {
         // 注册表现在连 `task`（子代理）一起给出——原来它是 agent 层单独 push 的，
         // 模型看到的清单没变，但"事实来源"只有一个。
         //
-        // 只比前 9 项：内置工具永远排在前面，后面可能跟着插件在别的用例里
+        // 只比前 11 项：内置工具永远排在前面，后面可能跟着插件在别的用例里
         // 注册进来的外部工具（注册表是进程级的，测试并行跑）。
         let names: Vec<String> = specs(&EnabledTools::all())
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str().map(str::to_string))
-            .take(9)
+            .take(11)
             .collect();
         assert_eq!(
             names,
@@ -1959,6 +2207,8 @@ mod tests {
                 "write_file",
                 "edit_file",
                 "run_command",
+                "run_script",
+                "trash",
                 "task_status",
                 "tools_list",
                 "task"

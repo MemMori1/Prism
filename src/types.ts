@@ -277,10 +277,19 @@ export interface AssetItem {
 }
 
 /** 资产入口文件内容（工坊右侧预览）。 */
+/** 内容检测的一条命中（技能 / 命令来自外部，展示前先扫一遍）。 */
+export interface AssetFinding {
+  level: 'block' | 'ask' | 'note'
+  rule: string
+  detail: string
+}
+
 export interface AssetFile {
   path: string
   content: string
   truncated: boolean
+  /** 提示词注入 / 危险命令 / 外传意图的检测结果（空数组 = 没命中）。 */
+  findings?: AssetFinding[]
 }
 
 /** MCP 服务（三引擎配置真相位置解析，只读）。 */

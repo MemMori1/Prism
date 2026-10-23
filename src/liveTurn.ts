@@ -69,7 +69,24 @@ function errorText(value: unknown): string | null {
 export function summarizeToolInput(input: unknown): string | null {
   if (!input || typeof input !== 'object') return null
   const record = input as Record<string, unknown>
-  const keys = ['command', 'filePath', 'path', 'pattern', 'query', 'url', 'description', 'task']
+  const keys = [
+    'command',
+    // 跑脚本的「用途」比脚本正文更适合当摘要（正文太长）。
+    'purpose',
+    'filePath',
+    'path',
+    'pattern',
+    'query',
+    'url',
+    'description',
+    'task',
+  ]
+  // `paths` 是数组（trash 工具）：拿第一条当摘要，别整段塞进标题。
+  const paths = record.paths
+  if (Array.isArray(paths) && typeof paths[0] === 'string' && paths[0].trim()) {
+    const first = paths[0].trim()
+    return paths.length > 1 ? `${first} 等 ${paths.length} 项` : first
+  }
   for (const key of keys) {
     const value = record[key]
     if (typeof value === 'string' && value.trim()) {

@@ -14,6 +14,11 @@ const ACTION_LABELS: Record<string, string> = {
   read: '读取文件',
   edit: '修改文件',
   external_directory: '访问外部目录',
+  // 原生引擎的两级闸门：run = 常规执行；危险 / 关沙箱 / 联网各要一次单独点头。
+  run: '运行命令',
+  danger: '危险命令',
+  unsandbox: '关闭沙箱',
+  network: '联网',
 }
 
 function asText(value: unknown): string | null {

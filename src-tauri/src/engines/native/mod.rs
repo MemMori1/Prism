@@ -8,6 +8,8 @@
 //! - `store`    会话与消息落盘（`~/.prism/native/sessions/<id>/`）
 //! - `provider` OpenAI 兼容的流式客户端（SSE 解析 + 增量拼装 + `/models` 拉取）
 //! - `tools`    内置工具（读写文件、列目录、检索、跑命令）
+//! - `guard`    命令闸门：受保护路径 / 危险命令 / 环境清洗 / 回收站 / 文本检测
+//! - `runtime`  脚本运行时：固定环境 + macOS seatbelt 隔离（Windows 走策略层）
 //! - `web`      出站抓取（`fetch`：只 GET、有超时与上限、HTML 抽正文）
 //! - `browser_tools` Agent 的浏览器（`browser.open/read/act`，操作面板里那块真 webview）
 //! - `artifact_tools` 制品读写（只在 DAG 节点作用域里出现）
@@ -28,7 +30,9 @@ pub mod context;
 pub mod dag_tools;
 pub mod engine;
 pub mod forensics;
+pub mod guard;
 pub mod provider;
+pub mod runtime;
 pub mod store;
 pub mod subagent;
 pub mod tools;

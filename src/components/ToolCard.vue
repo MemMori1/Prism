@@ -100,6 +100,8 @@ const statusInfo = computed(() => {
 /** 常见工具给一个小图标字符，未知工具用通用符号。 */
 const toolGlyph = computed(() => {
   const name = props.part.name.toLowerCase()
+  if (name.includes('script')) return '⚗'
+  if (name.includes('trash')) return '♻'
   if (name.includes('shell') || name.includes('exec') || name.includes('bash')) return '❯'
   if (name.includes('read')) return '◉'
   if (name.includes('edit') || name.includes('write') || name.includes('patch')) return '✎'
@@ -150,6 +152,17 @@ const primaryBlocks = computed<Array<{ label: string; text: string }>>(() => {
     case 'fetch':
       // 原生引擎的抓网页工具：摘要里已经有 URL，这里再给一行完整的。
       push('地址', source.url)
+      break
+    case 'run_script':
+      push('用途', source.purpose)
+      push('语言', source.language)
+      push('脚本', source.code)
+      break
+    case 'trash':
+      push(
+        '路径',
+        Array.isArray(source.paths) ? (source.paths as string[]).join('\n') : source.paths,
+      )
       break
     case 'skill':
       push('技能', source.id)

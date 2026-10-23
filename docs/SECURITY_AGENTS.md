@@ -2,7 +2,9 @@
 
 > 状态：**P0 / P0.5 / P1 / P1.5 已实现**（制品仓库、节点数据流、工具标签、
 > 7 个安全研究工种 + 编排规划、8 个 `bin.*` 分析工具、Planner 七工具）。
-> 未实现：P2（Ghidra 反编译）、P3（真实沙箱）、渗透线 `recon.*` / `exp.*`。
+> 未实现：P2（Ghidra 反编译）、渗透线 `recon.*` / `exp.*`。
+> P3 沙箱只做了第一层：命令与脚本在 macOS 上走 seatbelt（写入限工作目录、默认禁网），
+> Windows 目前只有策略层（命令检测 + 受保护路径 + 环境清洗），见 `docs/RUNTIME_SANDBOX.md`。
 > 详见 §0.1 与 `docs/ARTIFACTS.md`。
 > 关联 `docs/AGENTS.md`、`docs/DAG_PLANNER.md`、`docs/ARTIFACTS.md`。
 > 输入：逆向线 / 渗透线的 Agent 与工具清单（用户整理）。本文只做一件事——
@@ -37,7 +39,7 @@ Prism 现在是一套能跑起来的**软工编排底座**（Planner 拆图 → 
 UPX 节名定案与 `.adata` 弱特征不定案）；
 `vue-tsc --noEmit` 0 错误；`vitest` 376 passed。
 
-**仍未做**：P2 Ghidra（反编译、函数边界、xref 到函数级）、P3 真实沙箱、
+**仍未做**：P2 Ghidra（反编译、函数边界、xref 到函数级）、P3 的 Windows 侧隔离、
 渗透线 `recon.*` / `exp.*`、`bin.crypto.xor_brute` 的多字节版本。
 
 
