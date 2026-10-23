@@ -520,6 +520,18 @@ function seed(key: string, value: unknown) {
 
 localStorage.removeItem('prism-workbench-v1')
 localStorage.removeItem('prism-workspace-v1')
+
+// 「最近打开」的样张：面板里开浏览器时，起始页得有两列东西可看。
+seed('prism-recent-pages-v1', [
+  { url: 'https://doc.rust-lang.org/std/', title: 'std - Rust', at: Date.now() - 8 * MIN },
+  { url: 'https://tauri.app/start/', title: 'Tauri 2 · Getting Started', at: Date.now() - 52 * MIN },
+  { url: 'http://localhost:1521/dev-preview.html', title: 'Prism 预览', at: Date.now() - 190 * MIN },
+])
+seed('prism-recent-files-v1', [
+  { path: `${NATIVE_DIR}/src/components/DagPane.vue`, directory: NATIVE_DIR, at: Date.now() - 12 * MIN },
+  { path: `${NATIVE_DIR}/src-tauri/src/ipc.rs`, directory: NATIVE_DIR, at: Date.now() - 40 * MIN },
+  { path: `${PRISM_DIR}/docs/PANEL_BROWSER.md`, directory: PRISM_DIR, at: Date.now() - 95 * MIN },
+])
 localStorage.setItem('prism-view', scene === 'json' ? 'archive' : 'workbench')
 
 if (scene === 'legacy') {

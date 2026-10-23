@@ -1,5 +1,5 @@
 /* 面板浏览器：上面一条地址栏，下面是原生 webview 的地盘。
- * 那块区域里的 DOM 只在「没开页面 / 打开失败」时才看得见——页面一旦加载，
+ * 那块区域里的 DOM 只在「起始页 / 打开失败」时才看得见——页面一旦加载，
  * 原生视图会完整盖住它。 */
 
 .web-pane {
@@ -10,76 +10,243 @@
   background: var(--panel);
 }
 
+/* ---------- 地址栏 ---------- */
+
 .web-bar {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--panel-2);
 }
 
-.web-btn {
+/* 图标按钮：无边框、悬停才铺底色——边框一圈会让这条本来就窄的栏显得很吵。 */
+.web-icon {
   flex: none;
-  height: 22px;
-  min-width: 22px;
-  padding: 0 6px;
-  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
   border-radius: 5px;
-  background: var(--panel);
+  background: transparent;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1;
   cursor: pointer;
   transition:
-    color 0.12s ease,
-    border-color 0.12s ease;
+    background 0.12s ease,
+    color 0.12s ease;
 }
 
-.web-btn:hover:not(:disabled) {
+.web-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.web-icon:hover:not(:disabled) {
+  background: var(--hover);
   color: var(--text);
-  border-color: var(--border-strong);
 }
 
-.web-btn:disabled {
-  opacity: 0.45;
+.web-icon:disabled {
+  opacity: 0.35;
   cursor: default;
 }
 
-.web-btn.go {
-  min-width: 38px;
+/* 加载中让刷新图标自己转：比多一个进度条安静，但一样说明「在动」。 */
+.web-icon.spinning svg {
+  animation: web-spin 0.9s linear infinite;
 }
 
-.web-url {
+@keyframes web-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.web-address {
   flex: 1;
   min-width: 0;
-  height: 22px;
-  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  margin: 0 4px;
+  padding: 0 4px 0 8px;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--panel);
+  transition: border-color 0.12s ease;
+}
+
+.web-address:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.web-address-glyph {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--faint);
+}
+
+.web-address input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 11px;
+  line-height: 1;
 }
 
-.web-url:focus {
+.web-address input:focus {
   outline: none;
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
+
+.web-address input::placeholder {
+  color: var(--faint);
+}
+
+.web-go {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.web-go svg {
+  width: 14px;
+  height: 14px;
+}
+
+.web-go:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.web-go:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---------- 起始页 / 失败说明 ---------- */
 
 /* 原生 webview 的位置就是这块矩形：padding 也算在里面，所以这里不留白。 */
 .web-content {
   position: relative;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
 }
+
+.web-start {
+  max-width: 460px;
+  margin: 0 auto;
+  padding: 30px 20px 24px;
+}
+
+.web-start-title {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: center;
+}
+
+.web-start-sub {
+  margin: 0 0 22px;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.web-start-sub code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--code-bg);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.web-start-empty {
+  margin: 0;
+  color: var(--faint);
+  font-size: 11px;
+  text-align: center;
+}
+
+.web-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.web-recent-head {
+  margin: 0 0 4px;
+  padding: 0 8px;
+  color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.web-recent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.web-recent-row:hover {
+  background: var(--panel-2);
+}
+
+.web-recent-main {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 540;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.web-recent-meta {
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 失败 ---------- */
 
 .web-note {
   max-width: 380px;
-  margin: 48px auto 0;
+  margin: 40px auto 0;
   padding: 0 20px;
   text-align: center;
 }
@@ -91,35 +258,37 @@
   font-weight: 650;
 }
 
+.web-note.error .web-note-title {
+  color: var(--red);
+}
+
 .web-note-body {
   margin: 0;
   color: var(--faint);
   font-size: 11.5px;
   line-height: 1.7;
-}
-
-.web-note-body code {
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: var(--code-bg);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
-
-.web-note.error .web-note-title {
-  color: var(--red);
+  word-break: break-word;
 }
 
 .web-note-actions {
   display: flex;
   gap: 8px;
   justify-content: center;
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
-.web-hint {
-  margin: 10px 0 0;
-  color: var(--faint);
-  font-size: 10.5px;
-  text-align: center;
+.web-pill {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.web-pill:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
 }

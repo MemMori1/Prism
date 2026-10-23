@@ -18,6 +18,7 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
+import { rememberFile } from '../recent'
 import {
   buildFileTree,
   fileKindOf,
@@ -255,6 +256,8 @@ async function loadAllFiles() {
 async function loadDetail() {
   const directory = props.directory
   const file = active.value
+  // 「最近打开」只记用户真的点开过的文件（含 diff / 预览 / 编辑三种看法）。
+  if (directory && file) rememberFile(file.path, directory)
   if (!directory || !file) {
     diff.value = null
     text.value = null

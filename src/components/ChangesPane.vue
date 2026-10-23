@@ -396,7 +396,9 @@ onBeforeUnmount(() => {
           v-else-if="tab.kind === 'web'"
           :active="tab.id === activeId"
           :initial-url="tab.url"
+          :directory="directory"
           @title="tab.title = $event"
+          @open-file="openFiles"
         />
 
         <TerminalPane
