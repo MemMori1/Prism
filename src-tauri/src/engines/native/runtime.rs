@@ -225,6 +225,32 @@ fn stamp() -> String {
     format!("{millis}-{seq}")
 }
 
+/// 只留最近 20 次执行的目录。
+///
+/// 每次跑都留一份脚本与输出，攒久了是一堆无意义的小文件；保留最近几次够排查了。
+fn prune_old_runs(current: &Path) {
+    const KEEP: usize = 20;
+    let Some(parent) = current.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path != current)
+        .collect();
+    if dirs.len() <= KEEP {
+        return;
+    }
+    dirs.sort();
+    let remove = dirs.len() - KEEP;
+    for path in dirs.into_iter().take(remove) {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
 fn clamp(text: &str) -> String {
     if text.chars().count() <= MAX_OUTPUT_CHARS {
         return text.to_string();
@@ -368,6 +394,7 @@ pub fn run(
     let interpreter = resolve_interpreter(lang)?;
     let dir = sandbox_dir()?.join(stamp());
     std::fs::create_dir_all(&dir).map_err(|error| format!("创建本次沙箱失败：{error}"))?;
+    prune_old_runs(&dir);
     let script = dir.join(format!("script.{}", lang.ext()));
     std::fs::write(&script, code).map_err(|error| format!("写脚本失败：{error}"))?;
 
@@ -536,6 +563,37 @@ mod tests {
         // 进程环境里就算有 OPENAI_API_KEY，也不该传进子进程。
         assert!(outcome.text.contains("KEY=[none]"), "{}", outcome.text);
         assert_eq!(outcome.exit, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 装了 python 就该跑得起来：这条用例同时验「探测到解释器」与「stdout 拿得到」。
+    #[test]
+    fn python_script_runs_when_available() {
+        if which("python3").is_none() && which("python").is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prism-rt-py-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let code = "import sys\nprint('py-ok', sys.version_info.major)\n";
+        let outcome = run(Lang::Python, code, &dir, &Options::default(), &|| false).expect("跑起来");
+        assert!(outcome.text.contains("py-ok 3"), "{}", outcome.text);
+        assert!(outcome.ok, "{}", outcome.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// node 同理：`console.log` 能出来，环境里也不该有密钥。
+    #[test]
+    fn node_script_runs_when_available() {
+        if which("node").is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prism-rt-node-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let code = "console.log('node-ok', process.version.split('.')[0], process.env.OPENAI_API_KEY ?? 'none');";
+        let outcome = run(Lang::Node, code, &dir, &Options::default(), &|| false).expect("跑起来");
+        assert!(outcome.text.contains("node-ok v"), "{}", outcome.text);
+        assert!(outcome.text.contains("none"), "密钥不该进子进程：{}", outcome.text);
+        assert!(outcome.ok, "{}", outcome.text);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

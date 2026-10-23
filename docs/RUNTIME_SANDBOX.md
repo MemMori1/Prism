@@ -95,7 +95,7 @@ run_script(language: python|node|sh|powershell, code: "...", purpose: "算样本
 - 解释器在 PATH 里探测（`python3`→`python`、`node`、`sh`、`pwsh`→`powershell`）；
   找不到就明说「这台机器上没有 X 的解释器」，而不是报一个 shell 的 127；
 - 超时默认 60 秒（上限 600），超时/停止都连进程组一起杀；
-- 输出上限 2 万字符；
+- 输出上限 2 万字符；沙箱目录只留最近 20 次（旧的自动清掉，免得攒一堆小文件）；
 - 结果头是事实：`沙箱：seatbelt（写入仅限工作目录与临时目录；网络：关）· 解释器 /usr/bin/python3`。
 
 ### macOS 的隔离：seatbelt
