@@ -746,7 +746,7 @@ svg { display: block; }
   left: 0;
   top: 0;
   width: 792px;
-  height: 420px;
+  height: 620px;
   transform-origin: 0 0;
   will-change: transform;
 }
@@ -755,7 +755,7 @@ svg { display: block; }
   position: absolute;
   inset: 0;
   width: 792px;
-  height: 420px;
+  height: 620px;
   overflow: visible;
   pointer-events: none;
 }
@@ -909,6 +909,11 @@ svg { display: block; }
   background: color-mix(in srgb, #0284c7 8%, var(--panel));
   color: color-mix(in srgb, #0284c7 82%, var(--text));
 }
+.eng.plan {
+  border-color: color-mix(in srgb, #4f46e5 30%, var(--border));
+  background: color-mix(in srgb, #4f46e5 8%, var(--panel));
+  color: color-mix(in srgb, #4f46e5 82%, var(--text));
+}
 .eng.oc {
   border-color: color-mix(in srgb, var(--green) 30%, var(--border));
   background: var(--green-soft);
@@ -1052,7 +1057,7 @@ svg { display: block; }
   left: 0;
   top: 0;
   width: 792px;
-  height: 420px;
+  height: 620px;
   transform-origin: 0 0;
 }
 .mini-node {
@@ -1494,7 +1499,7 @@ svg { display: block; }
         <div class="kicker">Prism · Design Spec / DAG</div>
         <h1>DAG 编排器</h1>
         <p class="lede">
-          把目标拆成有依赖的任务图：每个节点是独立会话，有自己的工作区、上下文和工具集；
+          DAG 由 Planner 从<b>「需求分析」根节点</b>开始，自上而下拆分：每个节点是独立会话，有自己的工作区、上下文和工具集；
           <b>公用工具到处可用，私有工具只跟一个 Agent 走</b>。画布实时显示谁在跑、产物往哪流。
         </p>
       </div>
@@ -1504,18 +1509,18 @@ svg { display: block; }
       </div>
     </div>
     <div class="head-meta">
-      <span class="meta-chip">计划即数据 · 可 review / 编辑 / 重跑</span>
+      <span class="meta-chip">Planner 起点 = 需求分析（固定根节点）</span>
+      <span class="meta-chip">自上而下拆分 + 依赖分层</span>
       <span class="meta-chip">节点 = 会话</span>
       <span class="meta-chip">worktree 隔离 + 分支产物</span>
-      <span class="meta-chip">Planner → 确认 → 调度</span>
     </div>
   </header>
 
   <div class="stage">
     <div class="stage-bar">
-      <span class="stage-label">编排视图 <em>静态设计稿 · 一次运行中的 DAG</em></span>
+      <span class="stage-label">编排视图 <em>Planner 起点 · 从上到下拆分 · 一次运行中的 DAG</em></span>
       <div class="stage-controls">
-        <span class="meta-chip"><i class="dot ok"></i>3 完成</span>
+        <span class="meta-chip"><i class="dot ok"></i>4 完成</span>
         <span class="meta-chip"><i class="dot run"></i>2 运行</span>
         <button class="demo-btn" id="fitTop" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
@@ -1532,7 +1537,7 @@ svg { display: block; }
           <b>编排</b><span class="sep">/</span><span>prism</span><span class="caret">▾</span>
         </div>
         <div class="titlebar-spacer"></div>
-        <span class="tb-status"><i class="dot run"></i>3/6 · 2 running</span>
+        <span class="tb-status"><i class="dot run"></i>4/7 · 2 running</span>
         <button class="tb-btn tb-bell" type="button" aria-label="通知">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
         </button>
@@ -1594,9 +1599,9 @@ svg { display: block; }
           <div class="plans-scroll">
             <div class="plans-section">进行中 <span class="line"></span></div>
             <button class="plan-item on" type="button">
-              <span class="plan-top"><i class="dot run"></i><span class="plan-name">给设置页加自动更新</span><span class="plan-meta mono">12:04</span></span>
-              <span class="plan-meta"><span>3/6 节点</span><span>·</span><span>2 运行中</span></span>
-              <span class="mini-run"><i class="done"></i><i class="done"></i><i class="done"></i><i class="live"></i><i class="live"></i><i></i></span>
+              <span class="plan-top"><i class="dot run"></i><span class="plan-name">给设置页加自动更新</span><span class="plan-meta mono">12:03</span></span>
+              <span class="plan-meta"><span>4/7 节点</span><span>·</span><span>2 运行中</span></span>
+              <span class="mini-run"><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="live"></i><i class="live"></i><i></i></span>
             </button>
             <button class="plan-item" type="button">
               <span class="plan-top"><i class="dot wait"></i><span class="plan-name">重构权限闸门</span><span class="plan-meta mono">11:20</span></span>
@@ -1652,18 +1657,18 @@ svg { display: block; }
               </div>
             </div>
             <div class="dag-sub">
-              <span class="mono">6 个节点</span><span class="sep">·</span><span>并发上限 2</span><span class="sep">·</span>
-              <span>开始于 12:04</span><span class="sep">·</span><span class="mono">41.2k tokens</span><span class="sep">·</span>
+              <span class="mono">7 个节点</span><span class="sep">·</span><span>并发上限 2</span><span class="sep">·</span>
+              <span>开始于 12:03</span><span class="sep">·</span><span class="mono">41.2k tokens</span><span class="sep">·</span>
               <span>预计还要 ~4 分钟</span>
             </div>
           </div>
           <div class="run-bar" aria-hidden="true">
-            <i class="done"></i><i class="done"></i><i class="done"></i><i class="live"></i><i class="live"></i><i></i>
+            <i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="live"></i><i class="live"></i><i></i>
           </div>
 
           <div class="canvas" id="canvas">
             <div class="canvas-world" id="world">
-              <svg class="edges" id="edges" viewBox="0 0 792 420" aria-hidden="true">
+              <svg class="edges" id="edges" viewBox="0 0 792 620" aria-hidden="true">
                 <defs>
                   <marker id="arrow-done" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 8 4 0 8z" fill="var(--green)" opacity=".65"/></marker>
                   <marker id="arrow-active" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 8 4 0 8z" fill="var(--accent)"/></marker>
@@ -1709,7 +1714,7 @@ svg { display: block; }
 <script>
 /* ============================================================
  * 演示数据：一次运行中的 DAG
- * 坐标是画布世界坐标（792 × 420），节点 200 × 96。
+ * 坐标是画布世界坐标（792 × 620），节点 200 × 96；Planner 根节点在最上方。
  * ============================================================ */
 const NODES = [
   {
@@ -1844,7 +1849,7 @@ const STATUS = {
   failed: { label: '失败', pill: 'failed' }
 };
 
-let selectedId = 'frontend';
+let selectedId = 'intake';
 let activeTab = 'task';
 
 /* ---------- 通用小工具 ---------- */
@@ -1914,12 +1919,12 @@ function renderNodes() {
 
 /* ---------- 连线 ---------- */
 function edgePath(from, to) {
-  const x1 = from.x + NODE_W;
-  const y1 = from.y + NODE_H / 2;
-  const x2 = to.x;
-  const y2 = to.y + NODE_H / 2;
-  const bend = Math.max(26, (x2 - x1) * 0.52);
-  return `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
+  const x1 = from.x + NODE_W / 2;
+  const y1 = from.y + NODE_H;
+  const x2 = to.x + NODE_W / 2;
+  const y2 = to.y;
+  const bend = Math.max(22, (y2 - y1) * 0.5);
+  return `M ${x1} ${y1} C ${x1} ${y1 + bend}, ${x2} ${y2 - bend}, ${x2} ${y2}`;
 }
 
 function renderEdges() {
@@ -1934,8 +1939,10 @@ function renderEdges() {
 /* ---------- 小地图 ---------- */
 function renderMinimap() {
   const mini = document.getElementById('miniWorld');
-  const scale = 136 / WORLD_W;
-  mini.style.transform = `scale(${scale})`;
+  const scale = Math.min(136 / WORLD_W, 74 / WORLD_H);
+  const offsetX = (136 - WORLD_W * scale) / 2;
+  const offsetY = (74 - WORLD_H * scale) / 2;
+  mini.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
   mini.innerHTML = NODES.map(node =>
     `<span class="mini-node ${node.status}" style="left:${node.x}px;top:${node.y}px"></span>`
   ).join('');
@@ -2063,7 +2070,7 @@ function outputPanel(node) {
     <div class="insp-section">
       <div class="insp-label">指标</div>
       <div class="kv"><span>耗时</span><b class="mono">${fmtDuration(node.elapsed)}</b></div>
-      <div class="kv"><span>Tokens</span><b class="mono">${node.id === 'research' ? '1.2k' : node.id === 'specs' ? '0.9k' : '3.4k'}</b></div>
+      <div class="kv"><span>Tokens</span><b class="mono">${node.id === 'intake' ? '0.8k' : node.id === 'research' ? '1.2k' : node.id === 'specs' ? '0.9k' : '3.4k'}</b></div>
       <div class="kv"><span>产物</span><b class="ok">已归档</b></div>
     </div>
     <div class="insp-section">
@@ -2089,7 +2096,7 @@ function logPanel(node) {
     </div>
     <div class="insp-section">
       <div class="kv"><span>状态</span><b class="${node.status === 'done' ? 'ok' : node.status === 'running' ? 'warn' : ''}">${nodeStatusLabel(node)}</b></div>
-      <div class="kv"><span>会话 ID</span><b class="mono">${node.id === 'research' ? 'dsh:9f2c…' : `native:${node.id.slice(0, 3)}4…`}</b></div>
+      <div class="kv"><span>会话 ID</span><b class="mono">${node.id === 'intake' ? 'planner:run-04' : node.id === 'research' ? 'dsh:9f2c…' : `native:${node.id.slice(0, 3)}4…`}</b></div>
       <div class="kv"><span>重试次数</span><b>0</b></div>
     </div>`;
 }
@@ -2152,7 +2159,7 @@ function renderInspector() {
     </div>
     <div class="insp-meta">
       <div><dt>Agent</dt><dd>${escapeHtml(node.agent)}</dd></div>
-      <div><dt>执行器</dt><dd>${node.engine === '原生' ? 'Prism 原生' : 'DSH'}</dd></div>
+      <div><dt>执行器</dt><dd>${node.executorLabel || (node.engine === '原生' ? 'Prism 原生' : 'DSH')}</dd></div>
       <div><dt>工作区</dt><dd class="mono">${node.workspace}</dd></div>
       <div><dt>权限</dt><dd class="${node.permission === '只读' ? 'ok' : ''}">${node.permission}</dd></div>
     </div>
@@ -2213,9 +2220,11 @@ function updateMinimapView() {
   const rect = canvas.getBoundingClientRect();
   const innerW = mini.clientWidth - 2;
   const innerH = mini.clientHeight - 2;
-  const s = 136 / WORLD_W;
-  const vx = (-view.x / view.scale) * s;
-  const vy = (-view.y / view.scale) * s;
+  const s = Math.min(innerW / WORLD_W, innerH / WORLD_H);
+  const offsetX = (innerW - WORLD_W * s) / 2;
+  const offsetY = (innerH - WORLD_H * s) / 2;
+  const vx = offsetX + (-view.x / view.scale) * s;
+  const vy = offsetY + (-view.y / view.scale) * s;
   const vw = (rect.width / view.scale) * s;
   const vh = (rect.height / view.scale) * s;
   const left = Math.min(Math.max(vx, 0), innerW);
