@@ -1068,7 +1068,7 @@ svg { display: block; }
       </a>
       <button class="demo-btn" id="themeBtn" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4 7 17M17 7l1.4-1.4" stroke-linecap="round"/><circle cx="12" cy="12" r="4"/></svg>
-        深色
+        <span id="themeLabel">深色</span>
       </button>
     </div>
   </header>
@@ -1079,7 +1079,7 @@ svg { display: block; }
       <div class="stage-controls">
         <span class="meta-chip"><i class="dot ok"></i>已启用 7</span>
         <span class="meta-chip"><i class="dot wait"></i>1 只读</span>
-        <span class="meta-chip">12 个方法</span>
+        <span class="meta-chip">13 个方法</span>
       </div>
     </div>
 
@@ -1091,7 +1091,7 @@ svg { display: block; }
           <b>Agents</b><span class="sep">/</span><span>prism</span><span class="caret">▾</span>
         </div>
         <div class="titlebar-spacer"></div>
-        <span class="tb-status"><i class="dot ok"></i>9 agents · 24 methods</span>
+        <span class="tb-status" id="tbStatus"><i class="dot ok"></i>9 agents · 13 methods</span>
         <button class="tb-btn tb-bell" type="button" title="通知">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 1 0-12 0c0 7-2 7-2 9h16c0-2-2-2-2-9M10 21h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -1131,7 +1131,7 @@ svg { display: block; }
           <div class="agents-head">
             <div>
               <div class="pane-title">Agents</div>
-              <div class="pane-sub">9 agents · 2 custom</div>
+              <div class="pane-sub" id="paneSub">9 agents · 2 custom</div>
             </div>
             <div class="grow"></div>
             <button class="mini-btn" type="button" title="新建 Agent" data-open-drawer>＋</button>
@@ -1186,8 +1186,8 @@ svg { display: block; }
 <section class="drawer" id="drawer" aria-label="新建 Agent" aria-hidden="true">
   <div class="drawer-head">
     <div>
-      <h2>新建 Agent</h2>
-      <p>从模板开始，随时可以再改</p>
+      <h2 id="drawerTitle">新建 Agent</h2>
+      <p id="drawerSub">从模板开始，随时可以再改</p>
     </div>
     <div class="grow"></div>
     <button class="drawer-close" type="button" id="drawerClose" aria-label="关闭">×</button>
@@ -1267,19 +1267,930 @@ svg { display: block; }
       <div class="method-pick">
         <label><input type="checkbox" value="read_file" checked />read_file</label>
         <label><input type="checkbox" value="grep" checked />grep</label>
-        <label><input type="checkbox" value="run_command" checked />run_command</label>
+        <label><input type="checkbox" value="glob" />glob</label>
+        <label><input type="checkbox" value="git_diff" />git_diff</label>
         <label><input type="checkbox" value="edit_file" />edit_file</label>
+        <label><input type="checkbox" value="apply_patch" />apply_patch</label>
+        <label><input type="checkbox" value="run_command" checked />run_command</label>
+        <label><input type="checkbox" value="run_tests" />run_tests</label>
+        <label><input type="checkbox" value="task" />task</label>
         <label><input type="checkbox" value="report_finding" />report_finding</label>
+        <label><input type="checkbox" value="sentry__issues" />sentry__issues</label>
+        <label><input type="checkbox" value="figma__export" />figma__export</label>
         <label><input type="checkbox" value="web_fetch" />web_fetch</label>
       </div>
     </div>
     <div class="drawer-foot">
       <button class="tool-btn" type="button" id="drawerCancel">取消</button>
-      <button class="tool-btn primary" type="submit">创建 Agent</button>
+      <button class="tool-btn primary" type="submit" id="drawerSubmit">创建 Agent</button>
     </div>
   </form>
 </section>
 
 <div class="toast" id="toast"><i></i><span>已保存</span></div>
+<script>
+/* ============================================================
+ * Agent 面板演示数据与交互
+ * - 内置 Agent 只读；自定义 Agent 可切换方法
+ * - “新建 Agent”抽屉可真正创建一条本地记录（内存中）
+ * ============================================================ */
+
+const ICONS = {
+  file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 2.8h7l5 5V21H6z" stroke-linejoin="round"/><path d="M13 2.8v5h5M9 12h6M9 16h6" stroke-linecap="round"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.6-4.6" stroke-linecap="round"/></svg>',
+  layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m12 3 9 5-9 5-9-5 9-5Z" stroke-linejoin="round"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5" stroke-linejoin="round"/></svg>',
+  branch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="6" cy="5" r="2.4"/><circle cx="6" cy="19" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 7.4v9.2M8.4 8h4.2A5.4 5.4 0 0 1 18 13.4" stroke-linecap="round"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m14.5 5.5 4 4M4 20l1-5L16.2 3.8a2 2 0 0 1 2.8 0l1.2 1.2a2 2 0 0 1 0 2.8L9 19l-5 1Z" stroke-linejoin="round"/></svg>',
+  terminal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m7 9 3.2 3L7 15M12.5 15H17" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="9" cy="8" r="3"/><path d="M3.5 19c.6-3 2.6-4.5 5.5-4.5S14 16 14.6 19" stroke-linecap="round"/><path d="M16 5.5a3 3 0 0 1 0 5.8M17.5 14.8c1.7.6 2.7 2 3 4.2" stroke-linecap="round"/></svg>',
+  report: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 3h14v18H5z" stroke-linejoin="round"/><path d="M8.5 8h7M8.5 12h7M8.5 16h4" stroke-linecap="round"/></svg>',
+  plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 3v5M15 3v5M6.5 8h11v4a5.5 5.5 0 0 1-11 0V8ZM12 17.5V21" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3.5 9h17M3.5 15h17M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" stroke-linecap="round"/></svg>'
+};
+const icon = name => ICONS[name] || ICONS.file;
+
+const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[ch]));
+
+const METHODS = [
+  { id: 'read_file', group: '代码阅读', icon: 'file', desc: '读取文件，支持行范围', scope: 'shared', params: 'path, range' },
+  { id: 'grep', group: '代码阅读', icon: 'search', desc: '按正则搜索仓库内容', scope: 'shared', params: 'pattern' },
+  { id: 'glob', group: '代码阅读', icon: 'layers', desc: '按模式列出文件', scope: 'shared', params: 'pattern' },
+  { id: 'git_diff', group: '代码阅读', icon: 'branch', desc: '查看未提交改动与差异', scope: 'shared', params: 'base' },
+  { id: 'edit_file', group: '写入与补丁', icon: 'edit', desc: '按精确匹配修改文件', scope: 'shared', params: 'path, old, new' },
+  { id: 'apply_patch', group: '写入与补丁', icon: 'edit', desc: '应用 unified diff 补丁', scope: 'shared', params: 'patch' },
+  { id: 'run_command', group: '执行与验证', icon: 'terminal', desc: '在沙箱内执行命令', scope: 'shared', params: 'cmd, timeout' },
+  { id: 'run_tests', group: '执行与验证', icon: 'terminal', desc: '跑测试并解析结果', scope: 'shared', params: 'suite' },
+  { id: 'task', group: '协作与产出', icon: 'users', desc: '派生一个子代理执行子任务', scope: 'shared', params: 'prompt' },
+  { id: 'report_finding', group: '协作与产出', icon: 'report', desc: '登记一条带行号的审查发现', scope: 'shared', params: 'severity, file, line' },
+  { id: 'sentry__issues', group: '私有 MCP', icon: 'plug', desc: '读取 Sentry 项目 issue 与堆栈', scope: 'private', params: 'project' },
+  { id: 'figma__export', group: '私有 MCP', icon: 'plug', desc: '从 Figma 拉取选中画板', scope: 'private', params: 'fileKey' },
+  { id: 'web_fetch', group: '网络', icon: 'globe', desc: '抓取网页并转为 Markdown', scope: 'shared', params: 'url' }
+];
+const GROUPS = ['代码阅读', '写入与补丁', '执行与验证', '协作与产出', '私有 MCP', '网络'];
+const ENGINE = {
+  '原生': { cls: 'native', label: '原生', full: 'Prism 原生' },
+  'DSH': { cls: 'dsh', label: 'DSH', full: 'DSH' },
+  '规划器': { cls: 'plan', label: '规划', full: 'DAG Planner' }
+};
+
+const AGENTS = [
+  {
+    id: 'planner', name: '需求分析', initial: '规', color: '#4f46e5', scope: 'builtin',
+    role: '规划 · 目标与验收标准',
+    desc: '接收用户目标，产出带依赖、验收标准和风险标注的 DAG；不直接改仓库。',
+    engine: '规划器', model: 'planner-v1', workspace: 'shared · 只读', permission: '只读',
+    maxTurns: 6, temperature: 0.1,
+    methods: ['read_file', 'task', 'report_finding'], denied: ['edit_file', 'run_command'],
+    stats: { runs: 4, success: '100%', avg: '38s', tokens: '12k' },
+    prompt: '你是 DAG Planner。任何计划都从固定根节点「需求分析」开始。\n先把目标拆成验收标准，再生成依赖图；每个节点必须能独立交给一个 Agent。\n写节点默认使用 worktree；标注 gate 与失败重试策略。输出 JSON plan。',
+    recent: [
+      { time: '今天 12:03', plan: '给设置页加自动更新', dur: '41s', result: '完成', mode: 'plan' },
+      { time: '昨天 18:44', plan: '重构通知中心', dur: '36s', result: '完成', mode: 'plan' },
+      { time: '昨天 09:10', plan: '修 DSH 权限边界', dur: '52s', result: '完成', mode: 'plan' }
+    ]
+  },
+  {
+    id: 'explorer', name: '探索者', initial: '探', color: '#0284c7', scope: 'builtin',
+    role: '调研 · 代码与文档',
+    desc: '先读再问：定位相关代码、文档和既有约定，把发现压缩成可引用的调研报告。',
+    engine: 'DSH', model: 'claude-sonnet', workspace: 'shared · 只读', permission: '只读',
+    maxTurns: 12, temperature: 0.3,
+    methods: ['read_file', 'grep', 'glob', 'web_fetch', 'task'], denied: ['edit_file', 'apply_patch'],
+    stats: { runs: 22, success: '95%', avg: '2m10s', tokens: '128k' },
+    prompt: '你是探索者，负责在写代码之前把事实找齐。\n优先搜索仓库，再查文档，最后才联网；所有结论都要带来源链接或文件:行号。\n不要修改任何文件。输出结构化调研报告。',
+    recent: [
+      { time: '今天 11:26', plan: '定位设置页更新入口', dur: '2m04s', result: '完成', mode: 'repo' },
+      { time: '昨天 16:20', plan: 'DSH 权限模型调研', dur: '2m38s', result: '完成', mode: 'repo' },
+      { time: '昨天 10:02', plan: 'Tauri 自动更新文档', dur: '1m42s', result: '完成', mode: 'web' }
+    ]
+  },
+  {
+    id: 'architect', name: '架构师', initial: '架', color: '#7c3aed', scope: 'builtin',
+    role: '契约 · 数据流与边界',
+    desc: '把需求落成模块边界、数据流和接口契约；在写代码前先消除歧义。',
+    engine: '原生', model: 'deepseek-reasoner', workspace: 'worktree · 独立分支', permission: '标准 · 询问',
+    maxTurns: 14, temperature: 0.2,
+    methods: ['read_file', 'grep', 'glob', 'git_diff', 'edit_file', 'report_finding'], denied: ['apply_patch', 'run_command'],
+    stats: { runs: 11, success: '100%', avg: '1m54s', tokens: '76k' },
+    prompt: '你是架构师。先画边界，再谈实现。\n输出：模块拆分、数据流、接口/类型契约、失败路径、迁移与回滚。\n不要写大段实现，最多给关键接口的签名。',
+    recent: [
+      { time: '今天 12:18', plan: 'DAG 工作区与工具作用域', dur: '1m47s', result: '完成', mode: 'spec' },
+      { time: '昨天 17:40', plan: '通知中心数据模型', dur: '2m06s', result: '完成', mode: 'spec' },
+      { time: '昨天 14:12', plan: 'DSH 权限边界', dur: '1m50s', result: '完成', mode: 'spec' }
+    ]
+  },
+  {
+    id: 'frontend', name: '前端工程师', initial: '前', color: '#6d5ae6', scope: 'builtin',
+    role: 'UI · 交互与样式',
+    desc: '实现 Vue / CSS 交互与状态，按设计稿对齐；只在自己的 worktree 写文件。',
+    engine: '原生', model: 'deepseek-chat', workspace: 'worktree · 独立分支', permission: '标准 · 询问',
+    maxTurns: 20, temperature: 0.3,
+    methods: ['read_file', 'grep', 'glob', 'git_diff', 'edit_file', 'apply_patch', 'run_command', 'run_tests'],
+    denied: ['task', 'figma__export'],
+    stats: { runs: 31, success: '97%', avg: '3m20s', tokens: '240k' },
+    prompt: '你是前端工程师。先读现有组件与样式约定，再动手。\n只改当前 worktree；优先复用 tokens 与现有组件，不引入新的 UI 库。\n完成后跑相关测试，并在报告里列出改动文件与截图路径。',
+    recent: [
+      { time: '今天 12:22', plan: 'Agent 面板方法编辑器', dur: '4m12s', result: '运行中', mode: 'ui' },
+      { time: '今天 10:30', plan: 'DAG 画布自上而下布局', dur: '3m48s', result: '完成', mode: 'ui' },
+      { time: '昨天 15:16', plan: '设置页自动更新', dur: '2m55s', result: '完成', mode: 'ui' }
+    ]
+  },
+  {
+    id: 'backend', name: '后端工程师', initial: '后', color: '#0f766e', scope: 'builtin',
+    role: 'IPC · 数据与命令',
+    desc: '实现 Tauri 命令、存储和插件装配；负责错误路径与兼容性。',
+    engine: '原生', model: 'deepseek-chat', workspace: 'worktree · 独立分支', permission: '标准 · 询问',
+    maxTurns: 20, temperature: 0.2,
+    methods: ['read_file', 'grep', 'glob', 'git_diff', 'edit_file', 'apply_patch', 'run_command', 'run_tests'],
+    denied: ['task', 'figma__export'],
+    stats: { runs: 27, success: '96%', avg: '3m05s', tokens: '210k' },
+    prompt: '你是后端工程师。改 IPC 前先确认类型契约与调用方。\n保持命令参数向后兼容；错误必须带可操作的上下文。\n涉及数据迁移时先写回滚。完成后跑 cargo test 与前端类型检查。',
+    recent: [
+      { time: '今天 12:24', plan: 'Agent 配置读写命令', dur: '3m32s', result: '运行中', mode: 'ipc' },
+      { time: '今天 09:48', plan: '计划快照持久化', dur: '4m02s', result: '完成', mode: 'ipc' },
+      { time: '昨天 13:30', plan: '自动更新检查命令', dur: '2m41s', result: '完成', mode: 'ipc' }
+    ]
+  },
+  {
+    id: 'docs', name: '文档工程师', initial: '文', color: '#b45309', scope: 'builtin',
+    role: '文档 · 变更说明',
+    desc: '把变更写成用户能读懂的说明、迁移步骤和边界条件。',
+    engine: '原生', model: 'deepseek-chat', workspace: 'worktree · 独立分支', permission: '标准 · 询问',
+    maxTurns: 10, temperature: 0.4,
+    methods: ['read_file', 'grep', 'glob', 'edit_file', 'web_fetch'], denied: ['run_command', 'apply_patch'],
+    stats: { runs: 9, success: '100%', avg: '1m12s', tokens: '38k' },
+    prompt: '你是文档工程师。先读代码再写文档，避免描述不存在的功能。\n每篇文档要有：适用版本、前置条件、步骤、失败恢复、相关链接。\n中文为主，术语保留英文原名。',
+    recent: [
+      { time: '今天 12:26', plan: 'DAG Planner 设计说明', dur: '1m18s', result: '运行中', mode: 'doc' },
+      { time: '昨天 18:02', plan: '自动更新发布说明', dur: '1m04s', result: '完成', mode: 'doc' },
+      { time: '昨天 11:40', plan: '工作区隔离说明', dur: '1m22s', result: '完成', mode: 'doc' }
+    ]
+  },
+  {
+    id: 'verify', name: '验证者', initial: '验', color: '#be185d', scope: 'builtin',
+    role: '构建 · 测试与回归',
+    desc: '独立跑构建、测试和关键路径回归；只报告，不修改实现。',
+    engine: '原生', model: 'deepseek-chat', workspace: 'worktree · 独立分支', permission: '只读',
+    maxTurns: 16, temperature: 0.1,
+    methods: ['read_file', 'grep', 'git_diff', 'run_command', 'run_tests', 'report_finding'],
+    denied: ['edit_file', 'apply_patch', 'task'],
+    stats: { runs: 18, success: '100%', avg: '2m44s', tokens: '96k' },
+    prompt: '你是验证者。不要相信“应该能过”，要实际跑。\n按风险排序：构建 → 单测 → 关键路径手测 → 回归。\n只报告，不改文件；每条失败带复现命令和日志摘要。',
+    recent: [
+      { time: '今天 12:28', plan: 'DAG 画布构建检查', dur: '2m30s', result: '运行中', mode: 'test' },
+      { time: '今天 10:52', plan: 'Agent 面板交互回归', dur: '2m48s', result: '完成', mode: 'test' },
+      { time: '昨天 19:06', plan: '发布前全量测试', dur: '3m12s', result: '完成', mode: 'test' }
+    ]
+  },
+  {
+    id: 'reviewer', name: '我的 Reviewer', initial: '审', color: '#0f766e', scope: 'custom',
+    basedOn: '验证者',
+    role: '代码审查 · 安全 / 回归',
+    desc: '审查改动而不是重写：优先找正确性、安全、回归风险；每条发现带文件:行号和复现步骤。',
+    engine: '原生', model: 'deepseek-chat', workspace: 'shared · 只读', permission: '只读',
+    maxTurns: 10, temperature: 0.2,
+    methods: ['read_file', 'grep', 'glob', 'git_diff', 'run_command', 'run_tests', 'report_finding', 'sentry__issues'],
+    denied: ['edit_file', 'apply_patch', 'task', 'figma__export', 'web_fetch'],
+    stats: { runs: 14, success: '100%', avg: '1m42s', tokens: '86k' },
+    prompt: '你是代码审查者，不是实现者。\n审查范围：当前 worktree 的未提交改动 + 最近一次提交。\n优先顺序：正确性 → 安全 → 回归风险 → 可维护性。\n每条发现必须包含：文件:行号、触发条件、影响、建议修复。\n不要修改文件，不要执行 destructive 命令。最后用 JSON 输出 findings。',
+    recent: [
+      { time: '今天 10:42', plan: '审查设置页自动更新', dur: '1m38s', result: '完成', mode: 'diff' },
+      { time: '昨天 18:20', plan: '审查 DSH 权限改动', dur: '2m06s', result: '完成', mode: 'diff' },
+      { time: '昨天 16:05', plan: 'Sentry #4021 复现', dur: '3m14s', result: '完成', mode: 'tool' }
+    ]
+  },
+  {
+    id: 'migrator', name: '数据迁移助手', initial: '迁', color: '#475569', scope: 'custom',
+    basedOn: '后端工程师',
+    role: '迁移 · schema 与回滚',
+    desc: '把旧数据映射到新结构，先写回滚再写迁移；所有 destructive 操作要二次确认。',
+    engine: '原生', model: 'deepseek-chat', workspace: 'worktree · 独立分支', permission: '标准 · 询问',
+    maxTurns: 16, temperature: 0.15,
+    methods: ['read_file', 'grep', 'glob', 'git_diff', 'edit_file', 'run_command', 'run_tests'],
+    denied: ['apply_patch', 'task', 'figma__export', 'web_fetch'],
+    stats: { runs: 6, success: '83%', avg: '4m18s', tokens: '64k' },
+    prompt: '你是数据迁移助手。先确认源/目标 schema，再写迁移。\n顺序固定：只读盘点 → dry-run → 回滚脚本 → 迁移脚本 → 校验查询。\n任何 DELETE / DROP / 覆盖写都要二次确认；输出影响行数与回滚步骤。',
+    recent: [
+      { time: '昨天 21:10', plan: '迁移 sessions 索引', dur: '4m02s', result: '完成', mode: 'db' },
+      { time: '昨天 17:22', plan: '旧库 dry-run', dur: '5m16s', result: '警告', mode: 'db' },
+      { time: '昨天 15:04', plan: '回滚脚本演练', dur: '3m36s', result: '完成', mode: 'db' }
+    ]
+  }
+];
+
+let selectedId = 'reviewer';
+let activeTab = 'methods';
+let methodFilter = 'all';
+let methodQuery = '';
+let drawerMode = 'blank';
+let drawerSource = null;
+let toastTimer = 0;
+
+const $ = selector => document.querySelector(selector);
+const currentAgent = () => AGENTS.find(agent => agent.id === selectedId) || AGENTS[0];
+const agentStats = agent => agent.stats || { runs: 0, success: '未运行', avg: '—', tokens: '0' };
+const engineOf = engine => ENGINE[engine] || ENGINE['原生'];
+
+function showToast(message) {
+  const toast = $('#toast');
+  if (!toast) return;
+  toast.querySelector('span').textContent = message;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => toast.classList.remove('show'), 2400);
+}
+
+function agentItem(agent) {
+  const eng = engineOf(agent.engine);
+  return `
+    <button class="agent-item ${agent.id === selectedId ? 'on' : ''}" type="button" data-agent="${agent.id}" aria-current="${agent.id === selectedId}">
+      <span class="agent-avatar" style="--agent:${agent.color}">${esc(agent.initial)}</span>
+      <span class="agent-copy">
+        <span class="agent-name">${esc(agent.name)}${agent.scope === 'custom' ? '<span class="custom-tag">我的</span>' : ''}</span>
+        <span class="agent-role">${esc(agent.role)}</span>
+      </span>
+      <span class="agent-meta">
+        <span class="eng ${eng.cls}">${eng.label}</span>
+        <span class="agent-count">${agent.methods.length} 方法</span>
+      </span>
+    </button>`;
+}
+
+function renderAgentList() {
+  const builtin = AGENTS.filter(agent => agent.scope === 'builtin');
+  const custom = AGENTS.filter(agent => agent.scope === 'custom');
+  $('#agentList').innerHTML = `
+    <div class="agents-section">内置 Agent <span class="line"></span><span class="n">${builtin.length}</span></div>
+    ${builtin.map(agentItem).join('')}
+    <div class="agents-section">我的 Agent <span class="line"></span><span class="n">${custom.length}</span></div>
+    ${custom.map(agentItem).join('')}
+  `;
+}
+
+function renderHead(agent) {
+  const stats = agentStats(agent);
+  const eng = engineOf(agent.engine);
+  const tabs = [
+    ['overview', '概览'],
+    ['prompt', '提示词'],
+    ['methods', '方法', agent.methods.length],
+    ['permissions', '权限'],
+    ['usage', '使用记录']
+  ];
+  const success = stats.success === '未运行' ? '未运行' : `${stats.success} 成功`;
+  const saveAction = agent.scope === 'custom'
+    ? `<button class="tool-btn primary" type="button" data-action="save">
+         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+         保存修改
+       </button>`
+    : `<button class="tool-btn primary" type="button" data-action="clone">
+         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" stroke-linecap="round"/></svg>
+         复制为自定义
+       </button>`;
+  return `
+    <div class="head-top">
+      <div class="crumb">Agents <span class="sep">/</span> <b>${esc(agent.name)}</b></div>
+      <span class="pill ${agent.scope === 'custom' ? 'custom' : 'builtin'}">${agent.scope === 'custom' ? '自定义' : '内置'}</span>
+      <span class="pill on"><span class="pulse"></span>启用</span>
+      <div class="grow"></div>
+      <div class="head-acts">
+        <button class="tool-btn" type="button" data-action="use">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 4h6v6M20 4 10 14" stroke-linecap="round" stroke-linejoin="round"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" stroke-linecap="round"/></svg>
+          在新会话中使用
+        </button>
+        ${saveAction}
+        <button class="tool-btn" type="button" data-action="more" aria-label="更多" style="width:27px;padding:0;justify-content:center">···</button>
+      </div>
+    </div>
+    <div class="agent-hero">
+      <div class="hero-avatar" style="--agent:${agent.color}">${esc(agent.initial)}</div>
+      <div class="hero-copy">
+        <h2>${esc(agent.name)}</h2>
+        <p>${esc(agent.desc)}</p>
+        <div class="hero-meta">
+          ${agent.basedOn ? `<span class="meta-pill">基于 ${esc(agent.basedOn)}</span>` : ''}
+          <span class="meta-pill">${esc(eng.full)} · ${esc(agent.model)}</span>
+          <span class="meta-pill">${esc(agent.workspace)}</span>
+          <span class="meta-pill ${stats.success === '100%' ? 'ok' : ''}">${esc(success)}</span>
+        </div>
+      </div>
+    </div>
+    <div class="tabs" role="tablist">
+      ${tabs.map(([id, label, count]) => `
+        <button class="tab ${activeTab === id ? 'on' : ''}" type="button" data-tab="${id}" role="tab" aria-selected="${activeTab === id}">
+          ${label}${count !== undefined ? `<span class="count">${count}</span>` : ''}
+        </button>`).join('')}
+    </div>
+  `;
+}
+
+function methodNote(agent) {
+  if (agent.scope === 'builtin') {
+    return `<div class="method-note">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3 4.5 6v5.5c0 4.5 3 7.6 7.5 9.5 4.5-1.9 7.5-5 7.5-9.5V6L12 3Z" stroke-linejoin="round"/><path d="M12 8v4M12 15.5v.5" stroke-linecap="round"/></svg>
+      <div><b>内置 Agent 只读。</b> 方法组合是官方默认值；点右上角「复制为自定义」得到一份可改的副本。</div>
+    </div>`;
+  }
+  return `<div class="method-note">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M3 12h18" stroke-linecap="round"/></svg>
+    <div><b>自定义 Agent。</b> 开关会立即影响这个 Agent 的方法集；保存后写入 <span class="mono">~/.prism/agents/${esc(agent.id)}.json</span>。</div>
+  </div>`;
+}
+
+function methodRow(agent, method) {
+  const enabled = agent.methods.includes(method.id);
+  const denied = (agent.denied || []).includes(method.id);
+  const editable = agent.scope === 'custom';
+  const tags = [];
+  if (method.scope === 'private') tags.push('<span class="tag private">私有</span>');
+  if (denied) tags.push('<span class="tag deny">拒绝</span>');
+  return `
+    <div class="method-row ${enabled ? '' : 'off'}"
+      data-name="${esc((method.id + ' ' + method.desc).toLowerCase())}"
+      data-enabled="${enabled ? '1' : '0'}"
+      data-scope="${method.scope}">
+      <span class="method-icon ${method.scope === 'private' ? 'private' : ''}">${icon(method.icon)}</span>
+      <span class="method-copy">
+        <span class="method-name">${esc(method.id)} ${tags.join('')}</span>
+        <span class="method-desc">${esc(method.desc)}</span>
+      </span>
+      <button class="method-params" type="button" data-params="${esc(method.params)}" title="查看参数">${esc(method.params.split(',')[0])}</button>
+      <button class="switch ${enabled ? 'on' : ''} ${editable ? '' : 'disabled'}"
+        type="button" role="switch" aria-checked="${enabled}" aria-disabled="${!editable}"
+        data-method="${method.id}" title="${editable ? '切换方法' : '内置只读，请复制后修改'}"></button>
+    </div>`;
+}
+
+function renderMethods(agent) {
+  const enabledCount = agent.methods.length;
+  const privateCount = METHODS.filter(method => method.scope === 'private').length;
+  const filters = [
+    ['all', '全部', METHODS.length],
+    ['enabled', '已启用', enabledCount],
+    ['private', '私有', privateCount],
+    ['off', '未启用', METHODS.length - enabledCount]
+  ];
+  const groups = GROUPS.map(group => {
+    const rows = METHODS.filter(method => method.group === group);
+    if (!rows.length) return '';
+    const on = rows.filter(method => agent.methods.includes(method.id)).length;
+    return `<div class="method-group" data-group="${group}">
+      <div class="group-head">${group}<span class="line"></span><span class="count">${on}/${rows.length}</span></div>
+      <div class="method-list">${rows.map(method => methodRow(agent, method)).join('')}</div>
+    </div>`;
+  }).join('');
+  return `
+    ${methodNote(agent)}
+    <div class="method-bar">
+      <label class="method-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4" stroke-linecap="round"/></svg>
+        <input id="methodSearch" value="${esc(methodQuery)}" placeholder="搜索方法…" style="border:0;background:transparent;outline:0;width:100%;font-size:10.5px;color:var(--text)" />
+      </label>
+      <div class="seg" id="methodSeg">
+        ${filters.map(([id, label, count]) => `
+          <button type="button" data-seg="${id}" class="${methodFilter === id ? 'on' : ''}">${label}<span class="n">${count}</span></button>`).join('')}
+      </div>
+      <button class="add-method" type="button" data-addmethod>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>
+        添加方法
+      </button>
+    </div>
+    ${groups}
+  `;
+}
+
+function renderOverview(agent) {
+  const stats = agentStats(agent);
+  const enabled = agent.methods.map(id => METHODS.find(method => method.id === id)).filter(Boolean);
+  const recent = agent.recent || [];
+  return `
+    <div class="overview-grid">
+      <div class="stat-card"><div class="k">Methods</div><div class="v">${agent.methods.length}<small>/ ${METHODS.length}</small></div><div class="d">已启用方法</div></div>
+      <div class="stat-card"><div class="k">Runs</div><div class="v">${stats.runs}<small>次</small></div><div class="d">本月运行</div></div>
+      <div class="stat-card"><div class="k">Success</div><div class="v">${esc(stats.success)}</div><div class="d">最近 30 天</div></div>
+      <div class="stat-card"><div class="k">Avg</div><div class="v">${esc(stats.avg)}</div><div class="d">单次运行</div></div>
+    </div>
+    <div class="panel-card">
+      <h3>它负责什么</h3>
+      <p>${esc(agent.desc)}</p>
+    </div>
+    <div class="panel-card">
+      <h3>方法组合 <span style="color:var(--faint);font-weight:400">· ${enabled.length} 个</span></h3>
+      <div class="chip-row">
+        ${enabled.map(method => `<span class="chip ${method.scope === 'private' ? 'private' : ''}">${esc(method.id)}</span>`).join('')}
+        ${(agent.denied || []).map(id => `<span class="chip off">${esc(id)}</span>`).join('')}
+      </div>
+    </div>
+    <div class="panel-card">
+      <h3>最近运行</h3>
+      ${recent.length ? recent.map(run => `<div class="kv"><span>${esc(run.time)}</span><b>${esc(run.plan)}</b><b class="${run.result === '警告' ? 'warn' : 'ok'}">${esc(run.result)}</b></div>`).join('') : '<p>还没有运行记录。</p>'}
+    </div>
+  `;
+}
+
+function renderPrompt(agent) {
+  return `
+    <div class="panel-card">
+      <h3>系统提示词</h3>
+      <div class="prompt-box">${esc(agent.prompt)}</div>
+    </div>
+    <div class="panel-card">
+      <h3>可用变量</h3>
+      <div class="chip-row">
+        <span class="chip">{{repo}}</span><span class="chip">{{diff}}</span><span class="chip">{{plan}}</span>
+        <span class="chip">{{workspace}}</span><span class="chip">{{agent}}</span><span class="chip">{{user_input}}</span>
+      </div>
+      <p style="margin-top:8px;color:var(--faint);font-size:9px">变量在节点启动时注入；运行时快照不可变。</p>
+    </div>
+    <div class="panel-card">
+      <h3>生成参数</h3>
+      <div class="kv"><span>模型</span><b class="mono">${esc(agent.model)}</b></div>
+      <div class="kv"><span>温度</span><b class="mono">${agent.temperature ?? 0.2}</b></div>
+      <div class="kv"><span>最大轮次</span><b class="mono">${agent.maxTurns ?? 10}</b></div>
+      <div class="kv"><span>输出格式</span><b>报告 + 结构化结果</b></div>
+    </div>
+  `;
+}
+
+function renderPermissions(agent) {
+  const enabled = agent.methods.map(id => METHODS.find(method => method.id === id)).filter(Boolean);
+  const shared = enabled.filter(method => method.scope === 'shared');
+  const priv = enabled.filter(method => method.scope === 'private');
+  return `
+    <div class="panel-card">
+      <h3>工具策略</h3>
+      <p>每个工具调用执行前二次校验：作用域 → 权限 → 工作区。自定义 Agent 的方法开关只是第一层，拒绝列表优先于允许。</p>
+    </div>
+    <div class="panel-card">
+      <h3>允许调用 <span style="color:var(--faint);font-weight:400">· ${enabled.length}</span></h3>
+      <div class="chip-row">
+        ${enabled.map(method => `<span class="chip ${method.scope === 'private' ? 'private' : ''}">${esc(method.id)}</span>`).join('') || '<span class="chip">—</span>'}
+      </div>
+    </div>
+    <div class="panel-card">
+      <h3>明确拒绝 <span style="color:var(--faint);font-weight:400">· ${(agent.denied || []).length}</span></h3>
+      <div class="chip-row">
+        ${(agent.denied || []).map(id => `<span class="chip off">${esc(id)}</span>`).join('') || '<span class="chip">—</span>'}
+      </div>
+    </div>
+    <div class="panel-card">
+      <h3>工作区与权限</h3>
+      <div class="kv"><span>工作区</span><b>${esc(agent.workspace)}</b></div>
+      <div class="kv"><span>权限</span><b class="warn">${esc(agent.permission)}</b></div>
+      <div class="kv"><span>公用工具</span><b>${shared.length} 个</b></div>
+      <div class="kv"><span>私有工具</span><b>${priv.length} 个</b></div>
+      <div class="kv"><span>自动 merge</span><b>关闭</b></div>
+    </div>
+  `;
+}
+
+function renderUsage(agent) {
+  const stats = agentStats(agent);
+  const recent = agent.recent || [];
+  return `
+    <div class="overview-grid">
+      <div class="stat-card"><div class="k">Runs</div><div class="v">${stats.runs}<small>次</small></div><div class="d">本月</div></div>
+      <div class="stat-card"><div class="k">Success</div><div class="v">${esc(stats.success)}</div><div class="d">最近 30 天</div></div>
+      <div class="stat-card"><div class="k">Avg</div><div class="v">${esc(stats.avg)}</div><div class="d">单次运行</div></div>
+      <div class="stat-card"><div class="k">Tokens</div><div class="v">${esc(stats.tokens)}</div><div class="d">本月累计</div></div>
+    </div>
+    <div class="panel-card" style="padding:0;overflow:hidden">
+      ${recent.length ? `
+        <table class="run-table">
+          <thead><tr><th>时间</th><th>计划 / 任务</th><th>时长</th><th>结果</th><th>方式</th></tr></thead>
+          <tbody>
+            ${recent.map(run => `<tr>
+              <td class="mono">${esc(run.time)}</td>
+              <td>${esc(run.plan)}</td>
+              <td class="mono">${esc(run.dur)}</td>
+              <td class="${run.result === '警告' ? 'warn' : 'ok'}">${esc(run.result)}</td>
+              <td class="mono">${esc(run.mode)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>` : '<p style="padding:14px;color:var(--faint)">还没有运行记录。保存后从 DAG 节点或新会话调用它。</p>'}
+    </div>
+    <p style="color:var(--faint);font-size:9px;line-height:1.6">运行记录按 Agent 聚合；点击可跳到对应计划 / 会话（演示稿里未接）。</p>
+  `;
+}
+
+function renderBody(agent) {
+  if (activeTab === 'overview') return renderOverview(agent);
+  if (activeTab === 'prompt') return renderPrompt(agent);
+  if (activeTab === 'permissions') return renderPermissions(agent);
+  if (activeTab === 'usage') return renderUsage(agent);
+  return renderMethods(agent);
+}
+
+function renderMain() {
+  const agent = currentAgent();
+  $('#agentHead').innerHTML = renderHead(agent);
+  $('#agentBody').innerHTML = renderBody(agent);
+  if (activeTab === 'methods') applyMethodFilter();
+}
+
+function renderConfig() {
+  const agent = currentAgent();
+  const stats = agentStats(agent);
+  const enabled = agent.methods.map(id => METHODS.find(method => method.id === id)).filter(Boolean);
+  const shared = enabled.filter(method => method.scope === 'shared').length;
+  const priv = enabled.filter(method => method.scope === 'private').length;
+  const denied = (agent.denied || []).length;
+  $('#configBadge').textContent = `${agent.id.replace(/-/g, '_').toUpperCase()}.JSON`;
+  $('#agentConfig').innerHTML = `
+    <div class="config-section">
+      <div class="config-label">身份 <span class="grow"></span><span class="count">${agent.scope === 'custom' ? 'CUSTOM' : 'BUILTIN'}</span></div>
+      <div class="config-box">
+        <div class="config-row"><span class="k">引擎</span><span class="v ui">${esc(engineOf(agent.engine).full)}</span></div>
+        <div class="config-row"><span class="k">模型</span><span class="v">${esc(agent.model)}</span></div>
+        <div class="config-row"><span class="k">工作区</span><span class="v ui">${esc(agent.workspace)}</span></div>
+        <div class="config-row"><span class="k">权限</span><span class="v ui">${esc(agent.permission)}</span></div>
+        <div class="config-row"><span class="k">最大轮次</span><span class="v">${agent.maxTurns ?? 10}</span></div>
+        <div class="config-row"><span class="k">温度</span><span class="v">${agent.temperature ?? 0.2}</span></div>
+      </div>
+    </div>
+    <div class="config-section">
+      <div class="config-label">方法策略 <span class="grow"></span><span class="count">${enabled.length}/${METHODS.length}</span></div>
+      <div class="config-box">
+        <div class="config-row"><span class="k">公用工具</span><span class="v">${shared}</span></div>
+        <div class="config-row"><span class="k">私有工具</span><span class="v">${priv}</span></div>
+        <div class="config-row"><span class="k">明确拒绝</span><span class="v">${denied}</span></div>
+        <div class="config-row"><span class="k">执行前校验</span><span class="v ui" style="color:var(--green)">开启</span></div>
+      </div>
+    </div>
+    <div class="config-section">
+      <div class="config-label">使用 <span class="grow"></span><span class="count">30D</span></div>
+      <div class="config-box">
+        <div class="config-row"><span class="k">本月运行</span><span class="v">${stats.runs} 次</span></div>
+        <div class="config-row"><span class="k">成功率</span><span class="v">${esc(stats.success)}</span></div>
+        <div class="config-row"><span class="k">平均时长</span><span class="v">${esc(stats.avg)}</span></div>
+        <div class="config-row"><span class="k">Tokens</span><span class="v">${esc(stats.tokens)}</span></div>
+      </div>
+    </div>
+    <div class="config-note">
+      ${agent.scope === 'custom'
+        ? `配置存于 <span style="font-family:var(--font-mono)">~/.prism/agents/${esc(agent.id)}.json</span>，可导出 / 分享。`
+        : '内置配置随版本更新；复制为自定义后才会写入用户目录。'}
+    </div>
+  `;
+}
+
+function renderAll() {
+  const custom = AGENTS.filter(agent => agent.scope === 'custom').length;
+  const paneSub = $('#paneSub');
+  if (paneSub) paneSub.textContent = `${AGENTS.length} agents · ${custom} custom`;
+  const tbStatus = $('#tbStatus');
+  if (tbStatus) tbStatus.innerHTML = `<i class="dot ok"></i>${AGENTS.length} agents · ${METHODS.length} methods`;
+  renderAgentList();
+  renderMain();
+  renderConfig();
+}
+
+function applyMethodFilter() {
+  const query = methodQuery.trim().toLowerCase();
+  document.querySelectorAll('#agentBody .method-row').forEach(row => {
+    const matchQuery = !query || row.dataset.name.includes(query);
+    const matchFilter =
+      methodFilter === 'all' ||
+      (methodFilter === 'enabled' && row.dataset.enabled === '1') ||
+      (methodFilter === 'private' && row.dataset.scope === 'private') ||
+      (methodFilter === 'off' && row.dataset.enabled === '0');
+    row.hidden = !(matchQuery && matchFilter);
+  });
+  document.querySelectorAll('#agentBody .method-group').forEach(group => {
+    group.hidden = !group.querySelector('.method-row:not([hidden])');
+  });
+}
+</script>
+<script>
+/* ============================================================
+ * 交互：选中 Agent、方法开关、筛选、创建抽屉、主题
+ * ============================================================ */
+
+const drawer = $('#drawer');
+const drawerBackdrop = $('#drawerBackdrop');
+
+function setDrawerOpen(open) {
+  drawer.classList.toggle('show', open);
+  drawerBackdrop.classList.toggle('show', open);
+  drawer.setAttribute('aria-hidden', String(!open));
+  document.body.style.overflow = open ? 'hidden' : '';
+  if (open) {
+    window.setTimeout(() => $('#naName').focus(), 120);
+  }
+}
+
+function selectColor(color) {
+  const row = $('#colorRow');
+  let dot = Array.from(row.querySelectorAll('.color-dot')).find(item => item.dataset.color === color);
+  if (!dot) {
+    dot = document.createElement('button');
+    dot.type = 'button';
+    dot.className = 'color-dot';
+    dot.dataset.color = color;
+    dot.style.setProperty('--c', color);
+    dot.setAttribute('aria-label', color);
+    row.append(dot);
+  }
+  row.querySelectorAll('.color-dot').forEach(item => item.classList.toggle('on', item === dot));
+}
+
+function fillAgentForm(agent, asCopy) {
+  $('#naName').value = asCopy ? `${agent.name} 副本` : agent.name;
+  $('#naRole').value = agent.role;
+  $('#naPrompt').value = agent.prompt || '';
+  $('#naEngine').value = agent.engine;
+  $('#naWorkspace').value = agent.workspace;
+  $('#naPermission').value = agent.permission;
+  const modelSelect = $('#naModel');
+  if (!Array.from(modelSelect.options).some(option => option.value === agent.model)) {
+    const option = document.createElement('option');
+    option.value = agent.model;
+    option.textContent = agent.model;
+    modelSelect.append(option);
+  }
+  modelSelect.value = agent.model;
+  selectColor(agent.color);
+  document.querySelectorAll('.method-pick input').forEach(input => {
+    input.checked = agent.methods.includes(input.value);
+  });
+}
+
+function fillBlankForm() {
+  $('#naName').value = '我的 Agent';
+  $('#naRole').value = '自定义 · 专用助手';
+  $('#naPrompt').value = '你是我的专用助手。先确认目标和验收标准，再开始执行；遇到不确定的地方先问，不要猜。';
+  $('#naEngine').value = '原生';
+  $('#naModel').value = 'deepseek-chat';
+  $('#naWorkspace').value = 'shared · 只读';
+  $('#naPermission').value = '只读';
+  selectColor('#0f766e');
+  document.querySelectorAll('.method-pick input').forEach(input => {
+    input.checked = ['read_file', 'grep', 'run_command'].includes(input.value);
+  });
+}
+
+function markTemplate(key) {
+  document.querySelectorAll('#templateRow .template-chip').forEach(chip => {
+    chip.classList.toggle('on', chip.dataset.template === key);
+  });
+}
+
+function applyTemplate(key) {
+  markTemplate(key);
+  if (key === 'blank') {
+    drawerMode = 'blank';
+    drawerSource = null;
+    fillBlankForm();
+    $('#drawerTitle').textContent = '新建 Agent';
+    $('#drawerSub').textContent = '从模板开始，随时可以再改';
+    $('#drawerSubmit').textContent = '创建 Agent';
+    return;
+  }
+  const source = AGENTS.find(agent => agent.id === key);
+  if (!source) return;
+  drawerMode = 'template';
+  drawerSource = source;
+  fillAgentForm(source, true);
+  $('#drawerTitle').textContent = '从模板新建';
+  $('#drawerSub').textContent = `基于「${source.name}」，创建后可改`;
+  $('#drawerSubmit').textContent = '创建 Agent';
+}
+
+function openDrawer(mode = 'blank', source = null) {
+  if (mode === 'clone' && source) {
+    drawerMode = 'clone';
+    drawerSource = source;
+    fillAgentForm(source, true);
+    markTemplate(source.id);
+    $('#drawerTitle').textContent = '复制 Agent';
+    $('#drawerSub').textContent = `基于「${source.name}」创建一份可改的副本`;
+    $('#drawerSubmit').textContent = '创建副本';
+  } else {
+    applyTemplate('blank');
+  }
+  setDrawerOpen(true);
+}
+
+function closeDrawer() {
+  setDrawerOpen(false);
+}
+
+function saveAgent() {
+  const agent = currentAgent();
+  if (agent.scope !== 'custom') {
+    showToast('内置 Agent 只读，先「复制为自定义」再保存');
+    return;
+  }
+  showToast(`已保存「${agent.name}」· ${agent.id}.json（演示）`);
+}
+
+async function copyAgentJson() {
+  const agent = currentAgent();
+  const payload = {
+    id: agent.id,
+    name: agent.name,
+    role: agent.role,
+    engine: agent.engine,
+    model: agent.model,
+    workspace: agent.workspace,
+    permission: agent.permission,
+    prompt: agent.prompt,
+    methods: agent.methods,
+    denied: agent.denied || []
+  };
+  const text = JSON.stringify(payload, null, 2);
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      showToast('Agent JSON 已复制');
+    } else {
+      showToast('JSON 已生成（演示稿未接剪贴板）');
+    }
+  } catch {
+    showToast('JSON 已生成（浏览器拒绝剪贴板）');
+  }
+}
+
+/* ---------- 左栏：选择 Agent ---------- */
+$('#agentList').addEventListener('click', event => {
+  const item = event.target.closest('[data-agent]');
+  if (!item) return;
+  selectedId = item.dataset.agent;
+  activeTab = 'methods';
+  methodFilter = 'all';
+  methodQuery = '';
+  renderAll();
+});
+
+/* ---------- 中栏：页签与顶部动作 ---------- */
+$('#agentHead').addEventListener('click', event => {
+  const tab = event.target.closest('[data-tab]');
+  if (tab) {
+    activeTab = tab.dataset.tab;
+    renderMain();
+    return;
+  }
+  const action = event.target.closest('[data-action]');
+  if (!action) return;
+  if (action.dataset.action === 'save') saveAgent();
+  else if (action.dataset.action === 'clone') openDrawer('clone', currentAgent());
+  else if (action.dataset.action === 'use') showToast(`已选择「${currentAgent().name}」，新会话会用它（演示）`);
+  else if (action.dataset.action === 'more') showToast('更多：导出 / 复制 / 停用（演示）');
+});
+
+/* ---------- 中栏：方法开关、筛选、参数 ---------- */
+$('#agentBody').addEventListener('click', event => {
+  const methodButton = event.target.closest('[data-method]');
+  if (methodButton) {
+    const agent = currentAgent();
+    if (agent.scope !== 'custom') {
+      showToast('内置 Agent 只读，点「复制为自定义」后可改方法');
+      return;
+    }
+    const id = methodButton.dataset.method;
+    if (agent.methods.includes(id)) {
+      agent.methods = agent.methods.filter(method => method !== id);
+      showToast(`已停用 ${id}`);
+    } else {
+      agent.methods = [...agent.methods, id];
+      agent.denied = (agent.denied || []).filter(method => method !== id);
+      showToast(`已启用 ${id}`);
+    }
+    renderAll();
+    return;
+  }
+
+  const segment = event.target.closest('[data-seg]');
+  if (segment) {
+    methodFilter = segment.dataset.seg;
+    document.querySelectorAll('#methodSeg [data-seg]').forEach(button => {
+      button.classList.toggle('on', button.dataset.seg === methodFilter);
+    });
+    applyMethodFilter();
+    return;
+  }
+
+  const params = event.target.closest('[data-params]');
+  if (params) {
+    showToast(`参数：${params.dataset.params}`);
+    return;
+  }
+
+  if (event.target.closest('[data-addmethod]')) {
+    showToast('方法目录共 13 个；演示稿先不打开全量目录');
+  }
+});
+
+$('#agentBody').addEventListener('input', event => {
+  if (event.target.id !== 'methodSearch') return;
+  methodQuery = event.target.value;
+  applyMethodFilter();
+});
+
+/* ---------- 右栏 ---------- */
+$('#saveBtn').addEventListener('click', saveAgent);
+$('#exportBtn').addEventListener('click', copyAgentJson);
+
+/* ---------- 新建 / 复制 Agent 抽屉 ---------- */
+document.querySelectorAll('[data-open-drawer]').forEach(button => {
+  button.addEventListener('click', () => openDrawer('blank'));
+});
+
+$('#drawerClose').addEventListener('click', closeDrawer);
+$('#drawerCancel').addEventListener('click', closeDrawer);
+drawerBackdrop.addEventListener('click', closeDrawer);
+
+$('#templateRow').addEventListener('click', event => {
+  const chip = event.target.closest('[data-template]');
+  if (chip) applyTemplate(chip.dataset.template);
+});
+
+$('#colorRow').addEventListener('click', event => {
+  const dot = event.target.closest('[data-color]');
+  if (dot) selectColor(dot.dataset.color);
+});
+
+$('#newAgentForm').addEventListener('submit', event => {
+  event.preventDefault();
+  const name = $('#naName').value.trim();
+  if (!name) {
+    showToast('先给 Agent 起个名字');
+    $('#naName').focus();
+    return;
+  }
+  const role = $('#naRole').value.trim() || '自定义 · 专用助手';
+  const methods = Array.from(document.querySelectorAll('.method-pick input:checked')).map(input => input.value);
+  const color = ($('#colorRow .color-dot.on') || {}).dataset?.color || '#0f766e';
+  const agent = {
+    id: `custom-${Date.now().toString(36)}`,
+    name,
+    initial: Array.from(name)[0] || 'A',
+    color,
+    scope: 'custom',
+    basedOn: drawerSource ? drawerSource.name : '空白',
+    role,
+    desc: role,
+    engine: $('#naEngine').value,
+    model: $('#naModel').value,
+    workspace: $('#naWorkspace').value,
+    permission: $('#naPermission').value,
+    maxTurns: 10,
+    temperature: 0.2,
+    methods,
+    denied: [],
+    stats: { runs: 0, success: '未运行', avg: '—', tokens: '0' },
+    prompt: $('#naPrompt').value.trim() || '你是我的专用助手。',
+    recent: []
+  };
+  AGENTS.push(agent);
+  selectedId = agent.id;
+  activeTab = 'methods';
+  methodFilter = 'all';
+  methodQuery = '';
+  closeDrawer();
+  renderAll();
+  showToast(`已创建「${name}」`);
+});
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && drawer.classList.contains('show')) closeDrawer();
+});
+
+/* ---------- 主题 ---------- */
+function setTheme(theme) {
+  const next = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  $('#themeLabel').textContent = next === 'dark' ? '浅色' : '深色';
+  try {
+    localStorage.setItem('prism-agent-theme', next);
+  } catch {
+    /* 忽略隐私模式下的 localStorage 错误 */
+  }
+}
+
+let initialTheme = 'light';
+try {
+  initialTheme = localStorage.getItem('prism-agent-theme') || 'light';
+} catch {
+  initialTheme = 'light';
+}
+setTheme(initialTheme);
+
+$('#themeBtn').addEventListener('click', () => {
+  setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+});
+
+/* ---------- 初始化 ---------- */
+renderAll();
+
+/* 设计稿预览深链：?theme=dark、?drawer=1 */
+const previewParams = new URLSearchParams(location.search);
+if (previewParams.get('theme') === 'dark') setTheme('dark');
+if (previewParams.get('drawer') === '1') {
+  openDrawer('blank');
+}
+</script>
 </body>
 </html>
