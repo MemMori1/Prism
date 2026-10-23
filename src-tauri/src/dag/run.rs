@@ -58,7 +58,8 @@ pub struct NodeLive {
     /// 到现在为止本节点累计的 token（跨重试累计）。
     pub tokens_in: i64,
     pub tokens_out: i64,
-    /// 正在跑第几轮模型调用（1 起）。0 = 还没开始第一轮。
+    /// 正在跑第几轮模型调用（1 起）。0 = 还没开始第一轮。与快照里的
+    /// `turns` 同义：轮询兜底读到的数字和增量事件说的一致。
     pub turn: u32,
     /// 轮次上限。`turn/max_turns` 一起给出"进度感"：卡住时能看出是
     /// 第 3 轮还是第 11 轮，而不是只有一句"运行中"。
@@ -140,7 +141,8 @@ pub struct NodeRun {
     pub tokens_out: i64,
     /// 工具调用摘要（`read_file src/x.rs` 这种），给运行面板做过程感。
     pub steps: Vec<String>,
-    /// 已经完成的模型轮次。快照也带上：刷新页面后不会退回"第 0 轮"。
+    /// 当前（或最后）一轮模型调用，1 起。和 `NodeLive.turn` 同一个数字：
+    /// 事件断了靠轮询读快照，两边不能各说一套。
     #[serde(default)]
     pub turns: u32,
     /// 这一节点允许的最大轮次（`max_turns`）。面板显示 "3/12"，
@@ -601,7 +603,9 @@ impl RunHandle {
         }
         if let Ok(mut run) = self.state.lock() {
             if let Some(node) = run.nodes.iter_mut().find(|node| node.id == node_id) {
-                node.turns = turn.saturating_sub(1);
+                // 存"当前轮次"而不是"已完成轮次"：轮询兜底读的是快照，
+                // 两边必须说同一个数字，否则事件一断就退回"第 0 轮"。
+                node.turns = turn;
                 node.max_turns = max_turns;
             }
         }
@@ -1087,9 +1091,9 @@ mod tests {
         let (handle, seen) = handle("n1");
         handle.push_turn("n1", 1, 12);
         handle.push_turn("n1", 2, 12);
-        // 快照里存"已完成的轮次"：第 2 轮刚开始，完成数是 1。
+        // 快照里存"当前轮次"：和增量事件同一个数字，事件断了轮询也对得上。
         let node = node_of(&handle);
-        assert_eq!(node.turns, 1, "快照按已完成轮次记");
+        assert_eq!(node.turns, 2, "快照按当前轮次记");
         assert_eq!(node.max_turns, 12);
 
         let events = seen.lock().unwrap().clone();
