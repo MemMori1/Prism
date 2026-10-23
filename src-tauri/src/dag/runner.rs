@@ -94,6 +94,12 @@ pub struct NodeRequest {
     pub stop: StopHandle,
     /// 正文增量：给运行面板做直播。
     pub on_text: Arc<dyn Fn(&str) + Send + Sync>,
+    /// 新落的一步工具调用（`read_file src/x.rs`）：面板上"现在在干什么"。
+    pub on_step: Arc<dyn Fn(&str) + Send + Sync>,
+    /// 本轮 token 用量：跑长节点时数字要动，否则看起来像卡住了。
+    pub on_usage: Arc<dyn Fn(i64, i64) + Send + Sync>,
+    /// 进入第几轮（1 起）+ 轮次上限。模型久不吐字时，面板靠它说明"还在第几轮"。
+    pub on_turn: Arc<dyn Fn(u32, u32) + Send + Sync>,
 }
 
 /// 一次节点执行的产出。
@@ -337,6 +343,9 @@ impl NodeRunner for NativeRunner {
             // 最后一轮不给工具：逼它把已知信息写成报告。否则"跑满轮次"的节点
             // 会带着一串半成品工具结果结束，下游什么也接不到。
             let final_turn = turn + 1 == max_turns;
+            // 先报轮次再发请求：请求要等几秒到几分钟，这段时间面板至少要有个
+            // "第 N/M 轮"在走，而不是干等一句"运行中"。
+            (request.on_turn)(turn + 1, max_turns);
             let turn_specs: &[Value] = if final_turn { &[] } else { &specs };
             if final_turn {
                 messages.push(serde_json::json!({
@@ -365,6 +374,8 @@ impl NodeRunner for NativeRunner {
             if let Some(usage) = chat.usage {
                 output.tokens_in += usage.input;
                 output.tokens_out += usage.output;
+                // 逐轮报出去：一个节点可能要跑十轮，等结束才显示数字就是十分钟空白。
+                (request.on_usage)(usage.input, usage.output);
             }
             output.turns = turn + 1;
 
@@ -427,13 +438,16 @@ impl NodeRunner for NativeRunner {
                     }
                 };
                 if output.steps.len() < 24 {
-                    output.steps.push(format!(
+                    let step = format!(
                         "{}{}",
                         call.name,
                         summarize_args(&args)
                             .map(|text| format!(" {text}"))
                             .unwrap_or_default()
-                    ));
+                    );
+                    // 先推给面板再入队：这一步已经在跑了，别等结果回来才让人看见。
+                    (request.on_step)(&step);
+                    output.steps.push(step);
                 }
                 messages.push(serde_json::json!({
                     "role": "tool",

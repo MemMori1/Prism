@@ -1132,15 +1132,142 @@
   flex: 1;
 }
 
+/* 「现在在干什么」：一行，跟着最新一步走。没有它，"运行中"三个字跟卡死没区别 */
+.run-activity {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 10px;
+}
+
+.run-activity-node {
+  flex: none;
+  font-weight: 650;
+}
+
+.run-activity-step {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 9.5px;
+}
+
+/* 长时间没有新输出：说实话比装作在跑有用 */
+.run-activity-stall {
+  flex: none;
+  color: var(--amber);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+/* 轮次：模型不吐字时，唯一还在动的数字 */
+.run-activity-turn {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  color: var(--text);
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 15px;
+}
+
+/* 静默时长：正常是灰的，久了变黄、再久变红——一眼看出"在等"还是"像死了" */
+.run-activity-idle {
+  flex: none;
+  color: var(--faint);
+  font-size: 9.5px;
+}
+
+.run-activity-idle.slow {
+  color: var(--amber);
+}
+
+.run-activity-idle.stuck {
+  color: var(--red, #d9534f);
+  font-weight: 650;
+}
+
+.kv-warn {
+  color: var(--amber);
+}
+
+/* 跑完后的结论条：成没成、几个失败、为什么 */
+.run-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 10.5px;
+}
+
+.run-result.good {
+  border-color: color-mix(in srgb, var(--green, #3fa66a) 40%, var(--border));
+  background: color-mix(in srgb, var(--green, #3fa66a) 8%, transparent);
+}
+
+.run-result.bad {
+  border-color: color-mix(in srgb, var(--red, #d9534f) 45%, var(--border));
+  background: color-mix(in srgb, var(--red, #d9534f) 8%, transparent);
+}
+
+.run-result-title {
+  font-weight: 700;
+}
+
+.run-result-text {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.run-result-fail {
+  flex: 1 0 100%;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 9.5px;
+}
+
+.run-result-fail b {
+  flex: none;
+  color: var(--text);
+}
+
+.run-result-fail .mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-activity-clock {
+  flex: none;
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 9px;
+}
+
 .run-nodes {
   display: flex;
   align-items: center;
   gap: 5px;
   overflow-x: auto;
   scrollbar-width: none;
-}
-
-.run-nodes::-webkit-scrollbar {
+}.run-nodes::-webkit-scrollbar {
   display: none;
 }
 
@@ -1424,6 +1551,18 @@
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 实时正文：比产出矮一档，位置留给下面的最终产出；描边用强调色区分"还在写" */
+.run-live {
+  margin-bottom: 10px;
+}
+
+.run-pre.live {
+  max-height: 220px;
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--panel-2);
+  color: var(--muted);
 }
 
 /* ---- 制品 ---- */

@@ -1812,10 +1812,16 @@ pub fn dag_run(
     // 执行器由插件注册（`dag.executor.*`）：装没装、哪个 Agent 缺，一次说清。
     // 一个都没装时也走这条路——报错文案就在 preflight 里。
     dag::executor::preflight(&plan, &agents)?;
+    let snapshot_app = app.clone();
     let notify = std::sync::Arc::new(move |run: &dag::DagRun| {
-        let _ = app.emit(dag::run::EVENT_NAME, run);
+        let _ = snapshot_app.emit(dag::run::EVENT_NAME, run);
     });
-    hub.start(plan, &agents, None, notify)
+    // 增量（正文 / 步骤 / token）走单独一条：快照太大，逐 delta 推会把 IPC 打满。
+    let live_app = app.clone();
+    let live: dag::run::LiveNotifier = std::sync::Arc::new(move |event: &dag::run::NodeLive| {
+        let _ = live_app.emit(dag::run::LIVE_EVENT_NAME, event);
+    });
+    hub.start_with(plan, &agents, None, notify, live)
 }
 
 /// 已装的节点执行器 id（Agent 编辑器据此把"跑不了"的引擎标出来）。

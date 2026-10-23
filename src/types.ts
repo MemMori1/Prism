@@ -807,6 +807,10 @@ export interface DagNodeRun {
   tokensOut: number
   /** 工具调用摘要（`read_file src/x.rs`），给过程感。 */
   steps: string[]
+  /** 已经完成的模型轮次（快照也带，刷新后不会退回 0）。 */
+  turns: number
+  /** 这一节点允许的最大轮次；0 表示执行器没报（外部引擎）。 */
+  maxTurns: number
   /** 主产出落制品的结果；写入失败或正文为空时为 null。 */
   artifact: ArtifactRef | null
 }

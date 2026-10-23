@@ -428,6 +428,25 @@ fn build_request(
             let node_id = node.id.clone();
             Arc::new(move |text: &str| handle.push_text(&node_id, text))
         },
+        on_step: {
+            let handle = Arc::clone(handle);
+            let node_id = node.id.clone();
+            Arc::new(move |step: &str| handle.push_step(&node_id, step))
+        },
+        on_usage: {
+            let handle = Arc::clone(handle);
+            let node_id = node.id.clone();
+            Arc::new(move |tokens_in: i64, tokens_out: i64| {
+                handle.push_usage(&node_id, tokens_in, tokens_out)
+            })
+        },
+        on_turn: {
+            let handle = Arc::clone(handle);
+            let node_id = node.id.clone();
+            Arc::new(move |turn: u32, max_turns: u32| {
+                handle.push_turn(&node_id, turn, max_turns)
+            })
+        },
     };
     Ok((request, runner))
 }

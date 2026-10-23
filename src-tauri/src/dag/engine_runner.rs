@@ -402,6 +402,9 @@ mod tests {
             selection: ToolSelection::default(),
             stop: StopHandle::new(Arc::new(std::sync::atomic::AtomicBool::new(false)), None),
             on_text: Arc::new(|_: &str| {}),
+            on_step: Arc::new(|_: &str| {}),
+            on_usage: Arc::new(|_: i64, _: i64| {}),
+            on_turn: Arc::new(|_: u32, _: u32| {}),
         };
         let text = compose_prompt(&request);
         assert!(text.starts_with("你只挑毛病"));
@@ -458,6 +461,9 @@ mod tests {
                     buffer.push_str(delta);
                 }
             }),
+            on_step: Arc::new(|_: &str| {}),
+            on_usage: Arc::new(|_: i64, _: i64| {}),
+            on_turn: Arc::new(|_: u32, _: u32| {}),
         };
 
         let output = runner.run(request).expect("opencode 节点应当跑通");

@@ -170,13 +170,57 @@ const ARTIFACT_HINT = '{{artifacts.<上游>.summary}}'
 
 /** 与 Rust 侧 `dag::run::EVENT_NAME` 对齐；改名字两边都要改。 */
 const EVENT_NAME = 'dag.run'
+/** 节点增量事件（正文 / 步骤 / token）。与 `dag::run::LIVE_EVENT_NAME` 对齐。 */
+const LIVE_EVENT_NAME = 'dag.node.live'
+
+/**
+ * 一条增量事件。字段与 Rust 侧 `NodeLive` 一一对应：`delta` 是正文片段，
+ * `step` 是新落的一步工具调用，token 是"到现在为止"的累计值。
+ */
+interface NodeLiveEvent {
+  runId: string
+  nodeId: string
+  delta: string
+  step: string | null
+  tokensIn: number
+  tokensOut: number
+  /** 正在跑第几轮 / 上限。模型久不吐字时，靠它说明进度。 */
+  turn: number
+  maxTurns: number
+}
+
+/** 前端侧叠在快照上的直播态。节点落定时丢弃，改用快照里的完整正文。 */
+interface LiveState {
+  text: string
+  steps: string[]
+  tokensIn: number
+  tokensOut: number
+  /** 最后一次收到增量的时刻：用来判断"是在慢慢跑，还是真卡住了"。 */
+  at: number
+  turn: number
+  maxTurns: number
+}
 
 const run = ref<DagRun | null>(null)
 const runBusy = ref(false)
 /** 每秒推进一次，让「已跑 3m12s」自己走。只在有活运行时开表。 */
 const now = ref(Date.now())
 let ticker = 0
+/** 轮询兜底（事件通道之外的保险），只在真跑着的时候开。 */
+let poll = 0
 let unlisten: (() => void) | null = null
+let unlistenLive: (() => void) | null = null
+/**
+ * `nodeId -> 直播态`。
+ *
+ * 存成普通对象并整体替换，而不是 `Map`：Vue 的响应式对 Map 的增删要走
+ * `reactive`，这里只在事件到来时换一份，模板拿到的引用一定是最新的。
+ */
+const liveByNode = ref<Record<string, LiveState>>({})
+/** 直播正文最多留这么多字符：长报告跑十分钟，不能把所有增量都攒在内存里。 */
+const LIVE_TEXT_LIMIT = 24_000
+/** 实时正文的滚动容器：新内容进来要跟着到底，否则看到的永远是开头。 */
+const livePre = ref<HTMLElement | null>(null)
 
 /** 制品预览：点开节点的产物时按 id 取回正文。 */
 const artifactPreview = ref<{ ref: ArtifactRef; text: string; truncated: boolean } | null>(null)
@@ -220,6 +264,138 @@ const selectedElapsed = computed(() =>
   selectedRun.value ? nodeElapsed(selectedRun.value, now.value) : 0,
 )
 
+/** 选中节点的直播态。只有正在跑的节点才有内容。 */
+const selectedLive = computed(() =>
+  selectedNodeId.value ? liveByNode.value[selectedNodeId.value] : undefined,
+)
+
+/**
+ * 过程列表。
+ *
+ * 跑着的时候快照是旧的（步骤只在落定时才写进记录），所以优先用增量里的；
+ * 落定后快照才是准的（它含重试前几次的步骤）。
+ */
+const selectedSteps = computed(() => {
+  const item = selectedRun.value
+  if (!item) return []
+  const live = selectedLive.value
+  if (live?.steps.length) return live.steps
+  return item.steps
+})
+
+/** 选中节点的 token：跑着显示实时累计，落定后以快照为准。 */
+const selectedTokens = computed(() => {
+  const item = selectedRun.value
+  const live = selectedLive.value
+  if (item && live && item.status === 'running') {
+    return {
+      tin: Math.max(item.tokensIn, live.tokensIn),
+      tout: Math.max(item.tokensOut, live.tokensOut),
+    }
+  }
+  return { tin: item?.tokensIn ?? 0, tout: item?.tokensOut ?? 0 }
+})
+
+/** 当前正在跑的节点（运行条上显示"现在谁在干什么"）。 */
+const activeNode = computed(
+  () => run.value?.nodes.find(node => node.status === 'running') ?? null,
+)
+
+/** 它最近的一步：优先增量，其次上一次快照。 */
+const activeStep = computed(() => {
+  const node = activeNode.value
+  if (!node) return ''
+  const live = liveByNode.value[node.id]
+  if (live?.steps.length) return live.steps[live.steps.length - 1]
+  if (node.steps.length) return node.steps[node.steps.length - 1]
+  return live?.text ? '正在输出…' : '正在思考…'
+})
+
+/** 运行条上的 token 总数：把正在跑那一段实时的也算进去。 */
+const totalTokens = computed(() => {
+  let tin = 0
+  let tout = 0
+  for (const node of run.value?.nodes ?? []) {
+    const live = liveByNode.value[node.id]
+    tin += Math.max(node.tokensIn, live?.tokensIn ?? 0)
+    tout += Math.max(node.tokensOut, live?.tokensOut ?? 0)
+  }
+  return { tin, tout }
+})
+
+/**
+ * 正在跑的节点已经多久没有新动静（毫秒）。
+ *
+ * 引擎卡在模型请求上时，面板只会一直显示"运行中"——用户没法区分"在慢慢跑"
+ * 和"真挂了"。超过阈值就明说一句，而不是让人盯着猜。
+ */
+const idleFor = computed(() => {
+  const node = activeNode.value
+  if (!node) return 0
+  const live = liveByNode.value[node.id]
+  const since = live?.at ?? node.startedAt
+  if (!since) return 0
+  return Math.max(0, now.value - since)
+})
+
+/** 超过这个时长没有任何输出，就提示"可能卡住"。 */
+const IDLE_HINT_MS = 120_000
+
+/** 活动节点的直播态。轮次要从这里取：快照得等这一轮结束才更新。 */
+const activeLive = computed(() =>
+  activeNode.value ? liveByNode.value[activeNode.value.id] : undefined,
+)
+
+/**
+ * 轮次文案（`第 3/12 轮`）。
+ *
+ * 一个节点跑十分钟时，用户唯一能确认"它在动"的东西就是这个数字——
+ * 正文可能半天不吐一个字，轮次至少每轮往前走一次。
+ */
+function turnText(node: DagNodeRun | null | undefined, state?: LiveState): string {
+  const max = state?.maxTurns || node?.maxTurns || 0
+  if (!max) return ''
+  const current = state?.turn || node?.turns || 0
+  return current ? `第 ${current}/${max} 轮` : `上限 ${max} 轮`
+}
+
+/** 选中节点已经多久没动静（毫秒）。只在运行中有意义。 */
+const selectedIdle = computed(() => {
+  const node = selectedRun.value
+  if (!node || node.status !== 'running') return 0
+  const since = selectedLive.value?.at ?? node.startedAt
+  return since ? Math.max(0, now.value - since) : 0
+})
+
+/**
+ * 还没有正文时的占位：把"轮次 + 静默多久"写出来。
+ *
+ * 一句"正在等模型的输出…"跟卡住没有区别；给出数字，用户才知道该继续等还是该停。
+ */
+const livePlaceholder = computed(() => {
+  const turn = turnText(selectedRun.value, selectedLive.value)
+  const parts = ['还没有正文']
+  if (turn) parts.push(turn)
+  parts.push(`已静默 ${formatDuration(selectedIdle.value) || '0s'}`)
+  return `${parts.join(' · ')}\n\n模型在思考或写长回复时可能一两分钟不吐字；轮次往前走就说明还在跑。`
+})
+
+/**
+ * 跑完之后的结果：成功几个、失败几个、为什么失败。
+ *
+ * 以前跑完只剩状态条变色，用户还得逐个点节点才能知道到底成了没有。
+ */
+const runResult = computed(() => {
+  const nodes = run.value?.nodes ?? []
+  return {
+    ok: nodes.filter(node => node.status === 'succeeded').length,
+    skipped: nodes.filter(node => node.status === 'skipped').length,
+    cancelled: nodes.filter(node => node.status === 'cancelled').length,
+    failed: nodes.filter(node => node.status === 'failed'),
+    total: nodes.length,
+  }
+})
+
 const blocker = computed(() =>
   runBlocker({
     hasPlan: Boolean(plan.value),
@@ -237,6 +413,17 @@ function syncTicker(): void {
     window.clearInterval(ticker)
     ticker = 0
   }
+  // 事件通道之外再加一条轮询兜底：跑着的时候每 2s 拉一次快照。
+  // 事件要是因为版本不匹配、IPC 卡顿而断了，进度最多慢 2 秒，不会整场空白。
+  if (live.value && !poll) {
+    poll = window.setInterval(() => {
+      if (plan.value) void refreshRun(plan.value.id)
+    }, 2000)
+  }
+  if (!live.value && poll) {
+    window.clearInterval(poll)
+    poll = 0
+  }
 }
 
 /** 只认这张计划的快照：别的计划推过来的事件直接丢掉，免得串台。 */
@@ -245,14 +432,79 @@ function adoptRun(next: DagRun | null | undefined): void {
   if (plan.value && next.planId !== plan.value.id) return
   run.value = next
   now.value = Date.now()
+  pruneLive(next)
   syncTicker()
 }
+
+/**
+ * 丢掉已经落定节点的直播态。
+ *
+ * 节点一旦不在「运行中/待确认」，快照里就有完整正文与完整步骤，直播增量再留着
+ * 只会让面板显示两份内容（而且增量是截断的）。
+ */
+function pruneLive(snapshot: DagRun): void {
+  const current = liveByNode.value
+  let changed = false
+  const next: Record<string, LiveState> = {}
+  for (const [id, state] of Object.entries(current)) {
+    const node = snapshot.nodes.find(item => item.id === id)
+    if (node && (node.status === 'running' || node.status === 'waiting')) {
+      next[id] = state
+    } else {
+      changed = true
+    }
+  }
+  if (changed) liveByNode.value = next
+}
+
+/** 收到一条增量：叠到该节点的直播态上（正文追加、步骤去尾、token 覆盖）。 */
+function applyLive(event: NodeLiveEvent): void {
+  // 只认当前这张计划的运行：换计划或换运行后，旧事件一律丢弃。
+  if (!run.value || event.runId !== run.value.id) return
+  const previous = liveByNode.value[event.nodeId]
+  const state: LiveState = previous
+    ? { ...previous, steps: [...previous.steps] }
+    : { text: '', steps: [], tokensIn: 0, tokensOut: 0, at: Date.now(), turn: 0, maxTurns: 0 }
+  if (event.delta) {
+    state.text += event.delta
+    if (state.text.length > LIVE_TEXT_LIMIT) state.text = state.text.slice(-LIVE_TEXT_LIMIT)
+  }
+  if (event.step) {
+    state.steps.push(event.step)
+    if (state.steps.length > 60) state.steps = state.steps.slice(-60)
+  }
+  state.tokensIn = event.tokensIn
+  state.tokensOut = event.tokensOut
+  if (event.turn) state.turn = event.turn
+  if (event.maxTurns) state.maxTurns = event.maxTurns
+  state.at = Date.now()
+  liveByNode.value = { ...liveByNode.value, [event.nodeId]: state }
+}
+
+/**
+ * 实时正文跟着滚到底。
+ *
+ * 只在用户本来就在底部时才自动滚——他往上翻看前文的时候，不该被拽回来。
+ */
+watch(
+  () => selectedLive.value?.text ?? '',
+  async () => {
+    const el = livePre.value
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    if (!nearBottom && el.scrollTop > 0) return
+    await nextTick()
+    el.scrollTop = el.scrollHeight
+  },
+)
 
 async function startRun(): Promise<void> {
   const current = plan.value
   if (!current || runBusy.value || blocker.value) return
   runBusy.value = true
   try {
+    // 上一次运行留下的直播态要清掉，否则新一次开跑会先闪一段旧正文。
+    liveByNode.value = {}
     adoptRun(await api.dagRun(current.id))
     notice.value = null
   } catch (cause) {
@@ -311,7 +563,17 @@ function nodeStatusClass(id: string): string {
 function nodeTaskPreview(node: DagNode): string {
   const item = nodeRuns.value.get(node.id)
   if (item?.status === 'running') {
-    return item.steps.length ? item.steps[item.steps.length - 1] : '正在思考…'
+    const live = liveByNode.value[node.id]
+    // 轮次放最前面：正文半天不动的时候，至少这个数字在走。
+    const turn = turnText(item, live)
+    const detail = live?.steps.length
+      ? live.steps[live.steps.length - 1]
+      : item.steps.length
+        ? item.steps[item.steps.length - 1]
+        : live?.text
+          ? '正在输出…'
+          : '正在思考…'
+    return turn ? `${turn} · ${detail}` : detail
   }
   if (item?.status === 'failed' && item.error) return item.error
   return node.task || '还没有任务描述'
@@ -628,14 +890,24 @@ onMounted(() => {
     // 监听挂上之前可能已经推过一轮：补一次拉取，避免"停在旧快照"。
     if (plan.value) void refreshRun(plan.value.id)
   })
+  // 运行中的正文 / 步骤走增量事件：没有它，节点跑十分钟面板就是十分钟空白。
+  void listen<NodeLiveEvent>(LIVE_EVENT_NAME, envelope => applyLive(envelope.payload)).then(off => {
+    unlistenLive = off
+  })
 })
 
 onBeforeUnmount(() => {
   unlisten?.()
   unlisten = null
+  unlistenLive?.()
+  unlistenLive = null
   if (ticker) {
     window.clearInterval(ticker)
     ticker = 0
+  }
+  if (poll) {
+    window.clearInterval(poll)
+    poll = 0
   }
 })
 
@@ -644,6 +916,7 @@ watch(
   () => plan.value?.id ?? null,
   id => {
     run.value = null
+    liveByNode.value = {}
     syncTicker()
     if (id) void refreshRun(id)
   },
@@ -766,23 +1039,39 @@ defineExpose({ reload: () => loadPlans(true) })
 
       <div v-if="run" class="run-strip">
         <div class="run-head">
-          <span class="run-state" :class="runMeta(run.status).tone">
+          <span class="run-state" :class="gates.length ? 'warn' : runMeta(run.status).tone">
             <i class="run-dot" />
-            {{ runMeta(run.status).label }}
+            {{ gates.length ? '等你确认' : runMeta(run.status).label }}
           </span>
           <span class="run-track" :title="`${progress.settled}/${progress.total} 已落定`">
             <i :class="runMeta(run.status).tone" :style="{ width: `${progress.percent}%` }" />
           </span>
           <span class="run-count mono">{{ runSummary(run) }}</span>
-          <span v-if="run.nodes.some(node => node.tokensIn || node.tokensOut)" class="run-tokens mono">
-            ↑{{ formatTokens(run.nodes.reduce((sum, node) => sum + node.tokensIn, 0)) }}
-            ↓{{ formatTokens(run.nodes.reduce((sum, node) => sum + node.tokensOut, 0)) }}
+          <span v-if="totalTokens.tin || totalTokens.tout" class="run-tokens mono">
+            ↑{{ formatTokens(totalTokens.tin) }} ↓{{ formatTokens(totalTokens.tout) }}
           </span>
           <span v-if="elapsed" class="run-clock mono">{{ formatDuration(elapsed) }}</span>
           <span class="spacer" />
           <button class="ghost-btn tiny" title="收起运行条（运行本身不受影响）" @click="run = null">
             收起
           </button>
+        </div>
+
+        <!-- 正在跑的那一步：比以前只有"运行中"三个字，能看出到底卡在哪 -->
+        <div v-if="activeNode" class="run-activity">
+          <span class="run-activity-node">{{ activeNode.title || activeNode.id }}</span>
+          <span v-if="turnText(activeNode, activeLive)" class="run-activity-turn mono">
+            {{ turnText(activeNode, activeLive) }}
+          </span>
+          <span class="run-activity-step mono">{{ activeStep }}</span>
+          <span
+            class="run-activity-idle mono"
+            :class="{ slow: idleFor > 45_000, stuck: idleFor > IDLE_HINT_MS }"
+            :title="`最后一次收到输出是在 ${formatDuration(idleFor)} 前`"
+          >
+            静默 {{ formatDuration(idleFor) || '0s' }}
+          </span>
+          <span class="run-activity-clock mono">{{ formatDuration(nodeElapsed(activeNode, now)) }}</span>
         </div>
 
         <div class="run-nodes">
@@ -813,6 +1102,23 @@ defineExpose({ reload: () => loadPlans(true) })
         </div>
 
         <p v-if="run.message" class="run-message">{{ run.message }}</p>
+
+        <!-- 跑完之后一句话说清结果：以前只有状态条换个颜色，得逐个点节点才知道成没成 -->
+        <div v-if="run && !live && !gates.length" class="run-result" :class="runResult.failed.length ? 'bad' : 'good'">
+          <span class="run-result-title">
+            {{ runResult.failed.length ? '有节点失败' : runResult.cancelled ? '已取消' : '跑完了' }}
+          </span>
+          <span class="run-result-text">
+            成功 {{ runResult.ok }}/{{ runResult.total }}
+            <template v-if="runResult.failed.length"> · 失败 {{ runResult.failed.length }}</template>
+            <template v-if="runResult.skipped"> · 跳过 {{ runResult.skipped }}</template>
+            <template v-if="runResult.cancelled"> · 取消 {{ runResult.cancelled }}</template>
+          </span>
+          <div v-for="node in runResult.failed.slice(0, 3)" :key="`fail-${node.id}`" class="run-result-fail">
+            <b>{{ node.title || node.id }}</b>
+            <span class="mono">{{ node.error || '没有留下错误信息' }}</span>
+          </div>
+        </div>
       </div>
 
       <div
@@ -1073,8 +1379,14 @@ defineExpose({ reload: () => loadPlans(true) })
               <div class="run-kv">
                 <span class="kv"><span>状态</span><b :class="nodeMeta(selectedRun.status).tone">{{ nodeMeta(selectedRun.status).label }}</b></span>
                 <span class="kv"><span>尝试</span><b>{{ selectedRun.attempt || '—' }}</b></span>
+                <span class="kv"><span>轮次</span><b>{{ turnText(selectedRun, selectedLive) || '—' }}</b></span>
+                <span class="kv"><span>工具</span><b>{{ selectedSteps.length }} 次</b></span>
                 <span class="kv"><span>耗时</span><b>{{ formatDuration(selectedElapsed) || '—' }}</b></span>
-                <span class="kv"><span>Token</span><b>↑{{ formatTokens(selectedRun.tokensIn) }} ↓{{ formatTokens(selectedRun.tokensOut) }}</b></span>
+                <span class="kv"><span>Token</span><b>↑{{ formatTokens(selectedTokens.tin) }} ↓{{ formatTokens(selectedTokens.tout) }}</b></span>
+                <span v-if="selectedRun.status === 'running'" class="kv">
+                  <span>静默</span>
+                  <b :class="{ 'kv-warn': selectedIdle > 45_000 }">{{ formatDuration(selectedIdle) || '刚刚' }}</b>
+                </span>
               </div>
 
               <div v-if="selectedRun.status === 'waiting'" class="run-gate inline">
@@ -1085,9 +1397,9 @@ defineExpose({ reload: () => loadPlans(true) })
 
               <p v-if="selectedRun.error" class="run-error">{{ selectedRun.error }}</p>
 
-              <div v-if="selectedRun.steps.length" class="run-steps">
+              <div v-if="selectedSteps.length" class="run-steps">
                 <div class="run-steps-title">过程</div>
-                <div v-for="(step, index) in selectedRun.steps" :key="index" class="run-step">
+                <div v-for="(step, index) in selectedSteps" :key="index" class="run-step">
                   <span class="run-step-index mono">{{ index + 1 }}</span>
                   <span class="run-step-text mono">{{ step }}</span>
                 </div>
@@ -1116,6 +1428,12 @@ defineExpose({ reload: () => loadPlans(true) })
                     派生自 {{ selectedRun.artifact.parentId }}
                   </span>
                 </div>
+              </div>
+
+              <!-- 实时正文：跑到一半也能看见它正在写什么，而不是干等 -->
+              <div v-if="selectedRun.status === 'running'" class="run-live">
+                <div class="run-steps-title">实时</div>
+                <pre ref="livePre" class="run-pre live">{{ selectedLive?.text || livePlaceholder }}</pre>
               </div>
 
               <div v-if="selectedRun.output" class="run-output">

@@ -743,6 +743,42 @@ function emitRun(run: DagRun): void {
   }
 }
 
+/** 与 Rust 侧 `NodeLive` 同一个形状：预览里也要能看到实时正文与步骤。 */
+function emitLive(
+  runId: string,
+  nodeId: string,
+  delta: string,
+  step: string | null,
+  tin: number,
+  tout: number,
+  turn: number,
+  maxTurns: number,
+): void {
+  for (const listener of eventListeners) {
+    if (listener.event !== 'dag.node.live') continue
+    listener.fn({
+      event: 'dag.node.live',
+      id: 0,
+      payload: { runId, nodeId, delta, step, tokensIn: tin, tokensOut: tout, turn, maxTurns },
+    })
+  }
+}
+
+/** 假正文的“逐字”来源：每次推一小段，肉眼看上去像在写。 */
+const FAKE_LIVE_SCRIPT = [
+  '先看样本的头部结构。',
+  '跑一遍节表，确认入口点落在哪一节。',
+  '导入表里有几个可疑的 Win32 调用。',
+  '继续追字符串引用。',
+  '结论：入口在加壳的 stub 上，需要先脱壳再静态分析。',
+]
+
+/** 预览里的轮次上限：让「第 3/12 轮」这种文案有东西可显示。 */
+const FAKE_TURNS = 12
+
+/** 每个节点在假脚本里的位置（第几句、第几个字）。 */
+const fakeLiveCursor: Record<string, { line: number; at: number }> = {}
+
 function finishRun(): void {
   const run = fakeRun
   if (!run) return
@@ -816,6 +852,31 @@ function stepRun(): void {
     return
   }
   emitRun(run)
+
+  // 3) 给在跑的节点推增量：正文一小段 + 偶尔一步工具调用。真机上这两个
+  //    由执行器的 on_text / on_step 回调逐条推出来，预览要对齐同一个形状。
+  for (const node of run.nodes) {
+    if (node.status !== 'running') continue
+    const cursor = (fakeLiveCursor[node.id] ??= { line: 0, at: 0 })
+    const script = FAKE_LIVE_SCRIPT[cursor.line % FAKE_LIVE_SCRIPT.length]
+    const take = Math.min(script.length, cursor.at + 4 + (cursor.line % 3))
+    let delta = script.slice(cursor.at, take)
+    cursor.at = take
+    if (take >= script.length) {
+      // 一句说完换下一句；光标归零，下一 tick 从新句子开头开始。
+      cursor.line += 1
+      cursor.at = 0
+      delta += '\n'
+    }
+    const step = cursor.line % 2 === 0 && cursor.at === 0 ? (FAKE_STEPS[node.id]?.[0] ?? 'read_file sample.bin') : null
+    node.tokensIn += 220
+    node.tokensOut += 16
+    // 预览里也把轮次推进起来：真机上这是 on_turn 报的第 N 轮。
+    const turn = 1 + (cursor.line % FAKE_TURNS)
+    node.turns = turn - 1
+    node.maxTurns = FAKE_TURNS
+    emitLive(run.id, node.id, delta, step, node.tokensIn, node.tokensOut, turn, FAKE_TURNS)
+  }
 }
 
 function startRun(plan: DagPlan): DagRun {
@@ -841,6 +902,8 @@ function startRun(plan: DagPlan): DagRun {
       tokensIn: 0,
       tokensOut: 0,
       steps: [],
+      turns: 0,
+      maxTurns: 0,
       artifact: null,
     })),
   }

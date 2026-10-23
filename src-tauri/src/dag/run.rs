@@ -32,6 +32,54 @@ use super::runner::{NodeOutput, NodeRunner};
 /// 不需要维护"补丁合并"这套逻辑——少一类状态不同步的 bug。
 pub const EVENT_NAME: &str = "dag.run";
 
+/// 节点运行中的增量事件名（正文增量 + 新的一步工具调用）。
+///
+/// 为什么不复用 `dag.run`：快照是整份运行记录（几个节点几万字），正文一秒能
+/// 吐几十个 delta，用快照推会把 IPC 与前端重渲染打满。增量单独走这一条，
+/// 前端按 `nodeId` 叠在本地视图上；节点落定时快照会带完整正文，增量随之丢弃。
+pub const LIVE_EVENT_NAME: &str = "dag.node.live";
+
+/// 正文增量攒多久发一次。120ms 肉眼仍像逐字出现，同时把事件量压掉一个量级。
+const LIVE_FLUSH: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// 单节点保留的步数上限（与执行器侧一致：过程是"感"，不是流水账）。
+const LIVE_STEPS: usize = 24;
+
+/// 一条增量。三个可选字段都可能为空：新一步会顺带把攒着的正文带出去。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeLive {
+    pub run_id: String,
+    pub node_id: String,
+    /// 正文增量（攒了 `LIVE_FLUSH` 一起发）。
+    pub delta: String,
+    /// 新落的一步工具调用（`read_file src/x.rs`）。
+    pub step: Option<String>,
+    /// 到现在为止本节点累计的 token（跨重试累计）。
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    /// 正在跑第几轮模型调用（1 起）。0 = 还没开始第一轮。
+    pub turn: u32,
+    /// 轮次上限。`turn/max_turns` 一起给出"进度感"：卡住时能看出是
+    /// 第 3 轮还是第 11 轮，而不是只有一句"运行中"。
+    pub max_turns: u32,
+}
+
+pub type LiveNotifier = Arc<dyn Fn(&NodeLive) + Send + Sync>;
+
+/// 单个节点的增量缓冲。按节点分开，否则并行跑的两个节点会把正文串在一起。
+#[derive(Default)]
+struct LiveBuf {
+    text: String,
+    at: Option<std::time::Instant>,
+    /// 已经通过增量事件报出去的 token（成功时据此补齐差额，避免重复计数）。
+    tokens_in: i64,
+    tokens_out: i64,
+    /// 当前轮次，跟着增量一起发（正文/步骤事件都带上最新值）。
+    turn: u32,
+    max_turns: u32,
+}
+
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
@@ -92,6 +140,13 @@ pub struct NodeRun {
     pub tokens_out: i64,
     /// 工具调用摘要（`read_file src/x.rs` 这种），给运行面板做过程感。
     pub steps: Vec<String>,
+    /// 已经完成的模型轮次。快照也带上：刷新页面后不会退回"第 0 轮"。
+    #[serde(default)]
+    pub turns: u32,
+    /// 这一节点允许的最大轮次（`max_turns`）。面板显示 "3/12"，
+    /// 用户才知道"跑得慢"和"快跑满了"是两件事。
+    #[serde(default)]
+    pub max_turns: u32,
     /// 主产出落制品的结果。写入失败或正文为空时为 `None`（正文仍在 `output` 里）。
     pub artifact: Option<super::artifact::ArtifactRef>,
 }
@@ -139,6 +194,8 @@ impl DagRun {
                     tokens_in: 0,
                     tokens_out: 0,
                     steps: Vec::new(),
+                    turns: 0,
+                    max_turns: 0,
                     artifact: None,
                 })
                 .collect(),
@@ -164,6 +221,10 @@ pub struct RunHandle {
     /// 落盘失败只报一次，别把 stderr 刷满。
     warned: AtomicBool,
     notify: Notifier,
+    /// 增量事件出口（正文 / 步骤 / token）。单测注入空回调。
+    live: LiveNotifier,
+    /// 每个节点攒着的正文与已报 token，见 [`LiveBuf`]。
+    live_buf: Mutex<HashMap<String, LiveBuf>>,
     /// 是否把记录写到 `~/.prism/dags/runs/`。单测用临时/内存模式，
     /// 否则跑一次测试就往用户的真实目录里丢一堆假运行记录。
     persist: bool,
@@ -172,13 +233,21 @@ pub struct RunHandle {
 }
 
 impl RunHandle {
-    fn new(run: DagRun, notify: Notifier, persist: bool, artifacts: Option<super::artifact::ArtifactStore>) -> RunHandle {
+    fn new(
+        run: DagRun,
+        notify: Notifier,
+        live: LiveNotifier,
+        persist: bool,
+        artifacts: Option<super::artifact::ArtifactStore>,
+    ) -> RunHandle {
         RunHandle {
             state: Mutex::new(run),
             cancelled: Arc::new(AtomicBool::new(false)),
             gates: Mutex::new(HashMap::new()),
             warned: AtomicBool::new(false),
             notify,
+            live,
+            live_buf: Mutex::new(HashMap::new()),
             persist,
             artifacts,
         }
@@ -324,6 +393,8 @@ impl RunHandle {
     }
 
     pub fn mark_running(&self, node_id: &str) {
+        // 上一次尝试的增量缓冲要清掉：重试从空白开始，否则旧正文会接到新一轮前面。
+        self.drop_live(node_id);
         self.update(
             node_id,
             |node| {
@@ -353,6 +424,7 @@ impl RunHandle {
     }
 
     pub fn mark_failed(&self, node_id: &str, error: String) {
+        self.drop_live(node_id);
         self.update(
             node_id,
             |node| {
@@ -372,15 +444,20 @@ impl RunHandle {
         output: NodeOutput,
         artifact: Option<super::artifact::ArtifactRef>,
     ) {
+        // 差额要在 update 之前算：settle_tokens 会把缓冲删掉。
+        let (extra_in, extra_out) = self.settle_tokens(node_id, &output);
         self.update(
             node_id,
             |node| {
                 node.status = NodeStatus::Succeeded;
                 node.finished_at = Some(now_ms());
                 node.output = output.text;
-                node.tokens_in += output.tokens_in;
-                node.tokens_out += output.tokens_out;
+                node.tokens_in += extra_in;
+                node.tokens_out += extra_out;
                 node.steps = output.steps;
+                if output.turns > 0 {
+                    node.turns = output.turns;
+                }
                 node.error = None;
                 node.artifact = artifact;
             },
@@ -397,6 +474,7 @@ impl RunHandle {
     }
 
     pub fn mark_skipped(&self, node_id: &str, reason: String) {
+        self.drop_live(node_id);
         self.update(
             node_id,
             |node| {
@@ -409,6 +487,7 @@ impl RunHandle {
     }
 
     pub fn mark_cancelled(&self, node_id: &str, reason: String) {
+        self.drop_live(node_id);
         self.update(
             node_id,
             |node| {
@@ -443,10 +522,10 @@ impl RunHandle {
         (self.notify)(&snapshot);
     }
 
-    /// 流式正文推进（不落盘、不广播——太密）。
+    /// 正文增量：写进内存里的 `output`，并按 120ms 一档推给前端。
     ///
-    /// 只更新内存里的 `output`，让下一次状态事件顺带把它带出去；前端靠
-    /// `dag.node.delta` 单独直播，不依赖这里。
+    /// 只写内存不发事件的话，前端要等节点落定才看见正文——一个节点跑两分钟，
+    /// 面板上就是两分钟空白，看起来像卡死。
     pub fn push_text(&self, node_id: &str, text: &str) {
         if text.is_empty() {
             return;
@@ -456,6 +535,140 @@ impl RunHandle {
                 node.output.push_str(text);
             }
         }
+        let due = {
+            let Ok(mut buffers) = self.live_buf.lock() else {
+                return;
+            };
+            let entry = buffers.entry(node_id.to_string()).or_default();
+            entry.text.push_str(text);
+            let due = entry.at.map_or(true, |at| at.elapsed() >= LIVE_FLUSH);
+            if due {
+                entry.at = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            let chunk = self.take_text(node_id);
+            self.emit_live(node_id, chunk, None);
+        }
+    }
+
+    /// 新落的一步工具调用。顺带把攒着的正文发出去：新一步意味着上一段说完了，
+    /// 别让它压在缓冲里再等一个 120ms。
+    pub fn push_step(&self, node_id: &str, step: &str) {
+        let step = step.trim();
+        if step.is_empty() {
+            return;
+        }
+        if let Ok(mut run) = self.state.lock() {
+            if let Some(node) = run.nodes.iter_mut().find(|node| node.id == node_id) {
+                if node.steps.len() < LIVE_STEPS {
+                    node.steps.push(step.to_string());
+                }
+            }
+        }
+        let chunk = self.take_text(node_id);
+        self.emit_live(node_id, chunk, Some(step.to_string()));
+    }
+
+    /// 一轮的 token 用量。写进内存里的节点（中途快照也能看到）并发一条增量。
+    pub fn push_usage(&self, node_id: &str, tokens_in: i64, tokens_out: i64) {
+        if let Ok(mut buffers) = self.live_buf.lock() {
+            let entry = buffers.entry(node_id.to_string()).or_default();
+            entry.tokens_in += tokens_in;
+            entry.tokens_out += tokens_out;
+        }
+        if let Ok(mut run) = self.state.lock() {
+            if let Some(node) = run.nodes.iter_mut().find(|node| node.id == node_id) {
+                node.tokens_in += tokens_in;
+                node.tokens_out += tokens_out;
+            }
+        }
+        let chunk = self.take_text(node_id);
+        self.emit_live(node_id, chunk, None);
+    }
+
+    /// 进入新的一轮模型调用。
+    ///
+    /// 这一条解决的是最让人难受的那种"假死"：模型在想、在生成长回复时可能
+    /// 一两分钟不吐一个字也不调工具，面板上就只剩"运行中"三个字。轮次事件
+    /// 让面板能写"第 3/12 轮 · 等模型返回"，用户至少知道它在往前走。
+    pub fn push_turn(&self, node_id: &str, turn: u32, max_turns: u32) {
+        if let Ok(mut buffers) = self.live_buf.lock() {
+            let entry = buffers.entry(node_id.to_string()).or_default();
+            entry.turn = turn;
+            entry.max_turns = max_turns;
+        }
+        if let Ok(mut run) = self.state.lock() {
+            if let Some(node) = run.nodes.iter_mut().find(|node| node.id == node_id) {
+                node.turns = turn.saturating_sub(1);
+                node.max_turns = max_turns;
+            }
+        }
+        let chunk = self.take_text(node_id);
+        self.emit_live(node_id, chunk, None);
+    }
+
+    /// 取走某节点攒着的正文（取完就清空）。
+    fn take_text(&self, node_id: &str) -> String {
+        self.live_buf
+            .lock()
+            .ok()
+            .and_then(|mut buffers| {
+                buffers
+                    .get_mut(node_id)
+                    .map(|entry| std::mem::take(&mut entry.text))
+            })
+            .unwrap_or_default()
+    }
+
+    /// 丢掉某节点的增量缓冲（重试 / 落定后调用，别把旧正文接到新一轮前面）。
+    fn drop_live(&self, node_id: &str) {
+        if let Ok(mut buffers) = self.live_buf.lock() {
+            buffers.remove(node_id);
+        }
+    }
+
+    fn emit_live(&self, node_id: &str, delta: String, step: Option<String>) {
+        let (tokens_in, tokens_out, turn, max_turns) = self
+            .live_buf
+            .lock()
+            .ok()
+            .and_then(|buffers| {
+                buffers
+                    .get(node_id)
+                    .map(|entry| (entry.tokens_in, entry.tokens_out, entry.turn, entry.max_turns))
+            })
+            .unwrap_or((0, 0, 0, 0));
+        (self.live)(&NodeLive {
+            run_id: self.id().to_string(),
+            node_id: node_id.to_string(),
+            delta,
+            step,
+            tokens_in,
+            tokens_out,
+            turn,
+            max_turns,
+        });
+    }
+
+    /// 成功收尾前把「增量里已经报过的 token」扣掉，只补差额。
+    ///
+    /// `mark_succeeded` 用的累加（重试要跨次累计），而 `push_usage` 已经逐轮
+    /// 加过一次——不扣就会双计。执行器不报 usage 时（外部引擎自己算总账），
+    /// 这里退化成全额累加，和原来一致。
+    fn settle_tokens(&self, node_id: &str, output: &NodeOutput) -> (i64, i64) {
+        let (reported_in, reported_out) = self
+            .live_buf
+            .lock()
+            .ok()
+            .and_then(|mut buffers| buffers.remove(node_id))
+            .map(|entry| (entry.tokens_in, entry.tokens_out))
+            .unwrap_or((0, 0));
+        (
+            (output.tokens_in - reported_in).max(0),
+            (output.tokens_out - reported_out).max(0),
+        )
     }
 
     fn save(&self, run: &DagRun) {
@@ -510,10 +723,11 @@ impl DagHub {
         }
     }
 
-    /// 起一次运行。校验不通过就不起（返回人能看懂的原因）。
+    /// 起一次运行（不带直播）。单测用：没人听增量事件。
     ///
-    /// 执行线程在这里就分出去：调用方（IPC）只等"已经开跑"这一件事，
-    /// 不能等整张图跑完——那可能是几十分钟。
+    /// 真机一律走 [`DagHub::start_with`]——面板要看节点跑的过程，没有直播就是
+    /// 一片空白。
+    #[cfg(test)]
     pub fn start(
         &self,
         plan: DagPlan,
@@ -521,6 +735,20 @@ impl DagHub {
         // 单测注入的假执行器；真机传 None，由执行器注册表按 Agent 解析。
         runner: Option<Arc<dyn NodeRunner>>,
         notify: Notifier,
+    ) -> Result<DagRun, String> {
+        // 不带直播：单测与"只看结果"的调用方都不需要增量事件。
+        self.start_with(plan, agents, runner, notify, Arc::new(|_| {}))
+    }
+
+    /// 起一次运行，并把节点运行中的增量（正文 / 步骤 / token）交给 `live`。
+    /// 真机由 IPC 注入"发事件"的闭包；校验不通过就不起（返回人能看懂的原因）。
+    pub fn start_with(
+        &self,
+        plan: DagPlan,
+        agents: &[crate::agents::AgentProfile],
+        runner: Option<Arc<dyn NodeRunner>>,
+        notify: Notifier,
+        live: LiveNotifier,
     ) -> Result<DagRun, String> {
         let known: Vec<String> = agents.iter().map(|agent| agent.id.clone()).collect();
         let issues = super::validate::validate(&plan, &known);
@@ -546,6 +774,7 @@ impl DagHub {
         let handle = Arc::new(RunHandle::new(
             run.clone(),
             notify.clone(),
+            live,
             self.persist,
             self.artifacts.clone(),
         ));
@@ -596,7 +825,8 @@ impl DagHub {
         if let Some(handle) = self.latest_handle(plan_id) {
             return Some(handle.snapshot());
         }
-        super::store::latest_run_of(plan_id).ok().flatten()
+        let run = super::store::latest_run_of(plan_id).ok().flatten()?;
+        Some(self.repair_if_orphan(run))
     }
 
     /// 按 id 取运行：内存优先，其次磁盘（进程重启后仍能看历史）。
@@ -604,7 +834,44 @@ impl DagHub {
         if let Some(handle) = self.get(run_id) {
             return Some(handle.snapshot());
         }
-        super::store::load_run(run_id).ok()
+        let run = super::store::load_run(run_id).ok()?;
+        Some(self.repair_if_orphan(run))
+    }
+
+    /// 磁盘上的记录还写着「运行中」，但内存里没有句柄 —— 说明上次进程已经没了。
+    ///
+    /// 不修的话，重启后这张计划永远显示"正在跑"：`runBlocker` 会以"这张计划正在跑"
+    /// 拒绝重跑，用户看到的就是"卡住了"。改成中断状态，并把还在跑/等确认的节点
+    /// 标成失败——这才是事实：没有进程在跑。
+    fn repair_if_orphan(&self, mut run: DagRun) -> DagRun {
+        if run.status != RunStatus::Running {
+            return run;
+        }
+        let now = now_ms();
+        let mut interrupted = 0;
+        for node in run.nodes.iter_mut() {
+            if matches!(node.status, NodeStatus::Running | NodeStatus::Waiting) {
+                node.status = NodeStatus::Failed;
+                node.finished_at = Some(now);
+                node.error = Some("运行中断：应用重启，这个节点没有跑完".to_string());
+                interrupted += 1;
+            }
+        }
+        run.status = RunStatus::Failed;
+        run.finished_at = Some(now);
+        run.message = Some(if interrupted > 0 {
+            format!(
+                "这次运行被应用重启打断了（{interrupted} 个节点没跑完）。可以直接重跑。"
+            )
+        } else {
+            "这次运行被应用重启打断了。可以直接重跑。".to_string()
+        });
+        // 落回去：否则下次再查还是"运行中"，前端每次都要自己纠正一遍。
+        // 内存模式（单测）不写盘，别把假记录丢进用户的真实目录。
+        if self.persist {
+            let _ = super::store::save_run(&run);
+        }
+        run
     }
 }
 
@@ -685,4 +952,167 @@ pub fn summarize(run: &DagRun, policy: FailurePolicy) -> Option<String> {
         parts.push(format!("{cancelled} 个节点被取消"));
     }
     Some(parts.join("；"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 单节点运行记录：直播相关的方法只看这一个节点。
+    fn handle(node: &str) -> (Arc<RunHandle>, Arc<Mutex<Vec<NodeLive>>>) {
+        let run = DagRun {
+            id: "run-1".to_string(),
+            plan_id: "dag-1".to_string(),
+            plan_name: "计划".to_string(),
+            project: "/tmp".to_string(),
+            status: RunStatus::Running,
+            started_at: now_ms(),
+            finished_at: None,
+            message: None,
+            nodes: vec![NodeRun {
+                id: node.to_string(),
+                title: node.to_string(),
+                agent: "general".to_string(),
+                status: NodeStatus::Running,
+                attempt: 1,
+                started_at: Some(now_ms()),
+                finished_at: None,
+                output: String::new(),
+                error: None,
+                tokens_in: 0,
+                tokens_out: 0,
+                steps: Vec::new(),
+                turns: 0,
+                max_turns: 0,
+                artifact: None,
+            }],
+        };
+        let seen: Arc<Mutex<Vec<NodeLive>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let live: LiveNotifier = Arc::new(move |event: &NodeLive| {
+            if let Ok(mut list) = sink.lock() {
+                list.push(event.clone());
+            }
+        });
+        (Arc::new(RunHandle::new(run, Arc::new(|_| {}), live, false, None)), seen)
+    }
+
+    fn node_of(handle: &RunHandle) -> NodeRun {
+        handle.state.lock().unwrap().nodes[0].clone()
+    }
+
+    #[test]
+    fn push_step_appends_and_reports_live() {
+        let (handle, seen) = handle("n1");
+        handle.push_step("n1", "read_file src/x.rs");
+        let steps = node_of(&handle).steps;
+        assert_eq!(steps, vec!["read_file src/x.rs"]);
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].step.as_deref(), Some("read_file src/x.rs"));
+        assert_eq!(events[0].node_id, "n1");
+        assert_eq!(events[0].run_id, "run-1");
+    }
+
+    #[test]
+    fn push_text_is_coalesced_not_per_delta() {
+        let (handle, seen) = handle("n1");
+        // 第一段立刻发（还没有上一次发送时间），第二段压在缓冲里等 120ms。
+        handle.push_text("n1", "先看");
+        handle.push_text("n1", "头部");
+        assert_eq!(seen.lock().unwrap().len(), 1, "两段合并不该发两条");
+        // 新一步会把攒着的正文一起带出去，顺序不乱、内容不丢。
+        handle.push_step("n1", "read_file a.bin");
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].delta, "头部");
+        assert_eq!(events[1].step.as_deref(), Some("read_file a.bin"));
+        // 内存里的正文是完整的：落定时快照用它。
+        assert_eq!(node_of(&handle).output, "先看头部");
+    }
+
+    #[test]
+    fn usage_reported_twice_is_not_double_counted() {
+        let (handle, _) = handle("n1");
+        handle.push_usage("n1", 100, 10);
+        handle.push_usage("n1", 50, 5);
+        assert_eq!(node_of(&handle).tokens_in, 150, "逐轮上报要实时累加");
+
+        // 执行器最后的总额与逐轮之和一致：收尾只补差额，不能再来一遍。
+        let mut output = NodeOutput::default();
+        output.text = "报告".to_string();
+        output.tokens_in = 150;
+        output.tokens_out = 15;
+        handle.mark_succeeded("n1", output, None);
+        let node = node_of(&handle);
+        assert_eq!(node.tokens_in, 150);
+        assert_eq!(node.tokens_out, 15);
+        assert_eq!(node.output, "报告");
+    }
+
+    #[test]
+    fn usage_only_at_the_end_still_counts() {
+        // 外部引擎自己算总账：没有逐轮上报，收尾要全额累加（和改之前一致）。
+        let (handle, _) = handle("n1");
+        let mut output = NodeOutput::default();
+        output.tokens_in = 900;
+        output.tokens_out = 90;
+        handle.mark_succeeded("n1", output, None);
+        let node = node_of(&handle);
+        assert_eq!(node.tokens_in, 900);
+        assert_eq!(node.tokens_out, 90);
+    }
+
+    #[test]
+    fn orphaned_running_record_is_repaired() {
+        // 重启后内存里没有句柄，磁盘记录还写着 running：不改成中断，面板会永远
+        // 显示"正在跑"，重跑按钮也一直被"这张计划正在跑"挡住。
+        let hub = DagHub::ephemeral();
+        let mut run = {
+            let (handle, _) = handle("n1");
+            let mut snapshot = handle.snapshot();
+            snapshot.nodes[0].status = NodeStatus::Running;
+            snapshot
+        };
+        run.status = RunStatus::Running;
+        let repaired = hub.repair_if_orphan(run);
+        assert_eq!(repaired.status, RunStatus::Failed);
+        assert!(repaired.finished_at.is_some());
+        assert_eq!(repaired.nodes[0].status, NodeStatus::Failed);
+        assert!(repaired.message.unwrap_or_default().contains("重启"));
+    }
+
+    #[test]
+    fn turn_is_reported_per_round_and_kept_in_snapshot() {
+        let (handle, seen) = handle("n1");
+        handle.push_turn("n1", 1, 12);
+        handle.push_turn("n1", 2, 12);
+        // 快照里存"已完成的轮次"：第 2 轮刚开始，完成数是 1。
+        let node = node_of(&handle);
+        assert_eq!(node.turns, 1, "快照按已完成轮次记");
+        assert_eq!(node.max_turns, 12);
+
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].turn, 2);
+        assert_eq!(events[1].max_turns, 12);
+
+        // 收尾时把执行器的总轮次补上（重试只补不覆盖）。
+        let mut output = NodeOutput::default();
+        output.text = "报告".to_string();
+        output.turns = 3;
+        handle.mark_succeeded("n1", output, None);
+        assert_eq!(node_of(&handle).turns, 3);
+    }
+
+    #[test]
+    fn retry_drops_previous_live_text() {
+        let (handle, _) = handle("n1");
+        handle.push_text("n1", "上一次尝试的正文");
+        handle.mark_failed("n1", "超时".to_string());
+        handle.mark_running("n1");
+        let node = node_of(&handle);
+        assert!(node.output.is_empty(), "重试要从空白开始");
+        assert!(node.steps.is_empty());
+    }
 }
