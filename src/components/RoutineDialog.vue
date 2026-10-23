@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../api'
+import { useBackdropDismiss } from '../dialogDismiss'
 import { SCHEDULE_PRESETS, describeCron } from '../routines'
 import { ASSET_ENGINE_LABELS } from '../workshop'
 import type { RoutineDefinition } from '../types'
@@ -61,6 +62,43 @@ const canSave = computed(
 
 const title = computed(() => (props.mode === 'create' ? '新建定时任务' : '编辑定时任务'))
 
+/**
+ * 打开时的底：编辑已有任务时字段本来就带值，所以判断「动过没有」靠比较，
+ * 不能靠「有没有值」。动过之后点遮罩不再直接关，免得整段提示词被误点丢了。
+ */
+const baseline = {
+  name: name.value,
+  schedule: schedule.value,
+  prompt: prompt.value,
+  engine: engine.value,
+}
+const dirty = computed(
+  () =>
+    name.value !== baseline.name ||
+    schedule.value !== baseline.schedule ||
+    prompt.value !== baseline.prompt ||
+    engine.value !== baseline.engine,
+)
+
+const holdHint = ref('')
+let holdTimer = 0
+
+function flashHold(text: string): void {
+  holdHint.value = text
+  if (holdTimer) window.clearTimeout(holdTimer)
+  holdTimer = window.setTimeout(() => {
+    holdHint.value = ''
+    holdTimer = 0
+  }, 3200)
+}
+
+const backdrop = useBackdropDismiss({
+  dismiss: () => emit('close'),
+  hasUnsavedWork: () => dirty.value || saving.value,
+  onHold: () =>
+    flashHold(saving.value ? '正在保存…' : '改动还在：点「取消」或按 Esc 才关掉'),
+})
+
 async function save() {
   if (!canSave.value) return
   saving.value = true
@@ -99,11 +137,15 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  if (holdTimer) {
+    window.clearTimeout(holdTimer)
+    holdTimer = 0
+  }
 })
 </script>
 
 <template>
-  <div class="dialog-overlay" @click.self="emit('close')">
+  <div class="dialog-overlay" @mousedown="backdrop.onMousedown" @click="backdrop.onClick">
     <div class="dialog-panel" role="dialog" aria-label="定时任务">
       <header class="dialog-head">
         <span class="dialog-title">{{ title }}</span>
@@ -154,6 +196,7 @@ onBeforeUnmount(() => {
       </div>
 
       <footer class="dialog-foot">
+        <span v-if="holdHint" class="foot-hold">{{ holdHint }}</span>
         <button class="mini-btn" @click="emit('close')">取消</button>
         <button class="primary-btn" :disabled="!canSave" @click="save">
           {{ saving ? '保存中…' : '保存' }}

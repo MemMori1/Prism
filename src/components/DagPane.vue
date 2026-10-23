@@ -6,6 +6,7 @@ import { api } from '../api'
 import { NODE_H, NODE_W, edgePath, withOverrides } from '../dagLayout'
 import { executorBadge, permissionLabel, workspaceLabel } from '../agents'
 import { basename, formatBytes, formatDuration, formatTokens } from '../format'
+import { useBackdropDismiss } from '../dialogDismiss'
 import SelectMenu from './SelectMenu.vue'
 import {
   isLive,
@@ -589,6 +590,70 @@ const plannerMax = ref(6)
 const extraProjects = ref<{ value: string; label: string; hint?: string }[]>([])
 
 /**
+ * 打开弹层那一刻的底：之后靠它判断「用户到底动过没有」。
+ * 没动过的空白弹层点一下就关掉没关系，动过就不能静默丢。
+ */
+const plannerBaseline = ref({ goal: '', project: '', max: 6 })
+const plannerDirty = computed(
+  () =>
+    plannerGoal.value !== plannerBaseline.value.goal ||
+    plannerProject.value !== plannerBaseline.value.project ||
+    plannerMax.value !== plannerBaseline.value.max,
+)
+/** 被拦下时的说明；只活几秒，不作为常驻文案。 */
+const plannerHold = ref('')
+let plannerHoldTimer = 0
+
+function flashPlannerHold(text: string): void {
+  plannerHold.value = text
+  if (plannerHoldTimer) window.clearTimeout(plannerHoldTimer)
+  plannerHoldTimer = window.setTimeout(() => {
+    plannerHold.value = ''
+    plannerHoldTimer = 0
+  }, 3200)
+}
+
+/** 关弹层只走这一个口：顺手把提示也收掉。 */
+function closePlanner(): void {
+  plannerOpen.value = false
+  plannerHold.value = ''
+  if (plannerHoldTimer) {
+    window.clearTimeout(plannerHoldTimer)
+    plannerHoldTimer = 0
+  }
+}
+
+/**
+ * 点遮罩关弹层——但有两条限制，见 dialogDismiss.ts：
+ * 拖选文字不算点空白；填过东西（或正在规划）时拦下，给一句提示。
+ */
+const plannerBackdrop = useBackdropDismiss({
+  dismiss: closePlanner,
+  hasUnsavedWork: () => planning.value || plannerDirty.value,
+  onHold: () =>
+    flashPlannerHold(
+      planning.value
+        ? '正在规划：草案出来会自动关掉，先别关'
+        : '已填的内容还在：点「取消」才关掉这层',
+    ),
+})
+
+/** 制品预览只读，没有要保护的内容，同样只挡「拖选文字误触」。 */
+const artifactBackdrop = useBackdropDismiss({
+  dismiss: () => (artifactPreview.value = null),
+})
+
+/** Esc 等同于「取消」：键盘是明确意图，不因为填过内容就拦。 */
+function onPlannerEscape(event: KeyboardEvent): void {
+  if (event.key !== 'Escape' || !plannerOpen.value) return
+  if (planning.value) {
+    flashPlannerHold('正在规划：草案出来会自动关掉，先别关')
+    return
+  }
+  closePlanner()
+}
+
+/**
  * 目录选项：已归档的项目 + 本次新挑的目录。
  *
  * 值就是绝对路径（计划里存的是路径，不是项目 id），label 用项目名，
@@ -633,6 +698,13 @@ async function pickProjectFolder(): Promise<void> {
 function openPlanner(): void {
   plannerGoal.value = plan.value?.goal ?? ''
   plannerProject.value = plan.value?.project || defaultProject.value
+  plannerBaseline.value = {
+    goal: plannerGoal.value,
+    project: plannerProject.value,
+    max: plannerMax.value,
+  }
+  plannerHold.value = ''
+  plannerBackdrop.reset()
   plannerOpen.value = true
 }
 
@@ -646,7 +718,7 @@ async function runPlanner(): Promise<void> {
     saved.value = ''
     selectedNodeId.value = draft.nodes[0]?.id ?? null
     issues.value = await api.dagValidate(draft)
-    plannerOpen.value = false
+    closePlanner()
     notice.value = '草案已生成（未保存）：改完点「保存计划」'
     await nextTick()
     fitView()
@@ -878,6 +950,7 @@ function onPointerUp(): void {
 
 onMounted(() => {
   void loadPlans()
+  window.addEventListener('keydown', onPlannerEscape)
   void api
     .agentsList()
     .then(list => (agents.value = list))
@@ -897,6 +970,11 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onPlannerEscape)
+  if (plannerHoldTimer) {
+    window.clearTimeout(plannerHoldTimer)
+    plannerHoldTimer = 0
+  }
   unlisten?.()
   unlisten = null
   unlistenLive?.()
@@ -1456,7 +1534,12 @@ defineExpose({ reload: () => loadPlans(true) })
       <p v-else class="hint">左侧选一个节点查看与修改</p>
     </aside>
 
-    <div v-if="artifactPreview" class="planner-backdrop" @click.self="artifactPreview = null">
+    <div
+      v-if="artifactPreview"
+      class="planner-backdrop"
+      @mousedown="artifactBackdrop.onMousedown"
+      @click="artifactBackdrop.onClick"
+    >
       <div class="artifact-card">
         <div class="artifact-head">
           <div>
@@ -1475,7 +1558,12 @@ defineExpose({ reload: () => loadPlans(true) })
       </div>
     </div>
 
-    <div v-if="plannerOpen" class="planner-backdrop" @click.self="plannerOpen = false">
+    <div
+      v-if="plannerOpen"
+      class="planner-backdrop"
+      @mousedown="plannerBackdrop.onMousedown"
+      @click="plannerBackdrop.onClick"
+    >
       <div class="planner-card">
         <div class="planner-head">
           <div class="planner-kicker">DAG Planner · 需求分析</div>
@@ -1518,8 +1606,9 @@ defineExpose({ reload: () => loadPlans(true) })
           </p>
         </div>
         <div class="planner-foot">
+          <span v-if="plannerHold" class="planner-hold">{{ plannerHold }}</span>
           <span class="grow" />
-          <button class="ghost-btn" @click="plannerOpen = false">取消</button>
+          <button class="ghost-btn" title="关闭（Esc）" @click="closePlanner">取消</button>
           <button
             class="primary-btn compact"
             :disabled="planning || !plannerGoal.trim()"

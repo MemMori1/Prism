@@ -313,6 +313,12 @@
   white-space: nowrap;
 }
 
+/* 误点遮罩被拦下时，同一行临时改说这句话（路径让位，3 秒后回来）。 */
+.foot-hint-hold {
+  color: var(--amber);
+  font-family: inherit;
+}
+
 .foot-actions {
   display: flex;
   gap: 8px;

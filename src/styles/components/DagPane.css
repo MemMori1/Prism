@@ -1000,6 +1000,16 @@
   flex: 1;
 }
 
+/* 误点遮罩被拦下时的一句话：放底栏左侧，3 秒后自己消失。
+   不常驻——填完点「生成」是正常路径，不需要一直提醒。 */
+.planner-hold {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--amber);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
 /* 底部按钮同高：`primary-btn` 默认 width:100%，在 flex 里会被拉长，
    和旁边的「取消」凑成一高一矮。高度取静态稿的 30px。 */
 .planner-foot .primary-btn,

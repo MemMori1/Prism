@@ -148,6 +148,14 @@
   background: var(--panel-2);
 }
 
+/* 误点遮罩被拦下时的一句话：贴左边，3 秒后自己消失。 */
+.foot-hold {
+  margin-right: auto;
+  color: var(--amber);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+
 .mini-btn {
   height: 32px;
   padding: 0 14px;

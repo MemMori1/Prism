@@ -7,6 +7,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import { applyCompletion, detectTrigger, fileLabel, modelKeyOf, modelLabel } from '../composer'
+import { useBackdropDismiss } from '../dialogDismiss'
 import { ASSET_ENGINE_LABELS } from '../workshop'
 import type {
   EngineCatalog,
@@ -62,6 +63,30 @@ const selectedModel = computed<EngineModel | null>(() => {
 })
 const variants = computed(() => selectedModel.value?.variants ?? [])
 const hasContent = computed(() => !!draft.value.trim() || attachments.value.length > 0)
+
+/**
+ * 草稿还没发出去（或正在创建）时，点遮罩不直接关：那是几百字的指令和附件，
+ * 误点一下就没了。Esc 和 ✕ 照常关——键盘是明确意图。
+ * 拦下时借方里的路径位显示一句提示，不额外加一行布局。
+ */
+const holdHint = ref('')
+let holdTimer = 0
+
+function flashHold(text: string): void {
+  holdHint.value = text
+  if (holdTimer) window.clearTimeout(holdTimer)
+  holdTimer = window.setTimeout(() => {
+    holdHint.value = ''
+    holdTimer = 0
+  }, 3200)
+}
+
+const backdrop = useBackdropDismiss({
+  dismiss: () => emit('close'),
+  hasUnsavedWork: () => hasContent.value || saving.value,
+  onHold: () =>
+    flashHold(saving.value ? '正在创建会话…' : '草稿还在：点「取消」或按 Esc 才关掉'),
+})
 
 /** 三个下拉的选项（含空值 = 引擎默认）。 */
 const projectOptions = computed(() =>
@@ -299,12 +324,20 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydownWindow)
+  if (holdTimer) {
+    window.clearTimeout(holdTimer)
+    holdTimer = 0
+  }
   closePopup()
 })
 </script>
 
 <template>
-  <div class="dialog-overlay composer-overlay" @click.self="emit('close')">
+  <div
+    class="dialog-overlay composer-overlay"
+    @mousedown="backdrop.onMousedown"
+    @click="backdrop.onClick"
+  >
     <div class="dialog-panel composer-panel" role="dialog" aria-label="新建会话">
       <header class="dialog-head">
         <span class="dialog-title">新建会话</span>
@@ -424,7 +457,9 @@ onBeforeUnmount(() => {
       </div>
 
       <footer class="dialog-foot">
-        <span class="foot-hint">{{ project?.worktree }}</span>
+        <span class="foot-hint" :class="{ 'foot-hint-hold': holdHint }">
+          {{ holdHint || project?.worktree }}
+        </span>
         <span class="foot-actions">
           <button class="ghost-btn" @click="emit('close')">取消</button>
           <button
