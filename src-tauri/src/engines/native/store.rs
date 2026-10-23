@@ -45,6 +45,13 @@ pub enum StoredPart {
     Reasoning {
         text: String,
     },
+    /// 用户附的图片：正文只存引用，字节在 `<session>/images/` 下。
+    Image {
+        name: String,
+        mime: String,
+        path: String,
+        bytes: i64,
+    },
     Tool {
         name: String,
         call_id: String,
@@ -67,6 +74,17 @@ impl StoredPart {
     fn to_timeline(&self) -> TimelinePart {
         match self {
             StoredPart::Text { text } => TimelinePart::Text { text: text.clone() },
+            StoredPart::Image {
+                name,
+                mime,
+                path,
+                bytes,
+            } => TimelinePart::Image {
+                name: name.clone(),
+                mime: mime.clone(),
+                path: path.clone(),
+                bytes: *bytes,
+            },
             StoredPart::Reasoning { text } => TimelinePart::Reasoning { text: text.clone() },
             StoredPart::Tool {
                 name,
@@ -206,6 +224,36 @@ fn write_meta(meta: &SessionMeta) -> Result<(), String> {
 }
 
 /// 追加一条消息，并就地更新 meta（标题 / 时间 / token 累计）。
+/// 把用户附的图片落到会话目录（`images/<毫秒>-<文件名>`），返回绝对路径与字节数。
+///
+/// 消息体里只存引用：图片进了 `messages.jsonl` 会让每次读时间线都多几百 KB，
+/// 而绝大多数时候界面根本不需要它。
+pub fn save_image(raw_id: &str, name: &str, data: &[u8], mime: &str) -> Result<(String, i64), String> {
+    let dir = session_dir(raw_id)?.join("images");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("创建图片目录失败：{error}"))?;
+    let ext = match mime {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    };
+    // 文件名只留安全字符：原始名字可能是截图工具给的奇怪串。
+    let stem: String = name
+        .rsplit('/')
+        .next()
+        .unwrap_or("image")
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
+        .collect();
+    let stem = stem.trim_matches('-');
+    let stem = if stem.is_empty() { "image" } else { stem };
+    let file = format!("{}-{stem}.{ext}", now_ms());
+    let path = dir.join(&file);
+    std::fs::write(&path, data).map_err(|error| format!("写入图片失败：{error}"))?;
+    Ok((path.to_string_lossy().to_string(), data.len() as i64))
+}
+
 pub fn append(raw_id: &str, message: &StoredMessage) -> Result<(), String> {
     let path = messages_path(raw_id)?;
     let mut file = std::fs::OpenOptions::new()

@@ -649,6 +649,84 @@
   font-family: var(--font-mono);
 }
 
+/* ---- 图片 chip：缩略图 + 文件名 + 大小，悬停弹大图 ---- */
+
+.img-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 2px 7px 2px 3px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 10.5px;
+}
+
+.img-thumb {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--code-bg);
+}
+
+.img-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.img-size {
+  flex: none;
+  color: var(--faint);
+  font-size: 9.5px;
+}
+
+/* 悬停预览：往上弹，不占布局、不挡输入框（pointer-events 关掉）。 */
+.img-pop {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(4px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease,
+    visibility 0.12s;
+  pointer-events: none;
+}
+
+.img-pop img {
+  display: block;
+  max-width: 280px;
+  max-height: 200px;
+  border-radius: 6px;
+}
+
+.img-chip:hover .img-pop {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+/* 选图用的隐藏 input：按钮点它就够了，别在界面上露出来。 */
+.image-input {
+  display: none;
+}
+
 .chip-x {
   flex: none;
   border: none;

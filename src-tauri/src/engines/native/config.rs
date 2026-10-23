@@ -26,6 +26,10 @@ pub struct ModelEntry {
     /// 展示名（`/models` 里有名字时用它，没有就省掉）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// 能不能收图片（视觉输入）。默认关：猜错会让整轮请求 400，
+    /// 宁可由用户在 设置 → 模型服务 里显式打开。
+    #[serde(default)]
+    pub supports_images: bool,
 }
 
 impl ModelEntry {
@@ -33,6 +37,7 @@ impl ModelEntry {
         Self {
             id: id.into(),
             label: None,
+            supports_images: false,
         }
     }
 
@@ -40,6 +45,7 @@ impl ModelEntry {
         Self {
             id: id.into(),
             label: Some(label.into()),
+            supports_images: false,
         }
     }
 
@@ -155,6 +161,7 @@ impl ProviderConfig {
                     id: model.id.clone(),
                     label: model.display().to_string(),
                     active: is_active && active.map(|item| item.model == model.id).unwrap_or(false),
+                    supports_images: model.supports_images,
                 })
                 .collect(),
             ready: self.ready(),
@@ -179,6 +186,8 @@ pub struct ModelView {
     pub label: String,
     /// 是否是当前选中的模型。
     pub active: bool,
+    /// 能不能收图片（由用户在模型服务里勾）。
+    pub supports_images: bool,
 }
 
 /// 服务回给界面的样子（不含密钥原文）。
@@ -656,6 +665,19 @@ pub fn update_limits(input: LimitsInput) -> Result<NativeConfigView, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 老配置里没有这个字段：必须默认「不支持图片」，否则一升级就会把
+    /// 图片塞给不支持视觉的模型，整轮 400。
+    #[test]
+    fn model_image_capability_defaults_off_and_round_trips() {
+        let old: ModelEntry = serde_json::from_str(r#"{"id":"m1"}"#).expect("老配置");
+        assert!(!old.supports_images);
+        let on: ModelEntry =
+            serde_json::from_str(r#"{"id":"m1","supportsImages":true}"#).expect("新配置");
+        assert!(on.supports_images);
+        let text = serde_json::to_string(&on).expect("序列化");
+        assert!(text.contains("supportsImages"), "{text}");
+    }
 
     fn provider(id: &str, models: &[&str]) -> ProviderConfig {
         ProviderConfig {

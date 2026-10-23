@@ -53,6 +53,7 @@ export interface SessionSummary {
 export type TimelinePart =
   | { kind: 'text'; text: string }
   | { kind: 'reasoning'; text: string }
+  | { kind: 'image'; name: string; mime: string; path: string; bytes: number }
   | {
       kind: 'tool'
       name: string
@@ -497,6 +498,8 @@ export interface SendFileRef {
 /** 组合器发送可选项（模型 / 推理档位 / 附件）。 */
 export interface SendOptions {
   files?: SendFileRef[]
+  /** 图片（原生引擎 + 视觉模型才收）：base64，不带 data: 前缀。 */
+  images?: SendImage[]
   model?: string | null
   provider?: string | null
   variant?: string | null
@@ -509,6 +512,16 @@ export interface NativeModel {
   id: string
   label: string
   active: boolean
+  /** 能不能收图片（在模型服务里勾的视觉能力）。 */
+  supportsImages: boolean
+}
+
+/** 随消息发出的一张图。 */
+export interface SendImage {
+  name: string
+  mime: string
+  /** base64（不含 `data:image/png;base64,` 前缀）。 */
+  data: string
 }
 
 /** 模型服务（端点）：密钥不回传，只给末四位。 */
@@ -570,7 +583,7 @@ export interface NativeProviderInput {
   baseUrl: string
   apiKey?: string
   clearKey?: boolean
-  models: Array<{ id: string; label?: string | null }>
+  models: Array<{ id: string; label?: string | null; supportsImages?: boolean }>
 }
 
 /** 只改运行参数。 */

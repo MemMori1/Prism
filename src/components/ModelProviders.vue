@@ -29,6 +29,8 @@ interface Draft {
   hasKey: boolean
   keyHint: string
   models: string[]
+  /** 勾了「图片」的模型 id：视觉输入是模型级能力，默认关。 */
+  imageModels: string[]
 }
 
 const config = ref<NativeConfigView | null>(null)
@@ -119,6 +121,7 @@ function startAdd() {
     hasKey: false,
     keyHint: '',
     models: [],
+    imageModels: [],
   }
   candidates.value = []
   search.value = ''
@@ -136,6 +139,7 @@ function startEdit(provider: NativeProvider) {
     hasKey: provider.hasKey,
     keyHint: provider.keyHint,
     models: provider.models.map(model => model.id),
+    imageModels: provider.models.filter(model => model.supportsImages).map(model => model.id),
   }
   // 已保存的模型直接铺成候选，省掉一次「拉取」才能看全。
   candidates.value = provider.models.map(model => ({ ...model }))
@@ -164,10 +168,20 @@ function toggleModel(id: string) {
     : [...current.models, id]
 }
 
+/** 草稿里勾 / 取消「图片」能力。 */
+function toggleDraftVision(id: string) {
+  const current = draft.value
+  if (!current) return
+  current.imageModels = current.imageModels.includes(id)
+    ? current.imageModels.filter(item => item !== id)
+    : [...current.imageModels, id]
+}
+
 function removeModel(id: string) {
   const current = draft.value
   if (!current) return
   current.models = current.models.filter(item => item !== id)
+  current.imageModels = current.imageModels.filter(item => item !== id)
 }
 
 function addManual() {
@@ -247,13 +261,47 @@ async function save() {
       baseUrl: current.baseUrl.trim(),
       apiKey: current.apiKey.trim() || undefined,
       clearKey: current.clearKey,
-      models: current.models.map(id => ({ id })),
+      models: current.models.map(id => ({
+        id,
+        supportsImages: current.imageModels.includes(id),
+      })),
     })
     const name = current.label.trim() || current.baseUrl
     draft.value = null
     candidates.value = []
     adopt(next)
     flash(`已保存 ${name}`)
+  } catch (cause) {
+    fail(cause)
+  } finally {
+    busy.value = false
+  }
+}
+
+/**
+ * 在服务卡片上直接切「图片」能力。
+ *
+ * 走的是同一套保存接口（模型清单整份回写），不用进编辑态——这个开关用户经常要
+ * 试一次（模型到底吃不吃图），来回开编辑弹层太烦。
+ */
+async function toggleVision(provider: NativeProvider, model: NativeModel) {
+  if (busy.value) return
+  busy.value = true
+  error.value = null
+  try {
+    const next = await api.nativeProviderSave({
+      id: provider.id,
+      label: provider.label,
+      baseUrl: provider.baseUrl,
+      clearKey: false,
+      models: provider.models.map(item => ({
+        id: item.id,
+        label: item.label,
+        supportsImages: item.id === model.id ? !model.supportsImages : item.supportsImages,
+      })),
+    })
+    adopt(next)
+    flash(`${model.id} ${model.supportsImages ? '不再收图片' : '可以收图片了'}`)
   } catch (cause) {
     fail(cause)
   } finally {
@@ -463,6 +511,15 @@ async function testActive() {
           <div v-if="draft.models.length" class="mp-chips">
             <span v-for="id in draft.models" :key="id" class="mp-chip">
               <span class="mono">{{ id }}</span>
+              <button
+                type="button"
+                class="mp-chip-vision"
+                :class="{ on: draft.imageModels.includes(id) }"
+                title="这个模型能看图"
+                @click="toggleDraftVision(id)"
+              >
+                图片
+              </button>
               <button type="button" class="mp-chip-x" title="移除" @click="removeModel(id)">
                 ×
               </button>
@@ -527,20 +584,38 @@ async function testActive() {
         </header>
 
         <div class="mp-provider-models">
-          <button
+          <div
             v-for="model in provider.models"
             :key="model.id"
             class="mp-model"
             :class="{ on: model.active }"
-            :disabled="!provider.ready || busy"
-            @click="select(provider, model)"
           >
-            <span class="mp-radio" />
-            <span class="mp-model-id mono">{{ model.id }}</span>
-            <span v-if="model.label !== model.id" class="mp-model-label">
-              {{ model.label }}
-            </span>
-          </button>
+            <button
+              class="mp-model-pick"
+              :disabled="!provider.ready || busy"
+              :title="model.active ? '当前默认模型' : `设为默认：${model.id}`"
+              @click="select(provider, model)"
+            >
+              <span class="mp-radio" />
+              <span class="mp-model-id mono">{{ model.id }}</span>
+              <span v-if="model.label !== model.id" class="mp-model-label">
+                {{ model.label }}
+              </span>
+            </button>
+            <button
+              class="mp-vision"
+              :class="{ on: model.supportsImages }"
+              :disabled="busy"
+              :title="
+                model.supportsImages
+                  ? '正在接收图片：点一下关掉'
+                  : '这个模型能看图：点一下打开，之后输入框才能发图'
+              "
+              @click="toggleVision(provider, model)"
+            >
+              图片
+            </button>
+          </div>
           <span v-if="!provider.models.length" class="mp-empty mp-empty-inline">
             还没勾模型，点「编辑」拉取
           </span>

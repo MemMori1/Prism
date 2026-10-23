@@ -62,6 +62,13 @@ pub struct SessionSummary {
 )]
 pub enum TimelinePart {
     Text { text: String },
+    /// 用户发进来的图片：落盘在会话目录下，界面按 path 取图。
+    Image {
+        name: String,
+        mime: String,
+        path: String,
+        bytes: i64,
+    },
     Reasoning { text: String },
     Tool {
         name: String,

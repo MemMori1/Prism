@@ -360,6 +360,28 @@
   font-size: 10.5px;
 }
 
+/* 草稿 chip 里的同一个开关：比卡片上的更小，但语义一致 */
+.mp-chip-vision {
+  height: 14px;
+  padding: 0 5px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent-text);
+  font-size: 8.5px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.mp-chip-vision.on {
+  border-style: solid;
+  background: var(--amber-soft);
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+  color: var(--amber);
+  opacity: 1;
+}
+
 .mp-chip-x {
   width: 15px;
   height: 15px;
@@ -510,27 +532,82 @@
   margin: 9px 0 8px;
 }
 
+/* 一颗药丸里塞两件事：左边选默认模型，右边切「能不能看图」。
+   两个都是按钮，所以外层只能是 div——按钮不能套按钮。 */
 .mp-model {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   max-width: 100%;
-  padding: 3px 9px 3px 6px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--panel);
   color: var(--muted);
   font-size: 11px;
-  cursor: pointer;
   transition:
     border-color 0.12s ease,
     background 0.12s ease,
     color 0.12s ease;
 }
 
-.mp-model:hover:not(:disabled) {
+.mp-model:hover {
   border-color: var(--accent);
   color: var(--text);
+}
+
+.mp-model-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 6px;
+  border: none;
+  border-radius: 999px 0 0 999px;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mp-model-pick:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 视觉开关：小字标签，开启时用琥珀色——别和主色（当前模型）抢注意力。 */
+.mp-vision {
+  flex: none;
+  height: 15px;
+  margin-right: 5px;
+  padding: 0 6px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.mp-vision:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.mp-vision.on {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.mp-vision:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .mp-model.on {

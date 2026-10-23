@@ -5,6 +5,8 @@
 //! 流式过程走事件，落定后走 `read_timeline`。
 
 use super::{approval, config, provider, store, tools};
+use base64::Engine as _;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -249,7 +251,10 @@ fn provider_messages(directory: &str, history: &[store::StoredMessage]) -> Vec<V
                 // 用户消息是硬边界：手里没配上的工具结果不可能再配上了。
                 orphans.clear();
                 paired.clear();
-                messages.push(json!({ "role": "user", "content": message.text }));
+                messages.push(json!({
+                    "role": "user",
+                    "content": user_content(message),
+                }));
             }
             "assistant" => {
                 messages.push(assistant_value(message));
@@ -281,6 +286,42 @@ fn provider_messages(directory: &str, history: &[store::StoredMessage]) -> Vec<V
     }
     drop_unanswered_tool_calls(&mut messages);
     messages
+}
+
+/// 用户消息的 `content`：没图就是纯字符串（最省 token 也最兼容），
+/// 有图才升级成 OpenAI 的 parts 数组。
+///
+/// 图片从磁盘读出来再 base64：历史消息里只有引用，重放时现读，避免会话文件膨胀。
+fn user_content(message: &store::StoredMessage) -> Value {
+    let images: Vec<&store::StoredPart> = message
+        .parts
+        .iter()
+        .filter(|part| matches!(part, store::StoredPart::Image { .. }))
+        .collect();
+    if images.is_empty() {
+        return Value::String(message.text.clone());
+    }
+    let mut parts: Vec<Value> = Vec::new();
+    if !message.text.trim().is_empty() {
+        parts.push(json!({ "type": "text", "text": message.text }));
+    }
+    for part in images {
+        let store::StoredPart::Image { mime, path, .. } = part else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        parts.push(json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{mime};base64,{encoded}") },
+        }));
+    }
+    if parts.is_empty() {
+        return Value::String(message.text.clone());
+    }
+    Value::Array(parts)
 }
 
 /// 结尾兜底：带 tool_calls 的 assistant 后面必须紧跟着每个 call 的工具结果
@@ -396,6 +437,18 @@ fn resolve_pick(
     Ok((provider.clone(), model.id.clone()))
 }
 
+/// IPC 传进来的一张图：`data` 是 base64（不带 `data:image/png;base64,` 前缀）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncomingImage {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub data: String,
+}
+
 /// 发一条用户消息，跑完整轮。返回用户消息 id。
 pub fn send(
     app: &AppHandle,
@@ -404,6 +457,7 @@ pub fn send(
     provider_id: Option<&str>,
     model_id: Option<&str>,
     approval_mode: Option<&str>,
+    images: &[IncomingImage],
 ) -> Result<String, String> {
     let raw =
         super::raw_session_id(session_id).ok_or_else(|| format!("不是原生会话：{session_id}"))?;
@@ -419,6 +473,9 @@ pub fn send(
             if !is_running(&session_id) {
                 return Err(error);
             }
+            if !images.is_empty() {
+                return Err("这一轮还在跑：图片不能排队（排队只存文字），等结束再发".to_string());
+            }
             let queued = enqueue(&session_id, text)?;
             emit(
                 app,
@@ -432,15 +489,56 @@ pub fn send(
     let cfg = config::load();
     let (provider, model) = resolve_pick(&cfg, provider_id, model_id)?;
 
+    let picked = provider
+        .models
+        .iter()
+        .find(|entry| entry.id == model)
+        .cloned()
+        .unwrap_or_else(|| config::ModelEntry::new(model.clone()));
+    if !images.is_empty() && !picked.supports_images {
+        return Err(format!(
+            "{} 没开图片输入：设置 → 模型服务 → 这个模型右边的「图片」开关打开后再发",
+            picked.display()
+        ));
+    }
+
+    // 图片先落盘：消息里只留引用，时间线读起来才不背着几百 KB 的 base64。
+    let mut parts: Vec<store::StoredPart> = vec![store::StoredPart::Text {
+        text: text.to_string(),
+    }];
+    for image in images {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(image.data.trim())
+            .map_err(|error| format!("图片不是合法 base64：{error}"))?;
+        if bytes.is_empty() {
+            continue;
+        }
+        let name = if image.name.trim().is_empty() {
+            "image"
+        } else {
+            image.name.trim()
+        };
+        let mime = if image.mime.trim().is_empty() {
+            "image/png"
+        } else {
+            image.mime.trim()
+        };
+        let (path, size) = store::save_image(raw, name, &bytes, mime)?;
+        parts.push(store::StoredPart::Image {
+            name: name.to_string(),
+            mime: mime.to_string(),
+            path,
+            bytes: size as i64,
+        });
+    }
+
     let user_id = new_message_id();
     let user_message = store::StoredMessage {
         id: user_id.clone(),
         role: "user".to_string(),
         time: now_ms(),
         text: text.to_string(),
-        parts: vec![store::StoredPart::Text {
-            text: text.to_string(),
-        }],
+        parts,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tokens: None,
@@ -870,6 +968,39 @@ mod tests {
             tool_call_id: None,
             tokens: None,
         }
+    }
+
+    /// 没图就必须还是字符串：老服务端对 parts 数组的兼容性不如纯文本。
+    /// 有图才升级成 parts，且图片是现读磁盘拼 data URL（消息里只存引用）。
+    #[test]
+    fn user_content_upgrades_to_parts_only_with_images() {
+        let plain = message("user", "看这个");
+        assert_eq!(super::user_content(&plain), json!("看这个"));
+
+        let path = std::env::temp_dir().join(format!("prism-vision-{}.png", std::process::id()));
+        std::fs::write(&path, [0x89u8, 0x50, 0x4e, 0x47]).expect("写临时图片");
+        let mut with_image = message("user", "看这个");
+        with_image.parts = vec![
+            store::StoredPart::Text {
+                text: "看这个".to_string(),
+            },
+            store::StoredPart::Image {
+                name: "shot.png".to_string(),
+                mime: "image/png".to_string(),
+                path: path.to_string_lossy().to_string(),
+                bytes: 4,
+            },
+        ];
+        let parts = super::user_content(&with_image);
+        let parts = parts.as_array().expect("带图应该是 parts 数组");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert!(parts[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

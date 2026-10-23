@@ -1,0 +1,50 @@
+/* 时间线里的图片：小图先看，点开交给系统看图程序。
+ * 尺寸上限压住——一张截图撑满时间线会把整段对话挤走。 */
+
+.msg-image {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0 2px;
+  align-items: flex-start;
+}
+
+.msg-image-btn {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg);
+  overflow: hidden;
+  cursor: zoom-in;
+  transition: border-color 0.12s ease;
+}
+
+.msg-image-btn:hover {
+  border-color: var(--border-strong);
+}
+
+.msg-image img {
+  display: block;
+  max-width: 320px;
+  max-height: 220px;
+  object-fit: contain;
+}
+
+.msg-image-note {
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.msg-image-name {
+  max-width: 320px;
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

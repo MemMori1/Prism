@@ -766,6 +766,9 @@ pub struct SendOptions {
     /// 权限档位（仅原生引擎：read-only / ask / full）。
     #[serde(default)]
     pub approval: Option<String>,
+    /// 图片附件（base64；只有原生引擎收，且要模型开了「图片」开关）。
+    #[serde(default)]
+    pub images: Vec<crate::engines::native::agent::IncomingImage>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -828,6 +831,7 @@ pub async fn session_send(
                 options.provider.as_deref(),
                 options.model.as_deref(),
                 options.approval.as_deref(),
+                &options.images,
             )
         })
         .await

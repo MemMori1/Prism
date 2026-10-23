@@ -4,6 +4,7 @@ import type { TimelineRecord } from '../types'
 import { renderMarkdown } from '../markdown'
 import { recordText } from '../timeline'
 import ToolCard from './ToolCard.vue'
+import TimelineImage from './TimelineImage.vue'
 import TurnMeta from './TurnMeta.vue'
 
 const props = withDefaults(
@@ -44,6 +45,13 @@ const copyText = computed(() => recordText(props.record))
             v-if="part.kind === 'text'"
             class="user-text md"
             v-html="renderMarkdown(part.text)"
+          />
+          <TimelineImage
+            v-else-if="part.kind === 'image'"
+            :name="part.name"
+            :mime="part.mime"
+            :path="part.path"
+            :bytes="part.bytes"
           />
         </template>
       </div>

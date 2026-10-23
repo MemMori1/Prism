@@ -115,6 +115,106 @@ const highlightId = ref<string | null>(null)
 /** 交付物就地预览：当前打开的本地文件路径。 */
 const artifactPath = ref<string | null>(null)
 
+// ---- 图片附件（原生引擎的视觉模型才吃） ----
+
+interface PendingImage {
+  id: string
+  name: string
+  mime: string
+  data: string
+  bytes: number
+}
+
+const images = ref<PendingImage[]>([])
+const imageInput = ref<HTMLInputElement | null>(null)
+/** 单张上限：再大模型也吃不下，先在这儿拦住，别等请求被端上 413。 */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+let imageSeq = 0
+
+function dataUrlOf(image: PendingImage): string {
+  return `data:${image.mime};base64,${image.data}`
+}
+
+function readBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = String(reader.result ?? '')
+      const comma = text.indexOf(',')
+      resolve(comma >= 0 ? text.slice(comma + 1) : text)
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('读不出这张图'))
+    reader.readAsDataURL(file)
+  })
+}
+
+/** 把文件列表里的图片收进输入框（粘贴 / 拖进来 / 选文件走同一条）。 */
+async function addImages(files: File[]) {
+  const picked = files.filter(file => file.type.startsWith('image/'))
+  if (!picked.length) return
+  if (!nativeSession.value) {
+    report(new Error('图片只支持 Prism 内置引擎；当前会话是外部引擎，请用文件引用'))
+    return
+  }
+  for (const file of picked) {
+    if (file.size > MAX_IMAGE_BYTES) {
+      report(new Error(`${file.name || '图片'} 太大（上限 8 MB）`))
+      continue
+    }
+    try {
+      const data = await readBase64(file)
+      imageSeq += 1
+      images.value = [
+        ...images.value,
+        {
+          id: `img-${imageSeq}`,
+          name: file.name || `截图-${imageSeq}.png`,
+          mime: file.type || 'image/png',
+          data,
+          bytes: file.size,
+        },
+      ]
+    } catch (cause) {
+      report(cause)
+    }
+  }
+}
+
+function onImagePaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files ?? [])
+  if (!files.some(file => file.type.startsWith('image/'))) return
+  event.preventDefault()
+  void addImages(files)
+}
+
+function onImageDrop(event: DragEvent) {
+  const files = Array.from(event.dataTransfer?.files ?? [])
+  if (!files.length) return
+  event.preventDefault()
+  void addImages(files)
+}
+
+function pickImages() {
+  imageInput.value?.click()
+}
+
+function onImagePicked(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  void addImages(files)
+}
+
+function removeImage(id: string) {
+  images.value = images.value.filter(item => item.id !== id)
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
 /** 权限档位：只对原生引擎有意义（别的引擎在各自应用里管权限）。 */
 const approvalMode = ref<ApprovalMode>(DEFAULT_APPROVAL)
 
@@ -122,6 +222,8 @@ watch(
   () => props.session?.id,
   () => {
     approvalMode.value = loadApproval(props.session?.id)
+    // 切会话时把待发的图清掉：那是上一个会话的上下文，带过去只会发错地方。
+    images.value = []
   },
   { immediate: true },
 )
@@ -405,7 +507,7 @@ const menuCount = computed(() =>
 const canSend = computed(() => {
   const shell = shellCommand(draft.value)
   if (shell !== null) return shell.length > 0
-  return !!draft.value.trim() || attachments.value.length > 0
+  return !!draft.value.trim() || attachments.value.length > 0 || images.value.length > 0
 })
 
 /**
@@ -1334,7 +1436,12 @@ async function send(force = false) {
   // 上一轮还在跑：先停在输入框上面的「待发送」，别直接打断。
   if (running.value && !force && shellCommand(draft.value) === null) {
     const pending = draft.value.trim()
-    if (!pending && !attachments.value.length) return
+    if (!pending && !attachments.value.length && !images.value.length) return
+    // 排队只存文字：图片没法先攒着，直接说清楚，别悄悄丢掉。
+    if (images.value.length) {
+      flashNotice('执行中不能排队图片：等这一轮结束再发')
+      return
+    }
     queued.value = pending
     draft.value = ''
     attachments.value = []
@@ -1366,17 +1473,21 @@ async function send(force = false) {
   }
 
   const content = draft.value.trim()
-  if (!content && !attachments.value.length) return
+  if (!content && !attachments.value.length && !images.value.length) return
   // 先清空再投递：一次往返期间用户可能已经在写下一句，等回来再清会把它抹掉。
   const sentDraft = draft.value
   const sentFiles = attachments.value
+  const sentImages = images.value
   draft.value = ''
   attachments.value = []
+  images.value = []
   closePopup()
   sending.value = true
   try {
     const directory = (props.session?.directory ?? '').replace(/\/+$/, '')
-    const files = attachments.value.map(file => ({
+    // 注意用 sentFiles：attachments 上面已经清空了（早先这里写成 attachments.value，
+    // 结果文件引用从来没真的发出去过）。
+    const files = sentFiles.map(file => ({
       uri: directory ? `${directory}/${file.path}` : file.path,
       name: fileLabel(file.path),
     }))
@@ -1386,6 +1497,14 @@ async function send(force = false) {
       await api.sessionCommand(sessionId, invocation.name, invocation.text)
     } else {
       const options: SendOptions = { files }
+      if (sentImages.length) {
+        if (!nativeSession.value) throw new Error('图片只支持 Prism 内置引擎')
+        options.images = sentImages.map(image => ({
+          name: image.name,
+          mime: image.mime,
+          data: image.data,
+        }))
+      }
       if (nativeSession.value) options.approval = approvalMode.value
       const picked = resolveModel()
       if (picked) {
@@ -1408,6 +1527,7 @@ async function send(force = false) {
     // 没发出去：放回输入框（用户没接着打字的前提下），别让内容凭空消失。
     if (!draft.value) draft.value = sentDraft
     if (!attachments.value.length) attachments.value = sentFiles
+    if (!images.value.length) images.value = sentImages
     report(cause)
   } finally {
     sending.value = false
@@ -1871,7 +1991,11 @@ watch(
             </div>
           </div>
 
-          <div class="composer-input-wrap">
+          <div
+            class="composer-input-wrap"
+            @dragover.prevent
+            @drop.prevent="onImageDrop"
+          >
             <textarea
               ref="composerInput"
               v-model="draft"
@@ -1884,6 +2008,7 @@ watch(
                   : '发一条指令…（Enter 发送，! 开头直接跑本机 shell）'
               "
               @input="onComposerInput"
+              @paste="onImagePaste"
               @keydown="onComposerKeydown"
               @focus="onComposerFocus"
               @blur="composerFocused = false"
@@ -1916,7 +2041,16 @@ watch(
             </div>
           </div>
 
-          <div v-if="attachments.length" class="composer-attachments">
+          <div v-if="images.length || attachments.length" class="composer-attachments">
+            <span v-for="image in images" :key="image.id" class="img-chip" :title="image.name">
+              <img class="img-thumb" :src="dataUrlOf(image)" :alt="image.name" />
+              <span class="img-name">{{ image.name }}</span>
+              <span class="img-size mono">{{ formatBytes(image.bytes) }}</span>
+              <button class="chip-x" title="移除图片" @click="removeImage(image.id)">✕</button>
+              <span class="img-pop" aria-hidden="true">
+                <img :src="dataUrlOf(image)" :alt="image.name" />
+              </span>
+            </span>
             <span v-for="file in attachments" :key="file.path" class="attach-chip">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M21.4 11.05 12.9 19.5a5 5 0 0 1-7.07-7.07l8.49-8.49a3.5 3.5 0 1 1 4.95 4.95l-8.49 8.49a2 2 0 0 1-2.83-2.83l7.78-7.78" />
@@ -1959,6 +2093,33 @@ watch(
                 </svg>
                 <span v-if="attachments.length && composerMenu !== 'file'" class="rail-dot" />
               </button>
+              <button
+                class="rail-btn"
+                :class="{ on: images.length > 0 }"
+                :disabled="sending || !nativeSession"
+                :title="
+                  nativeSession
+                    ? '发图片（粘贴 / 拖进来也行；模型要开「图片」开关）'
+                    : '图片只支持内置引擎'
+                "
+                aria-label="添加图片"
+                @click="pickImages"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="3.4" y="4.6" width="17.2" height="14.8" rx="2.4" />
+                  <circle cx="8.6" cy="9.6" r="1.5" />
+                  <path d="m4.4 17.2 4.6-4.4 3.2 3 2.6-2.4 4.8 4.4" />
+                </svg>
+                <span v-if="images.length" class="rail-dot" />
+              </button>
+              <input
+                ref="imageInput"
+                class="image-input"
+                type="file"
+                accept="image/*"
+                multiple
+                @change="onImagePicked"
+              />
             </div>
 
             <BranchPicker
