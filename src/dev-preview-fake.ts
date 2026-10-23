@@ -445,6 +445,62 @@ if (scene === 'ctx') {
   const last = list[list.length - 1]
   last.tokens = { input: 10246, cacheRead: 0, cacheWrite: 0, output: 174, reasoning: 0 }
 }
+if (scene === 'compact') {
+  // 与会话里真实落库的三段一致：开始分隔线 → 摘要卡 → 结束分隔线。
+  timelines['native:n1'].push({
+    id: 'm-compact-start',
+    role: 'system',
+    timeCreated: Date.now(),
+    model: null,
+    completed: true,
+    parts: [{ kind: 'text', text: '会话压缩已开始 · 12 条消息 · 41203 字符' }],
+    tokens: null,
+  })
+  timelines['native:n1'].push({
+    id: 'm-compact',
+    role: 'compact',
+    timeCreated: Date.now(),
+    model: null,
+    completed: true,
+    parts: [
+      {
+        kind: 'text',
+        text: [
+          '## 目标',
+          '',
+          '把 README 的安装步骤补全，覆盖 macOS 与 Windows，不改其它章节。',
+          '',
+          '## 已完成',
+          '',
+          '- 读过 `README.md`（120 行），现有「快速开始」只写了 Linux',
+          '- 补了 macOS 段：Homebrew + `pnpm install`，`pnpm tauri dev` 起得来',
+          '- 补了 Windows 段：需要 WebView2 运行时与 VS Build Tools',
+          '',
+          '## 关键文件与命令',
+          '',
+          '| 文件 | 改动 |',
+          '| --- | --- |',
+          '| `README.md` | 新增两节安装说明 |',
+          '',
+          '## 待办与约束',
+          '',
+          '- 还没跑 `pnpm build` 验证打包产物',
+          '- 用户要求：不要动「架构概览」那一节',
+        ].join('\n'),
+      },
+    ],
+    tokens: null,
+  })
+  timelines['native:n1'].push({
+    id: 'm-compact-end',
+    role: 'system',
+    timeCreated: Date.now(),
+    model: null,
+    completed: true,
+    parts: [{ kind: 'text', text: '会话压缩已结束 · 12 条消息 · 41203 → 1830 字符' }],
+    tokens: null,
+  })
+}
 if (scene === 'json') {
   timelines['native:n1'].push({
     id: 'm-tool',
@@ -1107,6 +1163,7 @@ const invoke: Invoke = async (cmd, args = {}) => {
     case 'session_interrupt':
     case 'session_shell':
     case 'session_command':
+      return args.name === 'compact' ? '正在压缩：12 条消息 · 41203 字符' : null
     case 'tray_status':
     case 'open_path':
       return null
@@ -1138,7 +1195,12 @@ const invoke: Invoke = async (cmd, args = {}) => {
         engine: String(args.engine ?? 'native'),
         available: true,
         reason: null,
-        commands: [],
+        commands: [
+          {
+            name: 'compact',
+            description: '压缩上下文：把此前对话压成摘要后重写会话，腾出空间（可附一句要求）',
+          },
+        ],
         models: [
           { id: 'deepseek-chat', label: 'DeepSeek Chat', provider: 'deepseek', variants: [], defaultVariant: null, isDefault: true },
           { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner', provider: 'deepseek', variants: [], defaultVariant: null, isDefault: false },

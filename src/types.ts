@@ -62,7 +62,13 @@ export type TimelinePart =
       callId: string
     }
 
-export type RecordRole = 'user' | 'assistant' | 'system'
+/**
+ * 时间线条目的角色。
+ *
+ * `compact` 是原生引擎 `/compact` 留下的摘要条目：它在 UI 上是一张可展开的卡片，
+ * 发给模型时被当成「此前对话的背景」（见 `agent::compact_content`）。
+ */
+export type RecordRole = 'user' | 'assistant' | 'system' | 'compact'
 
 export interface TimelineRecord {
   id: string

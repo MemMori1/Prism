@@ -84,7 +84,13 @@ export function charsOfRecords(
     for (const part of record.parts) {
       const text = part.text ?? part.summary ?? ''
       if (part.kind === 'tool') chars.tool += text.length
-      else if (record.role === 'user' || record.role === 'assistant') chars.dialog += text.length
+      else if (
+        record.role === 'user' ||
+        record.role === 'assistant' ||
+        // 压缩摘要以 user 消息发给模型，算进「对话」才对得上号。
+        record.role === 'compact'
+      )
+        chars.dialog += text.length
     }
   }
   return chars

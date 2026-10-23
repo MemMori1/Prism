@@ -47,7 +47,8 @@ pub fn stats(session_id: &str) -> Option<ContextStats> {
             size += call.name.chars().count() + call.arguments.chars().count();
         }
         match message.role.as_str() {
-            "user" => user += size,
+            // 压缩摘要以 user 消息发给模型，算进「用户」那一格才对得上号。
+            "user" | "compact" => user += size,
             "assistant" => assistant += size,
             "tool" => tool += size,
             _ => {}

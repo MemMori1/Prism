@@ -58,6 +58,17 @@ const copyText = computed(() => recordText(props.record))
       <TurnMeta v-if="showMeta" align="end" :copy-text="copyText" />
     </template>
 
+    <!-- 上下文压缩：一张可展开的摘要卡（原文已经被它替换掉了） -->
+    <template v-else-if="record.role === 'compact'">
+      <details class="compact-card">
+        <summary>
+          <span class="compact-tag">上下文已压缩</span>
+          <span class="compact-hint">此前的对话已并入下面的摘要</span>
+        </summary>
+        <div class="compact-body md" v-html="renderMarkdown(recordText(record))" />
+      </details>
+    </template>
+
     <!-- 系统提示：居中弱化 -->
     <template v-else-if="record.role === 'system'">
       <div class="system-note">

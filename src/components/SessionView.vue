@@ -115,6 +115,19 @@ const highlightId = ref<string | null>(null)
 /** 交付物就地预览：当前打开的本地文件路径。 */
 const artifactPath = ref<string | null>(null)
 
+/**
+ * `/compact` 的进度：后端把历史切段滚动压缩，一段一次模型调用。
+ * 长会话要几十秒，只给「执行中」等于什么都不说——这里显示到第几段。
+ */
+const compactProgress = ref<{ chunk: number; total: number } | null>(null)
+
+/** live 块那句提示：压缩时不写「等待模型响应」，写压到第几段。 */
+const waitingNote = computed(() =>
+  compactProgress.value
+    ? `正在压缩上下文 · 第 ${compactProgress.value.chunk}/${compactProgress.value.total} 段`
+    : null,
+)
+
 // ---- 图片附件（原生引擎的视觉模型才吃） ----
 
 interface PendingImage {
@@ -941,6 +954,8 @@ function truncateText(text: string, limit: number): string {
 function notifyTerminal(eventType: string, turn: LiveTurn, sessionId: string): void {
   const session = props.session
   if (!session || session.id !== sessionId) return
+  // 没有任何产出的回合不打扰：`/compact` 就是这种——它只把摘要写进会话，不回话。
+  if (!turn.error && turn.parts.length === 0) return
   const label = sessionLabel(sessionId)
   const base = { sessionId, projectId: session.projectId }
   if (eventType === 'session.execution.succeeded') {
@@ -996,6 +1011,26 @@ const stopEvents = onEngineEvent(event => {
     return
   }
 
+  // 压缩开始：会话里那条「会话压缩已开始」刚落库，把它读出来。
+  if (event.type === 'session.compact.started') {
+    void refreshTail()
+    return
+  }
+  // 压缩进度：分段滚动的第几段（一段一次模型调用）。
+  if (event.type === 'session.compact.progress') {
+    const chunk = Number(event.data?.chunk ?? 0)
+    const total = Number(event.data?.total ?? 0)
+    compactProgress.value = total > 0 ? { chunk, total } : null
+    return
+  }
+  if (event.type === 'session.compact.done') {
+    compactProgress.value = null
+    // 压了多少写在时间轴的结束分隔线上，这里不再弹一遍提示。
+    // 历史被重写了：整份重读。只往后追加的话，界面上会同时留着原文和摘要。
+    void reloadTimeline()
+    return
+  }
+
   // 权限审批：进入 / 退出挂起列表（不参与 live 归约）。
   if (event.type === 'permission.asked') {
     const request = permissionFromEvent(event.data)
@@ -1032,6 +1067,7 @@ const stopEvents = onEngineEvent(event => {
     if (after.running) maybeStick()
   }
   if (TERMINAL_EVENTS.has(event.type)) {
+    compactProgress.value = null
     notifyTerminal(event.type, after, sessionId)
     scheduleSettle(sessionId)
   }
@@ -1154,6 +1190,24 @@ async function refreshTail(): Promise<TimelineRecord[]> {
   if (!sessionId) return []
   const page = await readTailOnce(sessionId)
   return page ? mergeTail(page) : []
+}
+
+/**
+ * 整份重读时间线，但不切 loading（不闪骨架、不清权限挂起）。
+ *
+ * 用在「历史被就地改写」的场合：`/compact` 之后旧消息已经不在磁盘上了，
+ * 往后追加只会让原文和摘要同时挂在界面上。
+ */
+async function reloadTimeline() {
+  const sessionId = props.session?.id
+  if (!sessionId) return
+  const page = await readTailOnce(sessionId)
+  if (!page || props.session?.id !== sessionId) return
+  records.value = page.records
+  cursor.value = page.nextCursor
+  hasMore.value = page.hasMore
+  hydrateModelPick(page.records)
+  scrollToBottom()
 }
 
 async function loadInitial(sessionId: string) {
@@ -1433,6 +1487,14 @@ async function send(force = false) {
   const sessionId = props.session?.id
   if (!sessionId || sending.value) return
 
+  // 斜杠命令不能排队：队列只存文字，投递时会被当成普通消息发给模型——
+  // `/compact` 会变成一句「/compact」，模型认真回你一段「这是什么」。
+  const pendingCommand = commandInvocation(draft.value.trim(), catalog.value?.commands ?? [])
+  if (running.value && pendingCommand) {
+    flashNotice(`/${pendingCommand.name} 得等这一轮结束：命令不能排队`)
+    return
+  }
+
   // 上一轮还在跑：先停在输入框上面的「待发送」，别直接打断。
   if (running.value && !force && shellCommand(draft.value) === null) {
     const pending = draft.value.trim()
@@ -1493,8 +1555,10 @@ async function send(force = false) {
     }))
     const invocation = commandInvocation(content, catalog.value?.commands ?? [])
     if (invocation) {
-      // 斜杠命令：走引擎命令通道（剩余文本作为命令参数）
-      await api.sessionCommand(sessionId, invocation.name, invocation.text)
+      // 斜杠命令：走引擎命令通道（剩余文本作为命令参数）。
+      // 命令是瞬时的、没有消息落库，返回的那句话就是唯一的反馈——要显示出来。
+      const reply = await api.sessionCommand(sessionId, invocation.name, invocation.text)
+      if (reply && props.session?.id === sessionId) flashNotice(reply)
     } else {
       const options: SendOptions = { files }
       if (sentImages.length) {
@@ -1876,6 +1940,7 @@ watch(
               :turn="live"
               :model="liveModel"
               :running-since="liveStartedAt"
+              :waiting-note="waitingNote"
             />
           </div>
         </template>

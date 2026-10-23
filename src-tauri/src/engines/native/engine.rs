@@ -93,7 +93,12 @@ impl Engine for NativeEngine {
                 Some("还没配置模型服务".to_string())
             },
             models,
-            commands: Vec::new(),
+            // 原生引擎暂时只有一条命令：上下文是本地攒的，也只有本地能压。
+            commands: vec![crate::catalog::EngineCommand {
+                name: "compact".to_string(),
+                description: "压缩上下文：把此前对话压成摘要后重写会话，腾出空间（可附一句要求）"
+                    .to_string(),
+            }],
         })
     }
 }

@@ -945,9 +945,10 @@ pub async fn session_shell(
         .map_err(|cause| cause.to_string())?
 }
 
-/// 运行一条斜杠命令（OpenCode；text 为命令参数）。
+/// 运行一条斜杠命令（原生：/compact；OpenCode：引擎自己的命令）。
 #[tauri::command]
 pub async fn session_command(
+    app: tauri::AppHandle,
     runtime: tauri::State<'_, Runtime>,
     session_id: String,
     name: String,
@@ -955,6 +956,14 @@ pub async fn session_command(
 ) -> Result<String, String> {
     #[cfg(debug_assertions)]
     println!("[prism] session_command -> {session_id} /{name}");
+    if native::is_native_session(&session_id) {
+        // 原生引擎的命令是我们自己实现的：不认识的直接说清楚，
+        // 别落到底下的 OpenCode runtime 上、报一句莫名其妙的会话不存在。
+        if name != "compact" {
+            return Err(format!("原生引擎没有 /{name}（目前内置 /compact）"));
+        }
+        return native::compact::compact(&app, &session_id, &text);
+    }
     if is_codex_session(&session_id) {
         return Err("Codex 暂不支持斜杠命令（可直接输入自然语言指令）".to_string());
     }

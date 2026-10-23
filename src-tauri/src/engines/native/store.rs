@@ -278,6 +278,43 @@ pub fn append(raw_id: &str, message: &StoredMessage) -> Result<(), String> {
     write_meta(&meta)
 }
 
+/// 整份重写消息（`/compact` 用）。
+///
+/// 原文先复制成 `messages.jsonl.bak`（只留最近一次）——压缩是破坏性的，
+/// 摘要写歪了至少还能手工把这一个文件换回去。写入走 tmp + rename，
+/// 半路断电也不会留下半份会话。
+///
+/// `input` / `output` 是摘要那次调用的用量：它也是真金白银，记进会话累计。
+pub fn replace_messages(
+    raw_id: &str,
+    messages: &[StoredMessage],
+    input: i64,
+    output: i64,
+) -> Result<(), String> {
+    let path = messages_path(raw_id)?;
+    if path.exists() {
+        let backup = session_dir(raw_id)?.join("messages.jsonl.bak");
+        std::fs::copy(&path, &backup).map_err(|error| format!("备份原会话失败：{error}"))?;
+    }
+    let mut body = String::new();
+    for message in messages {
+        let line = serde_json::to_string(message).map_err(|error| error.to_string())?;
+        body.push_str(&line);
+        body.push('\n');
+    }
+    let tmp = session_dir(raw_id)?.join("messages.jsonl.tmp");
+    std::fs::write(&tmp, body).map_err(|error| format!("写入会话失败：{error}"))?;
+    std::fs::rename(&tmp, &path).map_err(|error| format!("替换会话失败：{error}"))?;
+
+    let Some(mut meta) = load_meta(raw_id) else {
+        return Ok(());
+    };
+    meta.tokens_input += input;
+    meta.tokens_output += output;
+    meta.time_updated = now_ms();
+    write_meta(&meta)
+}
+
 /// 记录这一轮实际用的模型与服务（会话头回显用）。
 pub fn set_model(raw_id: &str, model: &str, provider: &str) -> Result<(), String> {
     let Some(mut meta) = load_meta(raw_id) else {

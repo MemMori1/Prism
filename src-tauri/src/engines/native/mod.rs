@@ -14,6 +14,7 @@
 //! - `forensics` 安全研究线的本机工具（`bin.meta.identify` 等）
 //! - `analysis`  安全研究线的分析工具（xref / 导入导出 / 密码特征 / 差异）
 //! - `dag_tools` Planner 的七工具（改图），只在 DAG 作用域里出现
+//! - `compact`  `/compact`：把历史压成摘要再重写会话（省上下文）
 //! - `agent`    turn 循环：模型 → 工具 → 模型，事件原样喂给前端 liveTurn
 
 pub mod agent;
@@ -21,6 +22,7 @@ pub mod analysis;
 pub mod approval;
 pub mod artifact_tools;
 pub mod browser_tools;
+pub mod compact;
 pub mod config;
 pub mod context;
 pub mod dag_tools;

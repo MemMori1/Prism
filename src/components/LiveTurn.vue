@@ -12,6 +12,8 @@ const props = defineProps<{
   model?: string | null
   /** 开跑时刻：跑着的时候实时计时。 */
   runningSince?: number | null
+  /** 还没吐字时的说明（默认「等待模型响应…」；压缩时改成压缩进度）。 */
+  waitingNote?: string | null
 }>()
 
 /** 正在生成的正文也能先复制走。 */
@@ -39,7 +41,7 @@ function liveDetail(part: LiveToolPart): ToolDetail {
     <div class="assistant-block">
       <div v-if="turn.interrupted" class="live-note">已中断</div>
       <div v-if="turn.running && !turn.parts.length" class="live-note waiting">
-        <span class="pulse" />等待模型响应…
+        <span class="pulse" />{{ waitingNote || '等待模型响应…' }}
       </div>
 
       <div v-for="part in turn.parts" :key="part.key" class="part">

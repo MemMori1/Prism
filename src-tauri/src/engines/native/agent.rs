@@ -44,13 +44,16 @@ pub fn cancel(session_id: &str) -> bool {
 }
 
 /// 占住这个会话的回合槽位，Drop 时自动释放——即使中途 panic 也不会把会话锁死。
-struct RunSlot {
+///
+/// `/compact` 也用同一个槽位：压缩和跑回合都是「这个会话正在忙」，谁先占到算谁的；
+/// 停止按钮解的是同一个标记，所以压缩也能被打断。
+pub(crate) struct RunSlot {
     session_id: String,
     flag: Arc<AtomicBool>,
 }
 
 impl RunSlot {
-    fn take(session_id: &str) -> Result<Self, String> {
+    pub(crate) fn take(session_id: &str) -> Result<Self, String> {
         let flag = Arc::new(AtomicBool::new(false));
         let mut map = running().lock().expect("回合表锁");
         if map.contains_key(session_id) {
@@ -63,7 +66,7 @@ impl RunSlot {
         })
     }
 
-    fn stopped(&self) -> bool {
+    pub(crate) fn stopped(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
     }
 }
@@ -161,7 +164,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn new_message_id() -> String {
+pub(crate) fn new_message_id() -> String {
     // 同一纳秒内连发两条会撞出同一个 id（单测就是这么撞上的）。时间戳负责
     // "大体有序"，自增序号负责"绝对不重"——前端拿它当列表 key。
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -256,6 +259,16 @@ fn provider_messages(directory: &str, history: &[store::StoredMessage]) -> Vec<V
                     "content": user_content(message),
                 }));
             }
+            // `/compact` 留下的摘要：当成「已经发生过的历史背景」，不是要回应的请求。
+            // 用 user 而不是第二条 system——多数 OpenAI 兼容端只认开头那一条 system。
+            "compact" => {
+                orphans.clear();
+                paired.clear();
+                messages.push(json!({
+                    "role": "user",
+                    "content": compact_content(&message.text),
+                }));
+            }
             "assistant" => {
                 messages.push(assistant_value(message));
                 for call in &message.tool_calls {
@@ -324,6 +337,15 @@ fn user_content(message: &store::StoredMessage) -> Value {
     Value::Array(parts)
 }
 
+/// 摘要以 user 消息送出，所以要一句话说清它的身份，否则模型会把它当新指令
+/// 去「回答」。这句话不能省：省掉之后模型经常回一句「好的，我继续」然后停住。
+fn compact_content(text: &str) -> String {
+    format!(
+        "（以下是此前对话的压缩摘要，作为已知背景。不要回应这段摘要本身，等我下一条指令。）\n\n{}",
+        text.trim()
+    )
+}
+
 /// 结尾兜底：带 tool_calls 的 assistant 后面必须紧跟着每个 call 的工具结果
 /// （OpenAI 兼容端硬要求）。缺哪个就从声明里摘掉哪个——摘掉只是少一段工具
 /// 上下文，留着就是整轮请求发不出去、会话从此卡死。
@@ -388,7 +410,7 @@ fn summarize_input(input: &Value) -> Option<String> {
 }
 
 /// 会话里指定的模型与服务优先；没指定就用设置里的默认模型。
-fn resolve_pick(
+pub(crate) fn resolve_pick(
     cfg: &config::NativeConfig,
     provider_id: Option<&str>,
     model_id: Option<&str>,
@@ -1009,6 +1031,24 @@ mod tests {
         assert_eq!(list[0]["role"], "system");
         assert!(list[0]["content"].as_str().unwrap().contains("/tmp/demo"));
         assert_eq!(list[1]["role"], "user");
+    }
+
+    /// 压缩摘要要变成「背景 user 消息」，且前后不能被工具结果串味：
+    /// 拿走摘要时手里挂着的孤儿工具结果要一起清掉，否则会挂到错误的位置。
+    #[test]
+    fn compact_summary_becomes_background_user_message() {
+        let mut compact = message("compact", "## 目标\n改 README");
+        compact.id = "c1".to_string();
+        let history = vec![message("user", "开始"), compact, message("user", "继续")];
+        let list = provider_messages("/tmp/demo", &history);
+        let roles: Vec<&str> = list.iter().map(|item| item["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["system", "user", "user", "user"]);
+        let summary = list[2]["content"].as_str().expect("摘要应是纯文本");
+        assert!(summary.contains("压缩摘要"), "{summary}");
+        assert!(summary.contains("改 README"), "{summary}");
+        assert!(summary.contains("不要回应这段摘要本身"), "{summary}");
+        // 真正的用户消息不能被加料。
+        assert_eq!(list[3]["content"], "继续");
     }
 
     fn assistant_with_call(id: &str) -> store::StoredMessage {

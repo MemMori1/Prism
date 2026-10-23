@@ -164,6 +164,7 @@ function projectLabel(id: string): string {
 function roleLabel(role: string | null): string {
   if (role === 'user') return '我'
   if (role === 'assistant') return '助手'
+  if (role === 'compact') return '摘要'
   return '标题'
 }
 
