@@ -342,9 +342,6 @@ watch(
 
       <div v-else class="web-start">
         <p class="web-start-title">在这块面板里开网页</p>
-        <p class="web-start-sub">
-          真 webview：JS 渲染、登录态都在，Agent 的 <code>browser.*</code> 看到的也是这一页。
-        </p>
 
         <div v-if="pages.length || files.length" class="web-recent">
           <section v-if="pages.length" class="web-recent-block">
@@ -378,9 +375,7 @@ watch(
           </section>
         </div>
 
-        <p v-else class="web-start-empty">
-          还没有记录：打开一个页面或文件，下次这里就能一键回来。
-        </p>
+        <p v-else class="web-start-empty">还没有记录</p>
       </div>
     </div>
   </div>

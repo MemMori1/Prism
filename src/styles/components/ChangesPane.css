@@ -285,7 +285,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 22px;
+  gap: 18px;
   padding: 28px 24px 40px;
   overflow: auto;
   background:
@@ -303,14 +303,6 @@
   align-items: center;
   gap: 6px;
   text-align: center;
-}
-
-.pane-empty-kicker {
-  color: var(--faint);
-  font-size: 9.5px;
-  font-weight: 650;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
 }
 
 .pane-empty-title {
@@ -388,15 +380,6 @@
   color: var(--faint);
   font-size: 10.5px;
   line-height: 1.65;
-}
-
-.pane-empty-foot {
-  margin: 0;
-  max-width: 380px;
-  color: var(--faint);
-  font-size: 10.5px;
-  line-height: 1.7;
-  text-align: center;
 }
 
 @media (max-width: 620px) {

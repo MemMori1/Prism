@@ -337,9 +337,8 @@ onBeforeUnmount(() => {
       <div v-for="tab in tabs" v-show="tab.id === activeId" :key="tab.id" class="pane-view">
         <div v-if="tab.kind === 'empty'" class="pane-empty">
           <div class="pane-empty-head">
-            <span class="pane-empty-kicker">Empty tab</span>
             <p class="pane-empty-title">这个标签页还是空的</p>
-            <p class="pane-empty-sub">挑一样放进来，标签内容会被替换。</p>
+            <p class="pane-empty-sub">挑一样放进来</p>
           </div>
 
           <div class="pane-choices">
@@ -352,7 +351,7 @@ onBeforeUnmount(() => {
                 </svg>
               </span>
               <span class="pane-choice-name">打开文件</span>
-              <span class="pane-choice-sub">看改动、预览内容，也能直接改。</span>
+              <span class="pane-choice-sub">改动、预览、直接编辑</span>
             </button>
 
             <button class="pane-choice" @click="choose('term')">
@@ -363,7 +362,7 @@ onBeforeUnmount(() => {
                 </svg>
               </span>
               <span class="pane-choice-name">打开终端</span>
-              <span class="pane-choice-sub">跑后台任务，看完整输出，随时停止或重跑。</span>
+              <span class="pane-choice-sub">后台任务与完整输出</span>
             </button>
 
             <button class="pane-choice" @click="choose('web')">
@@ -374,13 +373,9 @@ onBeforeUnmount(() => {
                 </svg>
               </span>
               <span class="pane-choice-name">打开浏览器</span>
-              <span class="pane-choice-sub">真 webview：JS 渲染、登录态都在，Agent 也能用。</span>
+              <span class="pane-choice-sub">真网页，Agent 也能读</span>
             </button>
           </div>
-
-          <p class="pane-empty-foot">
-            还能继续点「＋」再开一个标签页——文件、终端各占一格，互不打扰。
-          </p>
         </div>
 
         <FilePane

@@ -160,27 +160,11 @@
 }
 
 .web-start-title {
-  margin: 0 0 6px;
+  margin: 0 0 18px;
   color: var(--text);
   font-size: 13px;
   font-weight: 650;
   text-align: center;
-}
-
-.web-start-sub {
-  margin: 0 0 22px;
-  color: var(--faint);
-  font-size: 11px;
-  line-height: 1.7;
-  text-align: center;
-}
-
-.web-start-sub code {
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: var(--code-bg);
-  font-family: var(--font-mono);
-  font-size: 10px;
 }
 
 .web-start-empty {
