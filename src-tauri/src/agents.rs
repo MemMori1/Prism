@@ -189,7 +189,8 @@ pub fn builtin() -> Vec<AgentProfile> {
             &["调研"],
             // `list_sessions` 是 IPC 命令不是工具，早先误写进白名单；
             // 白名单里挂着不存在的名字等于给用户一个假承诺，删掉。
-            tools(&["read_file", "grep", "list_files"], &[], &[]),
+            // `fetch` 给调研用：查文档 / CVE 比凭记忆编版本号靠谱，只读、有超时与上限。
+            tools(&["read_file", "grep", "list_files", "fetch"], &[], &[]),
         ),
         preset(
             "general",
@@ -201,7 +202,7 @@ pub fn builtin() -> Vec<AgentProfile> {
             "你是一个通用工程助手。先读再改，保持仓库现有风格。",
             &["通用"],
             tools(
-                &["read_file", "grep", "list_files", "edit_file", "run_command"],
+                &["read_file", "grep", "list_files", "edit_file", "run_command", "fetch"],
                 &[],
                 &[],
             ),
@@ -216,7 +217,7 @@ pub fn builtin() -> Vec<AgentProfile> {
             "你负责前端实现。改动保持仓库现有风格，不引入新组件库；先读再改。",
             &["前端", "实现"],
             tools(
-                &["read_file", "edit_file", "run_command", "grep"],
+                &["read_file", "edit_file", "run_command", "grep", "fetch"],
                 &[],
                 &[],
             ),
@@ -231,7 +232,7 @@ pub fn builtin() -> Vec<AgentProfile> {
             "你负责后端实现。命令薄壳、逻辑进模块，事件信封与现有约定一致。",
             &["后端", "实现"],
             tools(
-                &["read_file", "edit_file", "run_command", "grep"],
+                &["read_file", "edit_file", "run_command", "grep", "fetch"],
                 &[],
                 &[],
             ),
@@ -245,7 +246,7 @@ pub fn builtin() -> Vec<AgentProfile> {
             Workspace::Shared,
             "你负责架构设计。产出契约、状态机与取舍，不改文件。",
             &["设计"],
-            tools(&["read_file", "grep", "list_files"], &[], &[]),
+            tools(&["read_file", "grep", "list_files", "fetch"], &[], &[]),
         ),
         preset(
             "docs",
@@ -256,7 +257,7 @@ pub fn builtin() -> Vec<AgentProfile> {
             Workspace::Worktree,
             "你负责文档。以实际实现为准，不夸大、不臆造。",
             &["文档"],
-            tools(&["read_file", "edit_file", "grep"], &[], &[]),
+            tools(&["read_file", "edit_file", "grep", "fetch"], &[], &[]),
         ),
         preset(
             "verifier",
@@ -848,6 +849,25 @@ mod tests {
                     profile.id
                 );
             }
+        }
+    }
+
+    /// 安全线工种不给**出站**工具：样本目录里的内容是不可信的，模型读到一段
+    /// 带 URL 的字符串就能把本机信息带出去。要查情报走人工，或将来接
+    /// `recon.*` 的专用通道（那条路能按目的域白名单收窄）。
+    #[test]
+    fn security_presets_have_no_outbound_tools() {
+        let all = builtin();
+        for profile in all
+            .iter()
+            .filter(|item| item.tags.contains(&"安全".to_string()))
+        {
+            let shared = profile.tools.shared.clone().unwrap_or_default();
+            assert!(
+                !shared.iter().any(|name| name == "fetch"),
+                "{} 拿到了出站工具 fetch",
+                profile.id
+            );
         }
     }
 

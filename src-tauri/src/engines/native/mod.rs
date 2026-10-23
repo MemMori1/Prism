@@ -8,6 +8,7 @@
 //! - `store`    会话与消息落盘（`~/.prism/native/sessions/<id>/`）
 //! - `provider` OpenAI 兼容的流式客户端（SSE 解析 + 增量拼装 + `/models` 拉取）
 //! - `tools`    内置工具（读写文件、列目录、检索、跑命令）
+//! - `web`      出站抓取（`fetch`：只 GET、有超时与上限、HTML 抽正文）
 //! - `artifact_tools` 制品读写（只在 DAG 节点作用域里出现）
 //! - `forensics` 安全研究线的本机工具（`bin.meta.identify` 等）
 //! - `analysis`  安全研究线的分析工具（xref / 导入导出 / 密码特征 / 差异）
@@ -27,6 +28,7 @@ pub mod provider;
 pub mod store;
 pub mod subagent;
 pub mod tools;
+pub mod web;
 
 /// 往引擎事件通道推一条事件。
 ///

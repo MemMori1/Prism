@@ -551,7 +551,7 @@ fn filter_specs(specs: Vec<Value>, selection: &ToolSelection) -> Vec<Value> {
 
 fn summarize_args(args: &Value) -> Option<String> {
     let object = args.as_object()?;
-    for key in ["path", "file", "pattern", "command", "query"] {
+    for key in ["path", "file", "pattern", "command", "query", "url"] {
         if let Some(text) = object.get(key).and_then(Value::as_str) {
             let trimmed = text.trim();
             if !trimmed.is_empty() {

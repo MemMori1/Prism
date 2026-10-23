@@ -1,6 +1,7 @@
 //! 原生引擎的内置工具。
 //!
-//! 六个就够覆盖日常：读、列、搜、写、改、跑命令。
+//! 裸名六个就够覆盖日常：读、列、搜、写、改、跑命令；出站抓取在 `web`（`fetch`），
+//! 制品、逆向与改图工具各自在自己的模块里。
 //! 所有路径先做词法归一 + 前缀校验，禁止越出会话工作目录；命令有超时和输出上限。
 
 use serde_json::{json, Value};
@@ -765,6 +766,7 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
         ];
         // 制品工具（只在 DAG 作用域里出现）与安全研究线的本机工具。
         list.extend(super::artifact_tools::tools());
+        list.extend(super::web::tools());
         list.extend(super::forensics::tools());
         list.extend(super::analysis::tools());
         list.extend(super::dag_tools::tools());
@@ -1165,6 +1167,10 @@ fn describe_tool(tool: &ToolDef) -> String {
     }
     if !tool.meta.tags.is_empty() {
         notes.push(tool.meta.tags.join("/"));
+    }
+    // 会出网的单独标一句：模型自查时该知道这次调用会把 URL 发出去。
+    if tool.meta.network == Network::Outbound {
+        notes.push("会出网".to_string());
     }
     if tool.meta.scope == ToolScope::Dag {
         notes.push("仅 DAG".to_string());
@@ -1953,6 +1959,23 @@ mod tests {
                 "task"
             ]
         );
+    }
+
+    /// `fetch` 是唯一出站的只读工具：名字得能发给 provider，权限与网络档不能
+    /// 被后来的改动悄悄改掉（改掉就等于把出站能力藏进一次 diff 里）。
+    #[test]
+    fn fetch_is_registered_read_only_and_outbound() {
+        let tool = find("fetch").expect("内置表里应该有 fetch");
+        assert_eq!(tool.permission, Permission::ReadOnly);
+        assert_eq!(tool.meta.network, Network::Outbound);
+        assert_eq!(tool.wire_name(), "fetch");
+        assert!(tool.delegable, "子代理也该能查文档");
+        // 只读档必须能拿到它，否则「只读调研」连官方文档都查不了。
+        let names: Vec<String> = visible(&EnabledTools::all(), Permission::ReadOnly, false, true)
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert!(names.contains(&"fetch".to_string()), "{names:?}");
     }
 
     /// 自省工具要说真话：报出来的清单必须和 `specs` 的口径一致。

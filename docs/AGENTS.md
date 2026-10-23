@@ -99,6 +99,12 @@ pub struct ToolSelection {
 > 这与 `docs/DAG_PLANNER.md` §5 的 `ToolAudience` / `ToolPolicy` 是同一套
 > 语义——Agent 面板和 DAG 节点共用一份解析器，避免两套规则漂移。
 
+**出站工具（`fetch`）只在白名单里出现**：它是唯一能主动把数据发出去的只读工具
+（`network = outbound`），所以刻意不挂审批闸门（查一次文档要连点五次「允许」的工具
+等于没有），控制点放在两处——设置里的工具开关（关掉 = 断网），以及工种白名单：
+调研 / 通用 / 前后端 / 架构 / 文档给了 `fetch`，**安全研究线七个工种一个都没给**，
+样本目录里的内容是不可信的，读到一个 URL 就能把本机信息带出去。
+
 ## 3. 内置 presets
 
 内置由 `dag.presets` 插件提供（见 DAG_PLANNER.md §6.2），第一版给这些：

@@ -147,6 +147,10 @@ const primaryBlocks = computed<Array<{ label: string; text: string }>>(() => {
     case 'webfetch':
       push('地址', source.url)
       break
+    case 'fetch':
+      // 原生引擎的抓网页工具：摘要里已经有 URL，这里再给一行完整的。
+      push('地址', source.url)
+      break
     case 'skill':
       push('技能', source.id)
       break

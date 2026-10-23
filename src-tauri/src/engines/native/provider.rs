@@ -228,7 +228,10 @@ fn client() -> Result<reqwest::blocking::Client, String> {
 
 /// reqwest 的 `Display` 只有第一层（`error sending request for url (...)`），
 /// 真正的原因（TLS 握手、DNS、代理拒绝）藏在 source 链里，拼出来才排查得动。
-fn describe(error: &(dyn std::error::Error + 'static)) -> String {
+///
+/// `pub(super)`：`web::fetch` 出站失败时也拼这条链——两处各写一份的话，
+/// 迟早只有一处被修。
+pub(super) fn describe(error: &(dyn std::error::Error + 'static)) -> String {
     let mut parts = vec![error.to_string()];
     let mut cursor = error.source();
     while let Some(cause) = cursor {
