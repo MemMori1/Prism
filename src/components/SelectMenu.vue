@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 interface SelectOption {
   value: string
@@ -34,6 +34,10 @@ const props = withDefaults(
      * 省掉旁边再放一个按钮。留空＝不显示。
      */
     actionLabel?: string
+    /** 弹层顶部放一个搜索框：按标签/说明过滤选项。 */
+    searchable?: boolean
+    /** 搜索框占位文案 */
+    searchPlaceholder?: string
   }>(),
   {
     placeholder: '请选择',
@@ -46,6 +50,8 @@ const props = withDefaults(
     title: '',
     maxHeight: 268,
     actionLabel: '',
+    searchable: false,
+    searchPlaceholder: '搜索…',
   },
 )
 
@@ -59,25 +65,43 @@ const open = ref(false)
 const trigger = ref<HTMLButtonElement | null>(null)
 const popup = ref<HTMLElement | null>(null)
 const activeIndex = ref(-1)
+const query = ref('')
+const searchInput = ref<HTMLInputElement | null>(null)
 
 /** 弹层用 fixed 定位：top/bottom 二选一，避免在弹框、抽屉里被 overflow 裁掉。 */
 const pos = ref({ left: 0, top: 0, bottom: null as number | null, width: 240, maxHeight: 268 })
 
-const selectedIndex = computed(() => props.options.findIndex(item => item.value === props.modelValue))
+/** 搜索过滤（searchable 才生效）：匹配标签或说明，不区分大小写。 */
+const visibleOptions = computed(() => {
+  if (!props.searchable) return props.options
+  const q = query.value.trim().toLowerCase()
+  if (!q) return props.options
+  return props.options.filter(
+    item => item.label.toLowerCase().includes(q) || (item.hint ?? '').toLowerCase().includes(q),
+  )
+})
+
+const selectedIndex = computed(() =>
+  visibleOptions.value.findIndex(item => item.value === props.modelValue),
+)
 const selected = computed(() => props.options.find(item => item.value === props.modelValue) ?? null)
 /** 选中的这项本身有问题（如目录不存在）：触发器也要标出来。 */
 const selectedWarn = computed(() => Boolean(selected.value?.warn))
 const currentLabel = computed(() => selected.value?.label ?? props.placeholder)
 
-/** 底部动作也算一行：键盘能走到，`activeIndex === options.length` 就是它。 */
+/** 底部动作也算一行：键盘能走到，`activeIndex === visibleOptions.length` 就是它。 */
 const hasAction = computed(() => props.actionLabel.trim().length > 0)
-const rowCount = computed(() => props.options.length + (hasAction.value ? 1 : 0))
-const actionIndex = computed(() => (hasAction.value ? props.options.length : -1))
+const rowCount = computed(() => visibleOptions.value.length + (hasAction.value ? 1 : 0))
+const actionIndex = computed(() => (hasAction.value ? visibleOptions.value.length : -1))
+/** 搜索有词但一无所获：列表区给一句空态提示。 */
+const noMatch = computed(
+  () => props.searchable && query.value.trim().length > 0 && visibleOptions.value.length === 0,
+)
 
 /** 这一行能不能选（动作行永远可选）。 */
 function rowDisabled(index: number): boolean {
   if (index === actionIndex.value) return false
-  return Boolean(props.options[index]?.disabled)
+  return Boolean(visibleOptions.value[index]?.disabled)
 }
 
 const popupStyle = computed(() => {
@@ -126,7 +150,7 @@ function firstEnabled(from = 0, step = 1): number {
 
 function scrollActiveIntoView(): void {
   // 动作行钉在下沿，不参与滚动——这里也不该调 scrollIntoView（会连带滚外层容器）。
-  if (activeIndex.value >= props.options.length) return
+  if (activeIndex.value >= visibleOptions.value.length) return
   const node = popup.value?.querySelectorAll<HTMLElement>('.sel-option')[activeIndex.value]
   node?.scrollIntoView({ block: 'nearest' })
 }
@@ -134,13 +158,14 @@ function scrollActiveIntoView(): void {
 async function openMenu(): Promise<void> {
   if (props.disabled || open.value) return
   // 带说明的两行项高一些，估算差值只为决定往上弹还是往下弹。
-  const rows = props.options.reduce((sum, item) => sum + (item.hint ? 42 : 30), 0)
-  const estimate = rows + (hasAction.value ? 40 : 0) + 10
+  const rows = visibleOptions.value.reduce((sum, item) => sum + (item.hint ? 42 : 30), 0)
+  const estimate = rows + (hasAction.value ? 40 : 0) + (props.searchable ? 34 : 0) + 10
   measure(Math.min(props.maxHeight, estimate))
   open.value = true
   activeIndex.value = selectedIndex.value >= 0 ? selectedIndex.value : firstEnabled()
   emit('open')
   await nextTick()
+  if (props.searchable) searchInput.value?.focus({ preventScroll: true })
   measure(Math.min(props.maxHeight, estimate))
   scrollActiveIntoView()
 }
@@ -148,6 +173,7 @@ async function openMenu(): Promise<void> {
 function closeMenu(refocus = false): void {
   if (!open.value) return
   open.value = false
+  query.value = ''
   if (refocus) trigger.value?.focus()
 }
 
@@ -162,7 +188,7 @@ function pick(index: number): void {
     emit('action')
     return
   }
-  const option = props.options[index]
+  const option = visibleOptions.value[index]
   if (!option || option.disabled) return
   if (option.value !== props.modelValue) emit('update:modelValue', option.value)
   closeMenu(true)
@@ -200,6 +226,8 @@ function onPointerDown(event: PointerEvent): void {
 
 function onKeydown(event: KeyboardEvent): void {
   if (!open.value) return
+  // 焦点在搜索框里时：Home/End 归光标，空格要能打出来；其余键照常导航。
+  const typing = event.target === searchInput.value
   switch (event.key) {
     case 'Escape':
       event.preventDefault()
@@ -217,18 +245,24 @@ function onKeydown(event: KeyboardEvent): void {
       move(-1)
       break
     case 'Home':
+      if (typing) break
       event.preventDefault()
       activeIndex.value = firstEnabled()
       scrollActiveIntoView()
       break
     case 'End':
+      if (typing) break
       event.preventDefault()
       // 从最后一行往回找：底部动作行也算最后一行。
       activeIndex.value = firstEnabled(rowCount.value - 1, -1)
       scrollActiveIntoView()
       break
     case 'Enter':
+      event.preventDefault()
+      pick(activeIndex.value)
+      break
     case ' ':
+      if (typing) break
       event.preventDefault()
       pick(activeIndex.value)
       break
@@ -247,6 +281,13 @@ function onScroll(event: Event): void {
 function onViewportChange(): void {
   closeMenu()
 }
+
+/** 输入即过滤：把高亮挪回第一行可选项，别停在已被滤掉的旧行上。 */
+watch(query, () => {
+  if (!open.value) return
+  activeIndex.value = firstEnabled()
+  scrollActiveIntoView()
+})
 
 onMounted(() => {
   window.addEventListener('pointerdown', onPointerDown, true)
@@ -304,10 +345,19 @@ onBeforeUnmount(() => {
 
     <Teleport to="body">
       <div v-if="open" ref="popup" class="sel-popup" :style="popupStyle" role="listbox">
+        <input
+          v-if="searchable"
+          ref="searchInput"
+          v-model="query"
+          class="sel-search"
+          type="text"
+          :placeholder="searchPlaceholder"
+          spellcheck="false"
+        >
         <!-- 选项区自己滚：底部的动作行固定住，长列表（几十个项目）也随时点得到。 -->
         <div class="sel-list">
           <button
-            v-for="(option, index) in options"
+            v-for="(option, index) in visibleOptions"
             :key="option.value"
             type="button"
             class="sel-option"
@@ -343,6 +393,8 @@ onBeforeUnmount(() => {
             </svg>
           </button>
         </div>
+
+        <div v-if="noMatch" class="sel-empty">没有匹配项</div>
 
         <div v-if="hasAction" class="sel-foot">
           <div class="sel-sep" role="separator" />

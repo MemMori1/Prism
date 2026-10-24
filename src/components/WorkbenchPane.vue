@@ -850,14 +850,12 @@ defineExpose({
 
           <div class="wb-start-foot">
             <div class="wb-start-dir">
-              <div class="wb-start-dir-head">
-                <span class="wb-start-label">目录</span>
-              </div>
               <SelectMenu
                 :model-value="selectedDirId"
                 :options="dirOptions"
                 placeholder="选择目录…"
                 size="sm"
+                searchable
                 :title="selectedDir?.worktree ?? '选择工作目录'"
                 action-label="新增目录…"
                 @update:model-value="chooseDir"

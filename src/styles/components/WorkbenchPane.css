@@ -47,12 +47,6 @@
   background: var(--panel);
 }
 
-.wb-start-label {
-  flex: none;
-  font-size: 10.5px;
-  color: var(--faint);
-}
-
 /* 左栏底部：目录（选了目录右侧 Agent 才解锁）。 */
 .wb-start-foot {
   flex: none;
@@ -67,13 +61,6 @@
   gap: 6px;
   padding-top: 9px;
   border-top: 1px solid var(--border);
-}
-
-.wb-start-dir-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
 }
 
 .wb-start-path {
