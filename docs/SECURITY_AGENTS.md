@@ -28,7 +28,7 @@ Prism 现在是一套能跑起来的**软工编排底座**（Planner 拆图 → 
 | 工具标签 | `engines/native/tools.rs` 的 `ToolMeta`（`tags` / `risk` / `network` / `sandbox` / `scope`）；`scope=dag` 的工具在聊天里不进 schema | ✅ |
 | 制品工具 | `engines/native/artifact_tools.rs`：`prism.artifact.put` / `prism.artifact.get`，`dag_id` 由执行器注入 | ✅ |
 | 静态样本工具 | `engines/native/forensics.rs`：`bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract`，纯 Rust 解析 PE/ELF/Mach-O/DEX/APK | ✅ |
-| P1 分析工具 | `engines/native/analysis.rs`：`bin.json.jq` / `bin.xref.search` / `bin.importexport.list` / `bin.crypto.scan` / `bin.diff`，全部纯 Rust、只读、带上限 | ✅ |
+| P1 分析工具 | `engines/native/analysis.rs`：`bin.json.jq` / `bin.xref.search` / `bin.importexport.list` / `bin.crypto.scan` / `bin.crypto.asn1.parse` / `bin.crypto.xor_brute` / `bin.diff`，全部纯 Rust、只读、带上限 | ✅ |
 | **安全研究工种** | `src-tauri/src/agents.rs::builtin()` 新增 7 个 preset：`sample-prep` / `unpacker` / `static-analysis` / `crypto-analysis` / `dynamic-sandbox` / `control-flow` / `sec-assist`；各自绑定方法论提示、工具白名单、权限档、工作区 | ✅ |
 | Planner 工具面 | `engines/native/dag_tools.rs`：`prism.dag.plan.read` / `node.add` / `node.update` / `node.remove` / `edge.add` / `edge.remove` / `validate`；`scope=dag`，校验不过整体回滚 | ✅ |
 | 编排规划工种 | `dag-planner` preset：在 DAG 节点里调上面七个工具改图 | ✅ |
@@ -40,7 +40,7 @@ UPX 节名定案与 `.adata` 弱特征不定案）；
 `vue-tsc --noEmit` 0 错误；`vitest` 376 passed。
 
 **仍未做**：P2 Ghidra（反编译、函数边界、xref 到函数级）、P3 的 Windows 侧隔离、
-渗透线 `recon.*` / `exp.*`、`bin.crypto.xor_brute` 的多字节版本。
+渗透线 `recon.*` / `exp.*`。
 
 
 ## 1. 结论先行：差在哪
@@ -245,8 +245,8 @@ pub struct ArtifactRef {
 | 静态分析 | `bin.importexport.list` | IAT/EAT + 高危 API 标记 | 只读 / 低 | 高危 API 清单 | ✅ 已实现（PE IAT/EAT + ELF 动态符号） |
 | 静态分析 | `bin.radare2.scan` | 轻量 opcode / 函数边界扫描 | 只读 / 中 | 扫描报告 | ⬜ 需 radare2 |
 | 密码分析 | `bin.crypto.signature_scan` | AES S 盒 / RC4 表 / RSA 模数特征 | 只读 / 中 | 算法 + 地址 | ✅ 已实现（`bin.crypto.scan`） |
-| 密码分析 | `bin.crypto.xor_brute` | 单/多字节 XOR 爆破 | 只读 / 中 | 密钥 + 解密结果 | ✅ 单字节已实现（`xorProbe`），多字节未做 |
-| 密码分析 | `bin.crypto.asn1.parse` | PEM/DER 证书与密钥解析 | 只读 / 低 | 密钥信息 | ⬜ 可纯 Rust 做，未开始 |
+| 密码分析 | `bin.crypto.xor_brute` | 单/多字节 XOR 爆破 | 只读 / 中 | 密钥 + 解密结果 | ✅ 已实现（1..16 字节密钥，按已知明文反推） |
+| 密码分析 | `bin.crypto.asn1.parse` | PEM/DER 证书与密钥解析 | 只读 / 低 | 密钥信息 | ✅ 已实现（X.509 / PKCS#7 / RSA / EC / PKCS#8） |
 | 密码分析 | `bin.crypto.hash_identify` | 哈希常量与循环识别 | 只读 / 低 | 算法 + 地址 | ⬜ 循环识别需反汇编 |
 | 动态沙箱 | `bin.dyn.sandbox.run` | 隔离沙箱跑样本 | `bin:dyn-sandbox` / 高 | pcap + syscall + 进程树 | ⬜ 需系统级隔离 |
 | 动态沙箱 | `bin.dyn.syscall.filter` | 聚焦文件/网络/注入/加密 API | 只读 / 中 | 聚焦日志 | ⬜ 需沙箱 |

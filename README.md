@@ -66,7 +66,7 @@ DeepSeek Harness 走官方 ACP（`dsh --profile acp`，stdio JSON-RPC）：Prism
 | `browser.open` / `browser.read` / `browser.act` | 面板浏览器的三个动作：打开地址、读渲染后的正文与前 30 个链接、点按钮 / 填表单 / 前进后退 / 等元素。和用户在面板里看到的是同一页；`act` 标 `act` 风险档（会改远端状态） |
 | `task` | 子代理：隔离上下文跑子任务（`explore` 只读 / `general` 全开），只带回报告 |
 | `bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract` / `bin.pack.detect` | 样本静态预处理：格式与架构、三哈希、ASCII/UTF-16 字符串与可疑标记、加壳识别（38 条规则 + 节表结构信号 + 熵） |
-| `bin.json.jq` / `bin.xref.search` / `bin.importexport.list` / `bin.crypto.scan` / `bin.diff` | 静态分析：JSON 路径取值、交叉引用、导入导出表与高危 API、密码常量、两样本差异 |
+| `bin.json.jq` / `bin.xref.search` / `bin.importexport.list` / `bin.crypto.scan` / `bin.crypto.asn1.parse` / `bin.crypto.xor_brute` / `bin.diff` | 静态分析：JSON 路径取值、交叉引用、导入导出表与高危 API、密码常量、证书与密钥解析、多字节 XOR 爆破、两样本差异 |
 | `prism.artifact.put` / `prism.artifact.get` | 制品读写；只在 DAG 节点里可见，同 DAG 可读、跨 DAG 拒绝 |
 | `prism.dag.*`（7 个） | 改图：读计划、增删节点与依赖、校验；只在 DAG 节点里可见，校验不过整体回滚 |
 

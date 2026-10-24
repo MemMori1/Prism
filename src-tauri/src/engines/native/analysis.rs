@@ -10,9 +10,11 @@
 //! - **不猜**：解析不出来的字段直接省略。安全分析里编出来的一个架构名、
 //!   一个"疑似 AES"，会让人做出错误判断，比"未知"有害得多。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use serde_json::{json, Value};
 
 use super::forensics::{
@@ -48,6 +50,13 @@ pub fn tools() -> Vec<Arc<ToolDef>> {
             run_import_export,
         ),
         static_tool("bin.crypto.scan", "密码特征扫描", crypto_schema, run_crypto),
+        static_tool(
+            "bin.crypto.asn1.parse",
+            "证书与密钥解析",
+            asn1_schema,
+            run_asn1,
+        ),
+        static_tool("bin.crypto.xor_brute", "多字节 XOR 爆破", xor_schema, run_xor_brute),
         static_tool("bin.diff", "两样本差异", diff_schema, run_diff),
     ]
 }
@@ -152,6 +161,44 @@ fn crypto_schema() -> Value {
                     "xorProbe": { "type": "string", "description": "已知明文片段（如 http://），用它去试单字节 XOR 密钥" }
                 },
                 "required": ["path"]
+            }
+        }
+    })
+}
+
+fn asn1_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "bin.crypto.asn1.parse",
+            "description": "解析 PEM / DER 的 X.509 证书、PKCS#7 签名块（APK 的 CERT.RSA / CERT.EC）、RSA / EC 公钥与 PKCS#8 / PKCS#1 私钥：给出算法、位长、签发者、主体、有效期、SHA-256 指纹。只读结构，不做验签与解密；私钥只报元信息，内容不导出。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "相对工作目录的样本路径（证书文件，或内嵌证书的二进制）" },
+                    "offset": { "type": "string", "description": "十六进制偏移，定位内嵌 PEM/DER 的起点；不传则从文件头解析" }
+                },
+                "required": ["path"]
+            }
+        }
+    })
+}
+
+fn xor_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "bin.crypto.xor_brute",
+            "description": "多字节 XOR 爆破：给一段已知明文（如 http://、admin），在样本里按 1..N 字节密钥逐位反推，返回命中的密钥与全部偏移。恢复出完整明文才是 certain；probe 不够长或落在文件尾的候选标 low，不当下结论。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "相对工作目录的样本路径" },
+                    "probe": { "type": "string", "description": "已知明文片段，如 http:// 或 android.intent" },
+                    "minLen": { "type": "integer", "description": "密钥最小字节数，默认 1" },
+                    "maxLen": { "type": "integer", "description": "密钥最大字节数，默认 8，上限 16" }
+                },
+                "required": ["path", "probe"]
             }
         }
     })
@@ -1181,6 +1228,1135 @@ fn run_crypto(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
     respond(ctx, "crypto", payload)
 }
 
+// ---------------------------------------------------------------- 证书与密钥
+//
+// 手写 DER TLV 递归下降，不引 x509-parser / ring / rsa。只读结构，不做密码学
+// 运算：不验签、不解密、不导出私钥字段。识别不出就报 unknown + 裸 OID。
+
+/// 顶层 / 内层的 DER TLV。
+///
+/// `class` 与 `constructed` 保留首字节的高位：`[0] EXPLICIT` 这类上下文标签
+/// 光看 `tag` 会和 universal 的 SEQUENCE 混在一起。
+struct Tlv<'a> {
+    class: u8,
+    tag: u32,
+    value: &'a [u8],
+}
+
+impl Tlv<'_> {
+    fn is_universal(&self, tag: u32) -> bool {
+        self.class == 0 && self.tag == tag
+    }
+
+    fn is_context(&self, tag: u32) -> bool {
+        self.class == 2 && self.tag == tag
+    }
+}
+
+/// 读一个 TLV，返回它和下一个字节的位置。
+///
+/// 长 tag 号与 0x81..0x84 长长度都支持；不定长（0x80）在 DER 里非法，直接报错。
+/// 所有越界都走 `Err`，畸形输入不会 panic。
+fn read_tlv(bytes: &[u8], at: usize) -> Result<(Tlv<'_>, usize), String> {
+    let first = *bytes.get(at).ok_or_else(|| format!("DER 在 0x{at:x} 处截断"))?;
+    let class = first >> 6;
+    let mut cursor = at + 1;
+    let mut tag = (first & 0x1f) as u32;
+    if tag == 0x1f {
+        tag = 0;
+        let mut used = 0;
+        loop {
+            let byte = *bytes
+                .get(cursor)
+                .ok_or_else(|| "DER 高 tag 号截断".to_string())?;
+            cursor += 1;
+            used += 1;
+            tag = (tag << 7) | (byte & 0x7f) as u32;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            if used >= 4 {
+                return Err("DER 高 tag 号过长".to_string());
+            }
+        }
+    }
+    let length_byte = *bytes
+        .get(cursor)
+        .ok_or_else(|| "DER 长度字段截断".to_string())?;
+    cursor += 1;
+    let length = if length_byte & 0x80 == 0 {
+        length_byte as usize
+    } else {
+        let count = (length_byte & 0x7f) as usize;
+        if count == 0 {
+            return Err("DER 不允许不定长编码".to_string());
+        }
+        if count > 4 {
+            return Err("DER 长度字段超过 4 字节".to_string());
+        }
+        let mut length = 0usize;
+        for _ in 0..count {
+            let byte = *bytes
+                .get(cursor)
+                .ok_or_else(|| "DER 长度字段截断".to_string())?;
+            cursor += 1;
+            length = (length << 8) | byte as usize;
+        }
+        length
+    };
+    let end = cursor
+        .checked_add(length)
+        .ok_or_else(|| "DER 长度溢出".to_string())?;
+    if end > bytes.len() {
+        return Err(format!(
+            "DER 值截断：声明 {length} 字节，实际只剩 {}",
+            bytes.len() - cursor
+        ));
+    }
+    Ok((
+        Tlv {
+            class,
+            tag,
+            value: &bytes[cursor..end],
+        },
+        end,
+    ))
+}
+
+fn children<'a>(tlv: &Tlv<'a>) -> Result<Vec<Tlv<'a>>, String> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < tlv.value.len() {
+        let (child, next) = read_tlv(tlv.value, at)?;
+        out.push(child);
+        at = next;
+    }
+    Ok(out)
+}
+
+/// 常用 OID 的名字。只收证书 / 密钥里真会遇到的，未命中就返回裸 OID。
+const OID_NAMES: &[(&str, &str)] = &[
+    ("1.2.840.113549.1.1.1", "rsaEncryption"),
+    ("1.2.840.113549.1.1.2", "md2WithRSAEncryption"),
+    ("1.2.840.113549.1.1.4", "md5WithRSAEncryption"),
+    ("1.2.840.113549.1.1.5", "sha1WithRSAEncryption"),
+    ("1.2.840.113549.1.1.10", "rsassaPss"),
+    ("1.2.840.113549.1.1.11", "sha256WithRSAEncryption"),
+    ("1.2.840.113549.1.1.12", "sha384WithRSAEncryption"),
+    ("1.2.840.113549.1.1.13", "sha512WithRSAEncryption"),
+    ("1.2.840.113549.1.1.14", "sha224WithRSAEncryption"),
+    ("1.2.840.10045.2.1", "id-ecPublicKey"),
+    ("1.2.840.10045.4.1", "ecdsa-with-SHA1"),
+    ("1.2.840.10045.4.3.2", "ecdsa-with-SHA256"),
+    ("1.2.840.10045.4.3.3", "ecdsa-with-SHA384"),
+    ("1.2.840.10045.4.3.4", "ecdsa-with-SHA512"),
+    ("1.2.840.10045.3.1.7", "prime256v1 (P-256)"),
+    ("1.3.132.0.34", "secp384r1 (P-384)"),
+    ("1.3.132.0.35", "secp521r1 (P-521)"),
+    ("1.3.132.0.10", "secp256k1"),
+    ("1.3.101.112", "Ed25519"),
+    ("1.3.101.113", "Ed448"),
+    ("1.2.840.113549.1.7.2", "signedData"),
+    ("1.2.840.113549.1.7.1", "data"),
+    ("1.3.14.3.2.26", "sha1"),
+    ("2.16.840.1.101.3.4.2.1", "sha256"),
+    ("2.16.840.1.101.3.4.2.2", "sha384"),
+    ("2.16.840.1.101.3.4.2.3", "sha512"),
+];
+
+/// DN 里属性的短名（`C=CN, O=...` 这种写法）。
+const DN_LABELS: &[(&str, &str)] = &[
+    ("2.5.4.3", "CN"),
+    ("2.5.4.4", "SN"),
+    ("2.5.4.5", "serialNumber"),
+    ("2.5.4.6", "C"),
+    ("2.5.4.7", "L"),
+    ("2.5.4.8", "ST"),
+    ("2.5.4.10", "O"),
+    ("2.5.4.11", "OU"),
+    ("2.5.4.42", "GN"),
+    ("1.2.840.113549.1.9.1", "E"),
+];
+
+fn lookup(table: &'static [(&'static str, &'static str)], key: &str) -> Option<&'static str> {
+    table
+        .iter()
+        .find(|(oid, _)| *oid == key)
+        .map(|(_, name)| *name)
+}
+
+fn oid_name(oid: &str) -> Option<&'static str> {
+    lookup(OID_NAMES, oid)
+}
+
+/// OID 内容字节 → 点分字符串。首字节是 40*X+Y，之后是 base-128 变长。
+fn oid_text(value: &[u8]) -> Result<String, String> {
+    let first = *value.first().ok_or_else(|| "OID 为空".to_string())?;
+    let (root, second) = if first < 40 {
+        (0u32, first as u32)
+    } else if first < 80 {
+        (1u32, first as u32 - 40)
+    } else {
+        (2u32, first as u32 - 80)
+    };
+    let mut parts = vec![root.to_string(), second.to_string()];
+    let mut current = 0u64;
+    let mut open = false;
+    for byte in &value[1..] {
+        current = (current << 7) | (byte & 0x7f) as u64;
+        open = true;
+        if byte & 0x80 == 0 {
+            parts.push(current.to_string());
+            current = 0;
+            open = false;
+        }
+    }
+    if open {
+        return Err("OID 末尾截断".to_string());
+    }
+    Ok(parts.join("."))
+}
+
+/// 无符号大端整数 → 去掉前导 0 的幅值。DER INTEGER 有符号，正数最多带一个 0x00。
+fn integer_bytes(value: &[u8]) -> &[u8] {
+    match value.iter().position(|byte| *byte != 0) {
+        Some(start) => &value[start..],
+        None => &value[value.len()..],
+    }
+}
+
+/// 精确位长：去掉前导 0 后，按最高有效字节的实际位数算。
+fn bit_len(value: &[u8]) -> usize {
+    let magnitude = integer_bytes(value);
+    match magnitude.first() {
+        Some(first) => (magnitude.len() - 1) * 8 + (8 - first.leading_zeros() as usize),
+        None => 0,
+    }
+}
+
+/// 无符号整数 → 十六进制串（全零给 `00`，不输出空的 `0x`）。
+fn hex_uint(value: &[u8]) -> String {
+    let magnitude = integer_bytes(value);
+    if magnitude.is_empty() {
+        "00".to_string()
+    } else {
+        hex(magnitude)
+    }
+}
+
+fn small_uint(value: &[u8]) -> Option<u64> {
+    if value.len() > 8 {
+        return None;
+    }
+    Some(
+        value
+            .iter()
+            .fold(0u64, |acc, byte| (acc << 8) | *byte as u64),
+    )
+}
+
+fn key_algorithm(oid: &str) -> &'static str {
+    match oid {
+        "1.2.840.113549.1.1.1" => "rsa",
+        "1.2.840.10045.2.1" => "ec",
+        "1.3.101.112" => "ed25519",
+        "1.3.101.113" => "ed448",
+        _ => "unknown",
+    }
+}
+
+fn curve_bits(oid: &str) -> Option<u32> {
+    match oid {
+        "1.2.840.10045.3.1.7" => Some(256),
+        "1.3.132.0.34" => Some(384),
+        "1.3.132.0.35" => Some(521),
+        "1.3.132.0.10" => Some(256),
+        _ => None,
+    }
+}
+
+/// AlgorithmIdentifier ::= SEQUENCE { OID, 参数 OPTIONAL }。未命中给裸 OID。
+fn algorithm_name(tlv: &Tlv<'_>) -> String {
+    let oid = children(tlv)
+        .ok()
+        .and_then(|parts| parts.first().and_then(|item| oid_text(item.value).ok()));
+    match oid {
+        Some(oid) => match oid_name(&oid) {
+            Some(name) => name.to_string(),
+            None => oid,
+        },
+        None => "unknown".to_string(),
+    }
+}
+
+fn time_text(tlv: &Tlv<'_>) -> String {
+    if let Some(text) = parse_der_time(tlv) {
+        return text;
+    }
+    String::from_utf8_lossy(tlv.value).trim().to_string()
+}
+
+/// UTCTime（YYMMDDHHMM[SS]Z）与 GeneralizedTime（YYYYMMDDHHMM[SS][.f]Z）→ ISO 8601。
+/// 解析不了返回 None，调用方保留原始字符串——不猜时区。
+fn parse_der_time(tlv: &Tlv<'_>) -> Option<String> {
+    let generalized = match tlv.tag {
+        0x17 => false,
+        0x18 => true,
+        _ => return None,
+    };
+    let raw = String::from_utf8_lossy(tlv.value);
+    let digits: String = raw.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    let base = if generalized { 4 } else { 2 };
+    if digits.len() < base + 8 {
+        return None;
+    }
+    let year: u32 = digits[..base].parse().ok()?;
+    let year = if generalized {
+        year
+    } else if year >= 50 {
+        1900 + year
+    } else {
+        2000 + year
+    };
+    let month = &digits[base..base + 2];
+    let day = &digits[base + 2..base + 4];
+    let hour = &digits[base + 4..base + 6];
+    let minute = &digits[base + 6..base + 8];
+    let second = if digits.len() >= base + 10 {
+        &digits[base + 8..base + 10]
+    } else {
+        "00"
+    };
+    Some(format!("{year:04}-{month}-{day}T{hour}:{minute}:{second}Z"))
+}
+
+/// Name ::= SEQUENCE OF SET OF SEQUENCE { OID, 值 }。
+fn decode_name(tlv: &Tlv<'_>) -> Option<String> {
+    let rdns = children(tlv).ok()?;
+    let mut parts = Vec::new();
+    for set in rdns {
+        for attribute in children(&set).unwrap_or_default() {
+            let pair = children(&attribute).unwrap_or_default();
+            if pair.len() < 2 {
+                continue;
+            }
+            let oid = match oid_text(pair[0].value) {
+                Ok(oid) => oid,
+                Err(_) => continue,
+            };
+            let label = lookup(DN_LABELS, &oid).unwrap_or(&oid);
+            let value = string_of(&pair[1]).unwrap_or_else(|| hex(pair[1].value));
+            parts.push(format!("{label}={value}"));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+fn string_of(tlv: &Tlv<'_>) -> Option<String> {
+    match tlv.tag {
+        0x0c | 0x13 | 0x16 | 0x14 | 0x12 => Some(String::from_utf8_lossy(tlv.value).to_string()),
+        0x1e => {
+            // BMPString 是 UTF-16BE。
+            if tlv.value.len() % 2 != 0 {
+                return None;
+            }
+            let units: Vec<u16> = tlv
+                .value
+                .chunks(2)
+                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .collect();
+            Some(String::from_utf16_lossy(&units))
+        }
+        _ => None,
+    }
+}
+
+/// SubjectPublicKeyInfo ::= SEQUENCE { AlgorithmIdentifier, BIT STRING }。
+fn public_key(tlv: &Tlv<'_>) -> Option<Value> {
+    let parts = children(tlv).ok()?;
+    let alg = parts.first()?;
+    let alg_fields = children(alg).ok()?;
+    let oid = alg_fields
+        .first()
+        .and_then(|item| oid_text(item.value).ok())?;
+    let bits = parts.get(1)?;
+    if !bits.is_universal(0x03) {
+        return None;
+    }
+    // BIT STRING 首字节是「未使用位数」，密钥本体从第二字节起。
+    let payload = bits.value.get(1..)?;
+    let kind = key_algorithm(&oid);
+    let mut out = serde_json::Map::new();
+    out.insert("algorithm".to_string(), json!(kind));
+    match kind {
+        "rsa" => {
+            if let Ok((rsa, _)) = read_tlv(payload, 0) {
+                if let Ok(fields) = children(&rsa) {
+                    if let Some(modulus) = fields.first() {
+                        out.insert("bits".to_string(), json!(bit_len(modulus.value)));
+                    }
+                    if let Some(e) = fields.get(1).and_then(|item| small_uint(item.value)) {
+                        out.insert("e".to_string(), json!(e));
+                    }
+                }
+            }
+        }
+        "ec" => {
+            let curve = alg_fields
+                .get(1)
+                .filter(|item| item.is_universal(0x06))
+                .and_then(|item| oid_text(item.value).ok());
+            match curve.as_deref() {
+                Some(oid) => match oid_name(oid) {
+                    Some(name) => {
+                        out.insert("curve".to_string(), json!(name));
+                    }
+                    None => {
+                        out.insert("curve".to_string(), json!(oid));
+                    }
+                },
+                None => {}
+            }
+            // 未压缩点是 0x04 || X || Y，位长 = 坐标字节数 × 8。
+            let point_bits = if payload.first() == Some(&0x04)
+                && payload.len() > 1
+                && (payload.len() - 1) % 2 == 0
+            {
+                Some(((payload.len() - 1) * 4) as u32)
+            } else {
+                None
+            };
+            let bits = curve.as_deref().and_then(curve_bits).or(point_bits);
+            if let Some(bits) = bits {
+                out.insert("bits".to_string(), json!(bits));
+            }
+        }
+        "ed25519" => {
+            out.insert("bits".to_string(), json!(256));
+        }
+        "ed448" => {
+            out.insert("bits".to_string(), json!(456));
+        }
+        _ => {
+            out.insert("oid".to_string(), json!(oid));
+        }
+    }
+    Some(Value::Object(out))
+}
+
+fn json_algorithm(oid: &str) -> Value {
+    let kind = key_algorithm(oid);
+    if kind == "unknown" {
+        json!({ "algorithm": kind, "oid": oid })
+    } else {
+        json!({ "algorithm": kind })
+    }
+}
+
+fn private_note() -> &'static str {
+    "私钥内容不导出、不进上下文"
+}
+
+fn rsa_public(items: &[Tlv<'_>]) -> Value {
+    let mut out = json!({
+        "type": "rsa-public",
+        "algorithm": "rsa",
+        "bits": bit_len(items[0].value),
+    });
+    if let Some(e) = items.get(1).and_then(|item| small_uint(item.value)) {
+        out["e"] = json!(e);
+    }
+    out
+}
+
+fn rsa_private(modulus: &Tlv<'_>, exponent: Option<&Tlv<'_>>) -> Value {
+    let mut out = json!({
+        "type": "rsa-private",
+        "algorithm": "rsa",
+        "bits": bit_len(modulus.value),
+        "note": private_note(),
+    });
+    if let Some(e) = exponent.and_then(|item| small_uint(item.value)) {
+        out["e"] = json!(e);
+    }
+    out
+}
+
+fn ec_private(curve: Option<String>) -> Value {
+    let mut out = json!({
+        "type": "ec-private",
+        "algorithm": "ec",
+        "note": private_note(),
+    });
+    if let Some(oid) = curve {
+        out["curve"] = json!(oid_name(&oid).unwrap_or(&oid));
+        if let Some(bits) = curve_bits(&oid) {
+            out["bits"] = json!(bits);
+        }
+    }
+    out
+}
+
+/// SEC1 ECPrivateKey ::= SEQUENCE { version INTEGER, privateKey OCTET STRING,
+/// [0] 曲线 OID OPTIONAL, [1] 公钥 BIT STRING OPTIONAL }。
+fn sec1_curve(items: &[Tlv<'_>]) -> Option<String> {
+    items
+        .iter()
+        .find(|item| item.is_context(0))
+        .and_then(|item| read_tlv(item.value, 0).ok())
+        .and_then(|(inner, _)| {
+            if inner.is_universal(0x06) {
+                oid_text(inner.value).ok()
+            } else {
+                None
+            }
+        })
+}
+
+fn pkcs8_private(items: &[Tlv<'_>]) -> Result<Value, String> {
+    let alg = children(&items[1])?;
+    let oid = alg
+        .first()
+        .and_then(|item| oid_text(item.value).ok())
+        .unwrap_or_default();
+    let inner = items[2].value;
+    match oid.as_str() {
+        "1.2.840.113549.1.1.1" => {
+            let (pkcs1, _) =
+                read_tlv(inner, 0).map_err(|_| "PKCS#8 里的 RSA 私钥解不开".to_string())?;
+            let fields = children(&pkcs1)?;
+            let modulus = fields
+                .get(1)
+                .ok_or_else(|| "PKCS#8 里的 RSA 私钥缺模数".to_string())?;
+            Ok(rsa_private(modulus, fields.get(2)))
+        }
+        "1.2.840.10045.2.1" => {
+            let from_params = alg
+                .get(1)
+                .filter(|item| item.is_universal(0x06))
+                .and_then(|item| oid_text(item.value).ok());
+            let from_inner = read_tlv(inner, 0)
+                .ok()
+                .and_then(|(sec1, _)| children(&sec1).ok())
+                .and_then(|fields| sec1_curve(&fields));
+            Ok(ec_private(from_params.or(from_inner)))
+        }
+        "1.3.101.112" => Ok(json!({
+            "type": "ed25519-private",
+            "algorithm": "ed25519",
+            "bits": 256,
+            "note": private_note(),
+        })),
+        "1.3.101.113" => Ok(json!({
+            "type": "ed448-private",
+            "algorithm": "ed448",
+            "bits": 456,
+            "note": private_note(),
+        })),
+        other => {
+            let mut out = json_algorithm(other);
+            out["type"] = json!("pkcs8-private");
+            out["note"] = json!(private_note());
+            Ok(out)
+        }
+    }
+}
+
+/// 证书主体：TBSCertificate + 外层签名算法 + 签名值。
+///
+/// `items` 是外层 SEQUENCE 的三个子项，`der` 是这份证书的完整 DER（算指纹用）。
+fn describe_certificate(items: &[Tlv<'_>], der: &[u8]) -> Result<Value, String> {
+    if items.len() < 3 {
+        return Err("证书条目不足".to_string());
+    }
+    let tbs = children(&items[0])?;
+    let mut at = 0usize;
+    let version = if tbs.first().map(|item| item.is_context(0)).unwrap_or(false) {
+        at = 1;
+        match tbs
+            .first()
+            .and_then(|item| children(item).ok())
+            .and_then(|inner| inner.first().and_then(|item| small_uint(item.value)))
+        {
+            Some(0) => "v1",
+            Some(1) => "v2",
+            Some(2) => "v3",
+            _ => "unknown",
+        }
+    } else {
+        "v1"
+    };
+    let serial = tbs.get(at).ok_or_else(|| "证书缺少序列号".to_string())?;
+    let signature = tbs
+        .get(at + 1)
+        .ok_or_else(|| "证书缺少签名算法".to_string())?;
+    let issuer = tbs.get(at + 2).ok_or_else(|| "证书缺少签发者".to_string())?;
+    let validity = tbs
+        .get(at + 3)
+        .ok_or_else(|| "证书缺少有效期".to_string())?;
+    let subject = tbs.get(at + 4).ok_or_else(|| "证书缺少主体".to_string())?;
+    let spki = tbs.get(at + 5).ok_or_else(|| "证书缺少公钥".to_string())?;
+    if !serial.is_universal(0x02)
+        || !signature.is_universal(0x10)
+        || !issuer.is_universal(0x10)
+        || !validity.is_universal(0x10)
+        || !subject.is_universal(0x10)
+        || !spki.is_universal(0x10)
+    {
+        return Err("TBSCertificate 字段顺序与预期不符".to_string());
+    }
+
+    let mut out = serde_json::Map::new();
+    out.insert("type".to_string(), json!("x509"));
+    out.insert("version".to_string(), json!(version));
+    out.insert(
+        "serial".to_string(),
+        json!(format!("0x{}", hex_uint(serial.value))),
+    );
+    if let Some(name) = decode_name(issuer) {
+        out.insert("issuer".to_string(), json!(name));
+    }
+    if let Some(name) = decode_name(subject) {
+        out.insert("subject".to_string(), json!(name));
+    }
+    if let Ok(fields) = children(validity) {
+        if let Some(not_before) = fields.first() {
+            out.insert("validNotBefore".to_string(), json!(time_text(not_before)));
+        }
+        if let Some(not_after) = fields.get(1) {
+            out.insert("validNotAfter".to_string(), json!(time_text(not_after)));
+        }
+    }
+    out.insert(
+        "signatureAlgorithm".to_string(),
+        json!(algorithm_name(&items[1])),
+    );
+    if let Some(key) = public_key(spki) {
+        out.insert("publicKey".to_string(), key);
+    }
+    out.insert(
+        "fingerprintSha256".to_string(),
+        json!(colon_hex(&sha256_of(der))),
+    );
+    Ok(Value::Object(out))
+}
+
+fn describe_pkcs7(explicit: &Tlv<'_>) -> Result<Value, String> {
+    if !explicit.is_context(0) {
+        return Err("signedData 不是 [0] EXPLICIT 包裹".to_string());
+    }
+    let (signed, _) = read_tlv(explicit.value, 0)?;
+    let fields = children(&signed)?;
+    let mut certificates = Vec::new();
+    for field in &fields {
+        if !field.is_context(0) {
+            continue;
+        }
+        // [0] IMPLICIT SET OF Certificate：内容直接是证书的 SEQUENCE。
+        let mut at = 0usize;
+        while at < field.value.len() {
+            let (cert, next) = read_tlv(field.value, at)?;
+            if cert.is_universal(0x10) {
+                if let Ok(cert_items) = children(&cert) {
+                    if let Ok(described) =
+                        describe_certificate(&cert_items, &field.value[at..next])
+                    {
+                        certificates.push(described);
+                    }
+                }
+            }
+            at = next;
+        }
+    }
+    Ok(json!({
+        "type": "pkcs7",
+        "certificateCount": certificates.len(),
+        "certificates": certificates,
+        "note": if certificates.is_empty() {
+            "signedData 里没有可解析的证书"
+        } else {
+            "APK 的 CERT.RSA / CERT.EC 通常就是这层 PKCS#7，证书在 certificates 里"
+        },
+    }))
+}
+
+/// 按最外层 SEQUENCE 的结构判别类型。判不出来就 `unknown`，不编名字。
+fn describe_der(der: &[u8]) -> Result<Value, String> {
+    let (top, top_end) = read_tlv(der, 0)?;
+    if !top.is_universal(0x10) {
+        return Err(format!("顶层不是 SEQUENCE（tag=0x{:x}）", top.tag));
+    }
+    let items = children(&top)?;
+    let first = match items.first() {
+        Some(item) => item,
+        None => return Err("DER SEQUENCE 为空".to_string()),
+    };
+
+    // X.509：SEQUENCE(tbs) / SEQUENCE(sigAlg) / BIT STRING(sig)
+    if items.len() == 3
+        && first.is_universal(0x10)
+        && items[1].is_universal(0x10)
+        && items[2].is_universal(0x03)
+    {
+        if let Ok(cert) = describe_certificate(&items, &der[..top_end]) {
+            return Ok(cert);
+        }
+    }
+
+    // PKCS#7 ContentInfo ::= SEQUENCE { contentType OID, [0] EXPLICIT 内容 }
+    if items.len() >= 2 && first.is_universal(0x06) {
+        if let Ok(oid) = oid_text(first.value) {
+            if oid == "1.2.840.113549.1.7.2" {
+                return describe_pkcs7(&items[1]);
+            }
+        }
+    }
+
+    // PKCS#1 RSAPublicKey ::= SEQUENCE { n INTEGER, e INTEGER }
+    if items.len() == 2 && first.is_universal(0x02) && items[1].is_universal(0x02) {
+        return Ok(rsa_public(&items));
+    }
+
+    // PKCS#1 RSAPrivateKey：version + 至少八个 INTEGER（两素数版本是九个）
+    if items.len() >= 9
+        && first.is_universal(0x02)
+        && items[1].is_universal(0x02)
+        && items[2].is_universal(0x02)
+    {
+        return Ok(rsa_private(&items[1], Some(&items[2])));
+    }
+
+    // PKCS#8 PrivateKeyInfo ::= SEQUENCE { version, AlgorithmIdentifier, OCTET STRING, ... }
+    if (items.len() == 3 || items.len() == 4)
+        && first.is_universal(0x02)
+        && items[1].is_universal(0x10)
+        && items[2].is_universal(0x04)
+    {
+        return pkcs8_private(&items);
+    }
+
+    // SubjectPublicKeyInfo ::= SEQUENCE { AlgorithmIdentifier, BIT STRING }
+    if items.len() == 2 && first.is_universal(0x10) && items[1].is_universal(0x03) {
+        let key = public_key(&top).ok_or_else(|| "SPKI 公钥解析失败".to_string())?;
+        return Ok(json!({ "type": "public-key", "publicKey": key }));
+    }
+
+    // SEC1 ECPrivateKey ::= SEQUENCE { version=1, OCTET STRING, [0] 曲线 OID? }
+    if items.len() >= 2
+        && first.is_universal(0x02)
+        && small_uint(first.value) == Some(1)
+        && items[1].is_universal(0x04)
+    {
+        return Ok(ec_private(sec1_curve(&items)));
+    }
+
+    Ok(json!({
+        "type": "unknown",
+        "topLevelTags": items
+            .iter()
+            .map(|item| format!("{}-{}", item.class, item.tag))
+            .collect::<Vec<_>>(),
+        "note": "结构没有匹配到已知的证书/密钥模板，不猜类型",
+    }))
+}
+
+fn colon_hex(text: &str) -> String {
+    text.as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).unwrap_or(""))
+        .collect::<Vec<&str>>()
+        .join(":")
+}
+
+fn parse_hex_offset(raw: &str) -> Result<usize, String> {
+    let text = raw.trim();
+    let digits = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
+    usize::from_str_radix(digits, 16).map_err(|_| format!("offset 不是十六进制：{raw}"))
+}
+
+/// PEM 只可能在文件前面（或用户给的 offset 处）；窗口卡在 4 KiB 内，
+/// 免得在一份二进制里随手找到一段 PEM 就当成本次输入。
+fn sniff_pem(bytes: &[u8]) -> Option<Result<(String, Vec<u8>), String>> {
+    const HEAD_WINDOW: usize = 4096;
+    /// 一张证书 / 一把私钥的 PEM 远小于这个数；卡住是为了不在大二进制上
+    /// 把整个尾部都做一遍 UTF-8 转换。
+    const PEM_LIMIT: usize = 1024 * 1024;
+    let window = &bytes[..bytes.len().min(HEAD_WINDOW + 11)];
+    let (found, _) = find_all(window, b"-----BEGIN ", 1);
+    let start = *found.first()?;
+    let end = (start + PEM_LIMIT).min(bytes.len());
+    Some(decode_pem(&bytes[start..end]))
+}
+
+fn decode_pem(bytes: &[u8]) -> Result<(String, Vec<u8>), String> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = text.lines();
+    let header = lines.next().unwrap_or("").trim().to_string();
+    let label = header
+        .strip_prefix("-----BEGIN ")
+        .and_then(|rest| rest.strip_suffix("-----"))
+        .ok_or_else(|| format!("PEM 头格式不对：{header}"))?
+        .to_string();
+    let mut body = String::new();
+    let mut encrypted = false;
+    let mut closed = false;
+    for line in lines {
+        let line = line.trim();
+        if line.starts_with("-----END ") {
+            closed = true;
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("Proc-Type:") && line.contains("ENCRYPTED") {
+            encrypted = true;
+            continue;
+        }
+        if line.contains(':') {
+            // DEK-Info 之类的 PEM 头，不是 base64 主体。
+            continue;
+        }
+        body.push_str(line);
+    }
+    if encrypted {
+        return Err("这是需要口令的加密 PEM，不支持".to_string());
+    }
+    if !closed {
+        return Err("PEM 缺少 -----END 行（可能被截断）".to_string());
+    }
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(body.as_bytes())
+        .map_err(|error| format!("PEM base64 解不开：{error}"))?;
+    Ok((label, der))
+}
+
+fn run_asn1(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    let (path, size) = match target_of(ctx, args) {
+        Ok(found) => found,
+        Err(failure) => return failure,
+    };
+    let bytes = match read_head(&path, SCAN_LIMIT) {
+        Ok(bytes) => bytes,
+        Err(error) => return ToolResult::fail(error),
+    };
+    let offset = match args
+        .get("offset")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(raw) => match parse_hex_offset(raw) {
+            Ok(offset) => offset,
+            Err(error) => return ToolResult::fail(error),
+        },
+        None => 0,
+    };
+    if offset >= bytes.len() {
+        return ToolResult::fail(format!(
+            "offset 0x{offset:x} 超出文件（共 {} 字节）",
+            bytes.len()
+        ));
+    }
+    let slice = &bytes[offset..];
+    let (container, label, der): (&str, Option<String>, std::borrow::Cow<'_, [u8]>) =
+        match sniff_pem(slice) {
+            Some(Ok((label, body))) => ("pem", Some(label), std::borrow::Cow::Owned(body)),
+            Some(Err(error)) => return ToolResult::fail(error),
+            None => ("der", None, std::borrow::Cow::Borrowed(slice)),
+        };
+    let mut payload = match describe_der(&der) {
+        Ok(value) => value,
+        Err(error) => {
+            return ToolResult::fail(format!(
+                "不是可解析的证书/密钥 DER：{error}。若证书内嵌在二进制里，用 offset 指到起点"
+            ))
+        }
+    };
+    payload["path"] = json!(path.display().to_string());
+    payload["size"] = json!(size);
+    payload["offset"] = json!(format!("0x{offset:x}"));
+    payload["container"] = json!(container);
+    if let Some(label) = label {
+        payload["pemLabel"] = json!(label);
+    }
+    if size > bytes.len() as u64 {
+        payload["truncated"] = json!(true);
+    }
+    respond(ctx, "crypto", payload)
+}
+
+// ---------------------------------------------------------------- 多字节 XOR
+
+/// 密钥上限：AES-128 的 16 字节恰好压线，再长就没有实用价值了。
+const XOR_KEY_MAX: u32 = 16;
+/// 输出条目 / 单把密钥的偏移上限。
+const XOR_MATCH_MAX: usize = 64;
+const XOR_OFFSET_MAX: usize = 32;
+/// 未验证候选（probe 不比密钥长）只留重复出现的，且最多收集这么多种，
+/// 否则随机数据在每个偏移都会产出一个"候选"，输出会失去意义。
+const XOR_UNVERIFIED_MAX: usize = 4096;
+
+struct XorHit {
+    key: Vec<u8>,
+    offsets: Vec<usize>,
+    confidence: &'static str,
+    verified: bool,
+    partial: bool,
+    dropped: bool,
+}
+
+fn confidence_rank(value: &str) -> u8 {
+    match value {
+        "certain" => 2,
+        "high" => 1,
+        _ => 0,
+    }
+}
+
+fn run_xor_brute(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
+    let (path, size) = match target_of(ctx, args) {
+        Ok(found) => found,
+        Err(failure) => return failure,
+    };
+    let probe = match args
+        .get("probe")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(probe) => probe,
+        None => return ToolResult::fail("需要 probe：一段已知明文，如 http:// 或 android.intent"),
+    };
+    let plain = probe.as_bytes();
+    let min_len = args
+        .get("minLen")
+        .and_then(Value::as_u64)
+        .map(|value| (value as u32).clamp(1, XOR_KEY_MAX))
+        .unwrap_or(1);
+    let max_len = args
+        .get("maxLen")
+        .and_then(Value::as_u64)
+        .map(|value| (value as u32).clamp(1, XOR_KEY_MAX))
+        .unwrap_or(8);
+    if min_len > max_len {
+        return ToolResult::fail(format!("minLen({min_len}) 不能大于 maxLen({max_len})"));
+    }
+    let bytes = match read_head(&path, SCAN_LIMIT) {
+        Ok(bytes) => bytes,
+        Err(error) => return ToolResult::fail(error),
+    };
+    if bytes.len() < plain.len() {
+        return ToolResult::fail(format!(
+            "样本只有 {} 字节，比 probe（{} 字节）还短",
+            bytes.len(),
+            plain.len()
+        ));
+    }
+
+    let mut hits: Vec<XorHit> = Vec::new();
+    let mut index: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut capped = false;
+
+    for key_len in min_len..=max_len {
+        let key_len = key_len as usize;
+        // probe 比密钥短时，只能恢复密钥的前 plain.len() 个字节。
+        let known = key_len.min(plain.len());
+        if known == 0 || known > bytes.len() {
+            continue;
+        }
+        let mut unverified: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+        let mut overflow = false;
+        for at in 0..=bytes.len() - known {
+            let check_len = plain.len().min(bytes.len() - at);
+            if check_len > key_len {
+                // 先用第 key_len 个字节做一次 O(1) 过滤，只有极少数位置需要
+                // 真正推导完整密钥。密钥是周期性的，key[key_len] = key[0]。
+                if bytes[at + key_len] ^ bytes[at] ^ plain[0] != plain[key_len] {
+                    continue;
+                }
+                let key: Vec<u8> = (0..key_len)
+                    .map(|i| bytes[at + i] ^ plain[i])
+                    .collect();
+                let matched = (key_len..check_len)
+                    .all(|i| bytes[at + i] ^ key[i % key_len] == plain[i]);
+                if !matched {
+                    continue;
+                }
+                let confidence = if check_len == plain.len() {
+                    "certain"
+                } else {
+                    "high"
+                };
+                record_hit(
+                    &mut hits,
+                    &mut index,
+                    key,
+                    at,
+                    confidence,
+                    true,
+                    false,
+                    &mut capped,
+                );
+            } else {
+                // 没有多余字节可验：随机数据在这里个个都「命中」，只保留
+                // 在同一段数据里重复出现的候选，并标 low。
+                let key: Vec<u8> = (0..known).map(|i| bytes[at + i] ^ plain[i]).collect();
+                if !unverified.contains_key(&key) {
+                    if unverified.len() >= XOR_UNVERIFIED_MAX {
+                        overflow = true;
+                        break;
+                    }
+                }
+                let entry = unverified.entry(key).or_default();
+                if entry.len() < XOR_OFFSET_MAX {
+                    entry.push(at);
+                }
+            }
+        }
+        if overflow {
+            capped = true;
+        }
+        let mut repeated: Vec<(Vec<u8>, Vec<usize>)> = unverified
+            .into_iter()
+            .filter(|(_, offsets)| offsets.len() >= 2)
+            .collect();
+        repeated.sort_by_key(|(_, offsets)| offsets[0]);
+        for (key, offsets) in repeated {
+            let partial = plain.len() < key_len;
+            for at in offsets {
+                record_hit(
+                    &mut hits,
+                    &mut index,
+                    key.clone(),
+                    at,
+                    "low",
+                    false,
+                    partial,
+                    &mut capped,
+                );
+            }
+        }
+    }
+
+    hits.sort_by(|a, b| {
+        confidence_rank(b.confidence)
+            .cmp(&confidence_rank(a.confidence))
+            .then(b.offsets.len().cmp(&a.offsets.len()))
+            .then(a.partial.cmp(&b.partial))
+            .then(a.key.len().cmp(&b.key.len()))
+            .then(a.offsets.first().cmp(&b.offsets.first()))
+    });
+
+    let rendered: Vec<Value> = hits
+        .iter()
+        .map(|hit| {
+            let printable = hit
+                .key
+                .iter()
+                .all(|byte| byte.is_ascii_graphic() || *byte == b' ' || *byte == b'\t');
+            let mut item = json!({
+                "key": hit.key,
+                "keyLen": hit.key.len(),
+                "keyStr": if printable { Some(String::from_utf8_lossy(&hit.key).to_string()) } else { None },
+                "offset": format!("0x{:x}", hit.offsets[0]),
+                "offsets": hit.offsets.iter().map(|at| format!("0x{at:x}")).collect::<Vec<String>>(),
+                "offsetCount": hit.offsets.len(),
+                "confidence": hit.confidence,
+                "verified": hit.verified,
+                "partial": hit.partial,
+            });
+            if hit.dropped {
+                item["offsetsTruncated"] = json!(true);
+            }
+            if hit.partial {
+                item["note"] = json!(format!(
+                    "probe 只有 {} 字节，密钥更长，只能恢复前缀",
+                    hit.key.len()
+                ));
+            } else if !hit.verified {
+                item["note"] = json!("没有多余字节可验证，只按重复出现筛出候选");
+            }
+            item
+        })
+        .collect();
+
+    let note = if rendered.is_empty() {
+        "没有命中：probe 在这些密钥长度下都不是明文".to_string()
+    } else if hits.iter().any(|hit| !hit.verified) {
+        "多字节密钥可能不止一把；优先取命中位置最集中的那把。confidence=low 的是未验证候选（probe 不够长或落在文件尾），要人工确认，不能直接下结论".to_string()
+    } else {
+        "多字节密钥可能不止一把；优先取命中位置最集中的那把".to_string()
+    };
+
+    respond(
+        ctx,
+        "crypto",
+        json!({
+            "path": path.display().to_string(),
+            "size": size,
+            "scanned": bytes.len(),
+            "probe": probe,
+            "minLen": min_len,
+            "maxLen": max_len,
+            "matchCount": rendered.len(),
+            "matches": rendered,
+            "truncated": size > bytes.len() as u64 || capped,
+            "matchesCapped": capped,
+            "note": note,
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_hit(
+    hits: &mut Vec<XorHit>,
+    index: &mut HashMap<Vec<u8>, usize>,
+    key: Vec<u8>,
+    at: usize,
+    confidence: &'static str,
+    verified: bool,
+    partial: bool,
+    capped: &mut bool,
+) {
+    match index.get(&key) {
+        Some(&slot) => {
+            let hit = &mut hits[slot];
+            if hit.offsets.len() < XOR_OFFSET_MAX {
+                hit.offsets.push(at);
+            } else {
+                hit.dropped = true;
+            }
+            if confidence_rank(confidence) > confidence_rank(hit.confidence) {
+                hit.confidence = confidence;
+            }
+            hit.verified |= verified;
+        }
+        None => {
+            if hits.len() >= XOR_MATCH_MAX {
+                *capped = true;
+                return;
+            }
+            index.insert(key.clone(), hits.len());
+            hits.push(XorHit {
+                key,
+                offsets: vec![at],
+                confidence,
+                verified,
+                partial,
+                dropped: false,
+            });
+        }
+    }
+}
+
 // ---------------------------------------------------------------- 差异
 
 fn load_source(ctx: &ToolContext<'_>, raw: &str) -> Result<(Vec<u8>, String, bool), String> {
@@ -1602,6 +2778,451 @@ mod tests {
         let out = run_diff(&ctx, &json!({ "a": "x" }));
         assert!(out.outcome.error.is_some());
         assert!(out.outcome.text.contains("需要 a 与 b"));
+    }
+
+    // ------------------------------------------------ 证书 / 密钥（asn1.parse）
+
+    fn der(tag: u8, value: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        let len = value.len();
+        if len < 0x80 {
+            out.push(len as u8);
+        } else if len < 0x100 {
+            out.push(0x81);
+            out.push(len as u8);
+        } else {
+            out.push(0x82);
+            out.push((len >> 8) as u8);
+            out.push(len as u8);
+        }
+        out.extend_from_slice(value);
+        out
+    }
+
+    fn cat(parts: &[Vec<u8>]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    fn oid_der(dotted: &str) -> Vec<u8> {
+        let parts: Vec<u64> = dotted.split('.').map(|part| part.parse().unwrap()).collect();
+        let mut body = vec![(parts[0] * 40 + parts[1]) as u8];
+        for part in &parts[2..] {
+            let mut chunk = vec![(*part & 0x7f) as u8];
+            let mut rest = *part >> 7;
+            while rest > 0 {
+                chunk.insert(0, (rest & 0x7f) as u8 | 0x80);
+                rest >>= 7;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        der(0x06, &body)
+    }
+
+    fn alg_id(oid: &str) -> Vec<u8> {
+        der(0x30, &cat(&[oid_der(oid), der(0x05, &[])]))
+    }
+
+    /// 2048 位模数：DER INTEGER 带一个 0x00 符号位，幅值首字节 0xc1。
+    fn rsa_modulus() -> Vec<u8> {
+        let mut body = vec![0x00, 0xc1];
+        body.extend(std::iter::repeat(0x5a).take(255));
+        der(0x02, &body)
+    }
+
+    fn rsa_exponent() -> Vec<u8> {
+        der(0x02, &[0x01, 0x00, 0x01])
+    }
+
+    fn dn(cn: &str) -> Vec<u8> {
+        der(
+            0x30,
+            &der(
+                0x31,
+                &der(0x30, &cat(&[oid_der("2.5.4.3"), der(0x13, cn.as_bytes())])),
+            ),
+        )
+    }
+
+    fn rsa_spki() -> Vec<u8> {
+        let key = der(0x30, &cat(&[rsa_modulus(), rsa_exponent()]));
+        let mut bits = vec![0x00];
+        bits.extend_from_slice(&key);
+        der(
+            0x30,
+            &cat(&[alg_id("1.2.840.113549.1.1.1"), der(0x03, &bits)]),
+        )
+    }
+
+    fn sample_cert() -> Vec<u8> {
+        let tbs = der(
+            0x30,
+            &cat(&[
+                der(0xa0, &der(0x02, &[0x02])),
+                der(0x02, &[0x12, 0x34]),
+                alg_id("1.2.840.113549.1.1.11"),
+                dn("Test CA"),
+                der(
+                    0x30,
+                    &cat(&[der(0x17, b"230101000000Z"), der(0x17, b"330101000000Z")]),
+                ),
+                dn("Test Leaf"),
+                rsa_spki(),
+            ]),
+        );
+        let mut signature = vec![0x00];
+        signature.extend_from_slice(&[0x30, 0x03, 0x02, 0x01, 0x01]);
+        der(
+            0x30,
+            &cat(&[
+                tbs,
+                alg_id("1.2.840.113549.1.1.11"),
+                der(0x03, &signature),
+            ]),
+        )
+    }
+
+    #[test]
+    fn der_tlv_handles_short_long_and_high_tags() {
+        let short = der(0x04, b"abc");
+        let (tlv, next) = read_tlv(&short, 0).unwrap();
+        assert_eq!(tlv.value, b"abc");
+        assert_eq!(next, short.len());
+
+        let long = der(0x04, &vec![7u8; 300]);
+        let (tlv, next) = read_tlv(&long, 0).unwrap();
+        assert_eq!(tlv.value.len(), 300);
+        assert_eq!(next, long.len());
+
+        // 高 tag 号：0x1f 0x1f 表示 tag=31。
+        let high = vec![0x1f, 0x1f, 0x01, 0xaa];
+        let (tlv, next) = read_tlv(&high, 0).unwrap();
+        assert_eq!(tlv.tag, 31);
+        assert_eq!(tlv.value, &[0xaa]);
+        assert_eq!(next, 4);
+    }
+
+    #[test]
+    fn der_tlv_rejects_malformed_input_without_panicking() {
+        assert!(read_tlv(&[0x30], 0).is_err(), "缺长度字段");
+        assert!(read_tlv(&[0x30, 0x05, 0x00], 0).is_err(), "值被截断");
+        assert!(read_tlv(&[0x30, 0x80, 0x00], 0).is_err(), "不定长不是 DER");
+        assert!(read_tlv(&[0x30, 0x85, 0, 0, 0, 0, 1], 0).is_err(), "长度字段过长");
+        assert!(describe_der(&[0x02, 0x01, 0x01]).is_err(), "顶层不是 SEQUENCE");
+        assert!(describe_der(&[0x30, 0x82, 0xff, 0xff]).is_err(), "长度超界");
+    }
+
+    #[test]
+    fn integer_bit_length_uses_the_leading_bit() {
+        assert_eq!(bit_len(&[0x00, 0xc1, 0x00]), 16);
+        assert_eq!(bit_len(&[0x00, 0x80]), 8);
+        assert_eq!(bit_len(&[0x7f]), 7);
+        assert_eq!(bit_len(&[0x00, 0x01]), 1);
+        assert_eq!(bit_len(&[0x00]), 0);
+    }
+
+    #[test]
+    fn der_time_formats_seconds_and_generalized_time() {
+        let utc = der(0x17, b"230102030405Z");
+        let (tlv, _) = read_tlv(&utc, 0).unwrap();
+        assert_eq!(time_text(&tlv), "2023-01-02T03:04:05Z");
+
+        let generalized = der(0x18, b"20500102030405Z");
+        let (tlv, _) = read_tlv(&generalized, 0).unwrap();
+        assert_eq!(time_text(&tlv), "2050-01-02T03:04:05Z");
+
+        // 不带秒的写法：秒补 00，不把分钟读成秒。
+        let short = der(0x17, b"2301020304Z");
+        let (tlv, _) = read_tlv(&short, 0).unwrap();
+        assert_eq!(time_text(&tlv), "2023-01-02T03:04:00Z");
+    }
+
+    #[test]
+    fn oid_decodes_to_dotted_text() {
+        assert_eq!(
+            oid_text(&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]).unwrap(),
+            "1.2.840.113549.1.1.11"
+        );
+        assert_eq!(oid_text(&[0x55, 0x1d, 0x0e]).unwrap(), "2.5.29.14");
+        assert!(oid_text(&[]).is_err());
+        assert!(oid_text(&[0x2a, 0x86]).is_err(), "变长段没写完要报错");
+    }
+
+    #[test]
+    fn asn1_describes_x509_certificate() {
+        let value = describe_der(&sample_cert()).unwrap();
+        assert_eq!(value["type"], "x509");
+        assert_eq!(value["version"], "v3");
+        assert_eq!(value["serial"], "0x1234");
+        assert_eq!(value["issuer"], "CN=Test CA");
+        assert_eq!(value["subject"], "CN=Test Leaf");
+        assert_eq!(value["validNotBefore"], "2023-01-01T00:00:00Z");
+        assert_eq!(value["validNotAfter"], "2033-01-01T00:00:00Z");
+        assert_eq!(value["signatureAlgorithm"], "sha256WithRSAEncryption");
+        assert_eq!(value["publicKey"]["algorithm"], "rsa");
+        assert_eq!(value["publicKey"]["bits"], 2048);
+        assert_eq!(value["publicKey"]["e"], 65537);
+        let fingerprint = value["fingerprintSha256"].as_str().unwrap();
+        assert_eq!(fingerprint.len(), 95, "32 字节十六进制 + 31 个冒号");
+        assert_eq!(fingerprint.matches(':').count(), 31);
+    }
+
+    #[test]
+    fn asn1_reads_pem_and_matches_bare_der() {
+        let cert = sample_cert();
+        let text = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            base64::engine::general_purpose::STANDARD.encode(&cert)
+        );
+        let path = temp_file("pem-cert", text.as_bytes());
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_asn1(&ctx, &json!({ "path": "sample.bin" }));
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        assert_eq!(payload["container"], "pem");
+        assert_eq!(payload["pemLabel"], "CERTIFICATE");
+        assert_eq!(payload["type"], "x509");
+        assert_eq!(payload["publicKey"]["bits"], 2048);
+        let bare = describe_der(&cert).unwrap();
+        assert_eq!(payload["fingerprintSha256"], bare["fingerprintSha256"]);
+    }
+
+    #[test]
+    fn asn1_parses_certificate_at_embedded_offset() {
+        let mut bytes = vec![0xa5u8; 0x40];
+        bytes.extend_from_slice(&sample_cert());
+        let path = temp_file("embedded-cert", &bytes);
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_asn1(&ctx, &json!({ "path": "sample.bin", "offset": "0x40" }));
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        assert_eq!(payload["offset"], "0x40");
+        assert_eq!(payload["type"], "x509");
+    }
+
+    #[test]
+    fn asn1_recognises_pkcs7_signed_data() {
+        let cert = sample_cert();
+        let signed = der(
+            0x30,
+            &cat(&[
+                der(0x02, &[0x01]),
+                der(0x31, &[]),
+                der(0x30, &oid_der("1.2.840.113549.1.7.1")),
+                der(0xa0, &cert),
+            ]),
+        );
+        let content_info = der(
+            0x30,
+            &cat(&[
+                oid_der("1.2.840.113549.1.7.2"),
+                der(0xa0, &signed),
+            ]),
+        );
+        let value = describe_der(&content_info).unwrap();
+        assert_eq!(value["type"], "pkcs7");
+        assert_eq!(value["certificateCount"], 1);
+        assert_eq!(value["certificates"][0]["type"], "x509");
+        assert_eq!(value["certificates"][0]["subject"], "CN=Test Leaf");
+    }
+
+    #[test]
+    fn asn1_reads_pkcs1_and_pkcs8_keys() {
+        let public = der(0x30, &cat(&[rsa_modulus(), rsa_exponent()]));
+        let value = describe_der(&public).unwrap();
+        assert_eq!(value["type"], "rsa-public");
+        assert_eq!(value["bits"], 2048);
+        assert_eq!(value["e"], 65537);
+
+        let private = der(
+            0x30,
+            &cat(&[
+                der(0x02, &[0x00]),
+                rsa_modulus(),
+                rsa_exponent(),
+                der(0x02, &[0x11]),
+                der(0x02, &[0x03]),
+                der(0x02, &[0x05]),
+                der(0x02, &[0x07]),
+                der(0x02, &[0x09]),
+                der(0x02, &[0x0b]),
+            ]),
+        );
+        let pkcs8 = der(
+            0x30,
+            &cat(&[
+                der(0x02, &[0x00]),
+                alg_id("1.2.840.113549.1.1.1"),
+                der(0x04, &private),
+            ]),
+        );
+        let value = describe_der(&pkcs8).unwrap();
+        assert_eq!(value["type"], "rsa-private");
+        assert_eq!(value["bits"], 2048);
+        let text = value.to_string();
+        for secret in ["\"d\"", "\"p\"", "\"q\"", "\"dp\"", "\"dq\"", "\"qinv\""] {
+            assert!(!text.contains(secret), "私钥字段 {secret} 不该导出：{text}");
+        }
+        assert!(value["note"].as_str().unwrap().contains("不导出"));
+    }
+
+    #[test]
+    fn asn1_reads_ec_spki_with_curve_name() {
+        let mut point = vec![0x04];
+        point.extend(std::iter::repeat(0x11).take(64));
+        let spki = der(
+            0x30,
+            &cat(&[
+                der(
+                    0x30,
+                    &cat(&[
+                        oid_der("1.2.840.10045.2.1"),
+                        oid_der("1.2.840.10045.3.1.7"),
+                    ]),
+                ),
+                der(0x03, &cat(&[vec![0x00], point])),
+            ]),
+        );
+        let value = describe_der(&spki).unwrap();
+        assert_eq!(value["type"], "public-key");
+        assert_eq!(value["publicKey"]["algorithm"], "ec");
+        assert_eq!(value["publicKey"]["curve"], "prime256v1 (P-256)");
+        assert_eq!(value["publicKey"]["bits"], 256);
+    }
+
+    #[test]
+    fn asn1_keeps_unknown_oids_verbatim() {
+        let alg = alg_id("1.2.3.4.5");
+        let (tlv, _) = read_tlv(&alg, 0).unwrap();
+        assert_eq!(algorithm_name(&tlv), "1.2.3.4.5");
+        assert_eq!(
+            algorithm_name(&read_tlv(&alg_id("1.2.840.113549.1.1.11"), 0).unwrap().0),
+            "sha256WithRSAEncryption"
+        );
+    }
+
+    // ------------------------------------------------ 多字节 XOR（xor_brute）
+
+    fn xor_encode(plain: &[u8], key: &[u8], at: usize, bytes: &mut [u8]) {
+        for (index, byte) in plain.iter().enumerate() {
+            bytes[at + index] = byte ^ key[index % key.len()];
+        }
+    }
+
+    #[test]
+    fn xor_brute_recovers_single_byte_key() {
+        let plain = b"http://evil.example";
+        let mut bytes = vec![0u8; 0x80];
+        xor_encode(plain, &[0x5a], 0x10, &mut bytes);
+        let path = temp_file("xor-single", &bytes);
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_xor_brute(&ctx, &json!({ "path": "sample.bin", "probe": "http://" }));
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        let hit = payload["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["key"] == json!([0x5a]))
+            .unwrap_or_else(|| panic!("应命中单字节密钥：{}", out.outcome.text));
+        assert_eq!(hit["confidence"], "certain");
+        assert_eq!(hit["offset"], "0x10");
+        assert_eq!(hit["keyStr"], "Z");
+    }
+
+    #[test]
+    fn xor_brute_recovers_multi_byte_key_over_long_plaintext() {
+        let key = b"abc";
+        let plain = b"http://example.com/api/v1";
+        let mut bytes = vec![0u8; 0x80];
+        xor_encode(plain, key, 0x20, &mut bytes);
+        let path = temp_file("xor-multi", &bytes);
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_xor_brute(
+            &ctx,
+            &json!({ "path": "sample.bin", "probe": "http://example.com/api/v1" }),
+        );
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        let hit = payload["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["key"] == json!([0x61, 0x62, 0x63]))
+            .unwrap_or_else(|| panic!("应试出多字节密钥 abc：{}", out.outcome.text));
+        assert_eq!(hit["confidence"], "certain");
+        assert_eq!(hit["offset"], "0x20");
+        assert_eq!(hit["partial"], false);
+    }
+
+    #[test]
+    fn xor_brute_merges_offsets_for_the_same_key() {
+        let key = b"xy";
+        let plain = b"http://dup.example";
+        let mut bytes = vec![0u8; 0x80];
+        xor_encode(plain, key, 0x10, &mut bytes);
+        xor_encode(plain, key, 0x40, &mut bytes);
+        let path = temp_file("xor-dup", &bytes);
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_xor_brute(&ctx, &json!({ "path": "sample.bin", "probe": "http://dup.example" }));
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        let hits: Vec<&Value> = payload["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|hit| hit["key"] == json!([0x78, 0x79]))
+            .collect();
+        assert_eq!(hits.len(), 1, "同一把密钥应合并成一条：{}", out.outcome.text);
+        assert_eq!(hits[0]["offsetCount"], 2);
+        assert_eq!(hits[0]["offsets"], json!(["0x10", "0x40"]));
+    }
+
+    #[test]
+    fn xor_brute_marks_partial_prefix_as_low_confidence() {
+        // probe 只有 4 字节、密钥 8 字节：只能恢复前缀，且没有可验证的冗余。
+        // 只保留在同一段数据里重复出现的候选，避免随机数据刷屏。
+        let window = [0x3a, 0x91, 0x0c, 0xfe];
+        let mut bytes = vec![0u8; 0x60];
+        bytes[0x10..0x14].copy_from_slice(&window);
+        bytes[0x30..0x34].copy_from_slice(&window);
+        let path = temp_file("xor-partial", &bytes);
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_xor_brute(
+            &ctx,
+            &json!({ "path": "sample.bin", "probe": "http", "minLen": 8, "maxLen": 8 }),
+        );
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        let expected: Vec<u8> = window
+            .iter()
+            .zip(b"http")
+            .map(|(cipher, plain)| cipher ^ plain)
+            .collect();
+        let hit = payload["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["key"] == json!(expected))
+            .unwrap_or_else(|| panic!("应试出密钥前缀：{}", out.outcome.text));
+        assert_eq!(hit["partial"], true);
+        assert_eq!(hit["verified"], false);
+        assert_eq!(hit["confidence"], "low");
+        assert_eq!(hit["offsetCount"], 2);
+    }
+
+    #[test]
+    fn xor_brute_reports_no_match() {
+        let bytes: Vec<u8> = (0..512).map(|index| (index * 37 % 251) as u8).collect();
+        let path = temp_file("xor-none", &bytes);
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_xor_brute(
+            &ctx,
+            &json!({ "path": "sample.bin", "probe": "http://", "maxLen": 4 }),
+        );
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        assert_eq!(payload["matchCount"], 0, "{}", out.outcome.text);
+        assert!(payload["note"].as_str().unwrap().contains("没有命中"));
     }
 
     #[test]

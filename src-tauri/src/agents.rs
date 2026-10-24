@@ -459,7 +459,8 @@ pub fn builtin() -> Vec<AgentProfile> {
             "你负责密码分析，只读。\n\
              先用 bin.crypto.scan 扫常量，再按 confidence 分级处理：high 可直接认定算法，medium 要结合上下文，low 只能写「疑似」。\n\
              RC4 的 0..255 递增表误报很高：没有其它证据时不要写成「用了 RC4」。\n\
-             有已知明文特征时用 xorProbe 试单字节 XOR，给出密钥与命中位置；多把密钥都命中时，取命中位置最集中的那把并说明理由。\n\
+             有已知明文特征时用 bin.crypto.xor_brute 反推密钥：默认 1..8 字节，命中多把时取位置最集中的那把；confidence=low 的是未验证候选，不能直接下结论。单字节快查仍可用 bin.crypto.scan 的 xorProbe。\n\
+             遇到 PEM / DER / CERT.RSA / CERT.EC，用 bin.crypto.asn1.parse 拿 issuer、有效期、算法与指纹；私钥只报元信息，绝不还原私钥内容。\n\
              找算法调用点用 bin.xref.search 反查常量所在地址周围的引用。\n\
              不给出「无法解密的密文」这种结论；解不出来就写清缺什么（密钥、IV、算法参数）。",
             &["安全", "密码"],
@@ -470,6 +471,8 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "bin.meta.identify",
                     "bin.strings.extract",
                     "bin.crypto.scan",
+                    "bin.crypto.asn1.parse",
+                    "bin.crypto.xor_brute",
                     "bin.xref.search",
                     "bin.json.jq",
                     "prism.artifact.get",
