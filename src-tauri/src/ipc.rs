@@ -292,6 +292,12 @@ pub struct BackendView {
 
 fn backend_view(status: native::backends::probe::BackendStatus) -> BackendView {
     let overridden = native::backends::probe::overrides().contains_key(status.id);
+    // Broken 的原因长在 state 枚举里（`Broken(why)`），前端只认 `state` 字符串；
+    // 把它并进 note，不然设置页只能显示"跑起来了但读不到版本"这种兜底话。
+    let note = match &status.state {
+        native::backends::probe::BackendState::Broken(why) => Some(why.clone()),
+        _ => status.note.clone(),
+    };
     BackendView {
         id: status.id.to_string(),
         name: status.name.to_string(),
@@ -302,7 +308,7 @@ fn backend_view(status: native::backends::probe::BackendStatus) -> BackendView {
             .and_then(|def| def.min_version)
             .map(str::to_string),
         source: status.source.as_str().to_string(),
-        note: status.note,
+        note,
         install: status.install.to_string(),
         tools: status.tools.iter().map(|name| name.to_string()).collect(),
         overridden,

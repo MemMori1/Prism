@@ -53,7 +53,7 @@ pub const BACKENDS: &[Backend] = &[
         id: "ghidra",
         name: "Ghidra",
         min_version: Some("11.0"),
-        install: "brew install --cask ghidra",
+        install: "brew install ghidra",
         tools: &["bin.ghidra.analyze", "bin.ghidra.decompile_func"],
         env: &["PRISM_GHIDRA_HOME", "GHIDRA_HOME"],
     },
@@ -224,10 +224,19 @@ fn read_version(def: &Backend, program: &Path) -> Result<(String, Option<String>
     }
     let mut spec = ExecSpec::new(program)
         .args(version_args(def.id).iter().copied())
-        .timeout(Duration::from_secs(3));
+        // 冷启动可能撞上 Gatekeeper 扫描，或者赶上 cargo 全量重编译把 CPU
+        // 吃满——3 秒会把明明能跑的 r2 误杀成 Broken。
+        .timeout(Duration::from_secs(10));
     spec.stdout_cap = 8 * 1024;
     spec.stderr_cap = 8 * 1024;
     let out = exec::run(&spec).map_err(|error| error.to_string())?;
+    if out.timed_out {
+        return Err(format!(
+            "起了进程但 {} 秒内没退出（机器可能正忙），输出：{}",
+            spec.timeout.as_secs(),
+            out.tail_text(120)
+        ));
+    }
     let text = format!("{}\n{}", out.stdout_text(), out.stderr_text());
     let version = version_token(&text).ok_or_else(|| {
         let tail = out.tail_text(120);
@@ -239,7 +248,10 @@ fn read_version(def: &Backend, program: &Path) -> Result<(String, Option<String>
 /// Ghidra 的版本在 `<home>/Ghidra/application.properties` 里，不在命令输出里。
 ///
 /// `program` 是 `<home>/support/analyzeHeadless`，所以 home 是它的上两级。
+/// 先解符号链接再往上找：用户手动指定的路径可能是个 symlink
+/// （比如指到 Homebrew Cellar 里），拿 symlink 路径数两级会数错地方。
 fn ghidra_version(program: &Path) -> Result<(String, Option<String>), String> {
+    let program = std::fs::canonicalize(program).unwrap_or_else(|_| program.to_path_buf());
     let home = program
         .parent()
         .and_then(Path::parent)
@@ -279,18 +291,80 @@ fn properties_version(text: &str) -> Option<String> {
     })
 }
 
-/// 本机 java 的主版本号（`JAVA_HOME/bin/java` 优先，其次 `PATH`）。
-fn java_major() -> Result<u32, String> {
-    let java = std::env::var_os("JAVA_HOME")
+/// 本机 java 的位置：`JAVA_HOME` → `PATH` → Homebrew 的 keg-only openjdk。
+///
+/// 返回 (java 可执行文件, 推断出的 `JAVA_HOME`)。Homebrew 的 openjdk@*
+/// 是 keg-only，`java` 不进 bin，analyzeHeadless 自己找不到——这两样
+/// 得显式喂给 Ghidra；版本探测（[`java_major`]）与运行时（ghidra.rs 的
+/// `JAVA_HOME` 透传）共用这一份，别处再造一份迟早对不上。
+pub(crate) fn locate_java() -> Option<(PathBuf, Option<PathBuf>)> {
+    if let Some(home) = std::env::var_os("JAVA_HOME")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .map(|home| home.join("bin/java"))
-        .filter(|path| is_executable(path))
-        .or_else(|| super::super::runtime::which("java"))
+        .filter(|home| is_jdk_home(home))
+    {
+        return Some((home.join("bin/java"), Some(home)));
+    }
+    // PATH 上的 java：能反推出 JAVA_HOME 才信。`/usr/bin/java` 这种 stub
+    // 只是壳——机器上没注册 JVM 时它照样起不来，得让位给 Homebrew 的。
+    let from_path = super::super::runtime::which("java")
+        .map(|java| (java.clone(), java_home_of(&java)));
+    if let Some(found @ (_, Some(_))) = &from_path {
+        return Some(found.clone());
+    }
+    // Homebrew 的 openjdk@* / openjdk 装在 opt 下；多个就取版本号最大的那份。
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for base in [
+        "/opt/homebrew/opt",
+        "/usr/local/opt",
+        "/home/linuxbrew/.linuxbrew/opt",
+    ] {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "openjdk" || name.starts_with("openjdk@") {
+                let java = entry.path().join("bin/java");
+                if is_executable(&java) {
+                    candidates.push(java);
+                }
+            }
+        }
+    }
+    candidates.sort();
+    if let Some(java) = candidates.pop() {
+        let home = java_home_of(&java);
+        return Some((java, home));
+    }
+    from_path
+}
+
+/// 从 java 可执行路径反推 `JAVA_HOME`；推不出就 `None`——这时不传，
+/// 让 Ghidra 自己顺着 PATH 找。
+///
+/// 光查 `bin/java` 可执行会自我兜圈：`/usr/bin/java` 这种 stub 没注册
+/// JVM 时照样起不来，而它反推出的 home 是 `/usr`，`$JAVA_HOME/bin/java`
+/// 又恰好是 stub 自己。真 JDK home 都带 `release` 标记，拿它做指纹。
+fn java_home_of(java: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(java).unwrap_or_else(|_| java.to_path_buf());
+    let home = real.parent()?.parent()?.to_path_buf();
+    is_jdk_home(&home).then_some(home)
+}
+
+/// 像不像一个真正的 JDK home：有 `release` 标记、`bin/java` 可执行。
+fn is_jdk_home(home: &Path) -> bool {
+    home.join("release").is_file() && is_executable(&home.join("bin/java"))
+}
+
+/// 本机 java 的主版本号（`JAVA_HOME` → `PATH` → Homebrew keg-only）。
+fn java_major() -> Result<u32, String> {
+    let (java, _) = locate_java()
         .ok_or_else(|| "找不到 java（Ghidra 需要 JDK 17+，装好后点「重新检测」）".to_string())?;
     let out = exec::run(
         &ExecSpec::new(java)
             .arg("-version")
-            .timeout(Duration::from_secs(3)),
+            .timeout(Duration::from_secs(10)),
     )
     .map_err(|error| format!("java 起不来：{error}"))?;
     let text = format!("{}\n{}", out.stdout_text(), out.stderr_text());
@@ -375,13 +449,15 @@ fn bundled_dir(id: &str) -> Option<PathBuf> {
     crate::engines::opencode::search::prism_dir().map(|dir| dir.join("toolchains").join(id))
 }
 
-/// `/Applications/ghidra_*` 与 `~/ghidra_*`。
+/// `/Applications/ghidra_*`、`~/ghidra_*`，以及 Homebrew formula 的
+/// `Cellar/ghidra/*/libexec`——formula 不装 `/Applications`，也不把
+/// `analyzeHeadless` 链进 bin，不认这个位置探测永远是 Missing。
 fn ghidra_homes() -> Vec<PathBuf> {
     let mut bases = vec![PathBuf::from("/Applications")];
     if let Some(home) = std::env::var_os("HOME") {
         bases.push(PathBuf::from(home));
     }
-    let mut out = Vec::new();
+    let mut out: Vec<PathBuf> = Vec::new();
     for base in bases {
         let Ok(entries) = std::fs::read_dir(&base) else {
             continue;
@@ -393,7 +469,17 @@ fn ghidra_homes() -> Vec<PathBuf> {
             }
         }
     }
+    for cellar in ["/opt/homebrew/Cellar", "/usr/local/Cellar"] {
+        let Ok(entries) = std::fs::read_dir(Path::new(cellar).join("ghidra")) else {
+            continue;
+        };
+        for entry in entries.flatten().filter(|entry| entry.path().is_dir()) {
+            out.push(entry.path().join("libexec"));
+        }
+    }
+    // 新版本排前面：同名命中时 candidate_for 取第一个。
     out.sort();
+    out.reverse();
     out
 }
 
@@ -537,6 +623,28 @@ pub fn set_override(id: &str, path: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真机回归：装了的后端必须探到 Ready；没装的报 Missing，
+    /// 绝不允许装好了还报 Broken / TooOld（那是探测的 bug，用户没法自救）。
+    #[test]
+    #[ignore = "真机回归：需要本机装了对应的工具链"]
+    fn probes_the_real_machine() {
+        eprintln!("locate_java = {:?}", locate_java());
+        for def in BACKENDS {
+            let status = probe(def.id);
+            eprintln!("{:?}", status);
+            if status.path.is_some() {
+                assert_eq!(
+                    status.state,
+                    BackendState::Ready,
+                    "{} 在 {:?} 被判成 {:?}",
+                    def.id,
+                    status.path,
+                    status.state
+                );
+            }
+        }
+    }
 
     #[test]
     fn reads_version_from_upx_output() {

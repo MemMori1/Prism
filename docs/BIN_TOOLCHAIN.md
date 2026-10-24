@@ -208,13 +208,17 @@ pub struct Job {
   toolchains/index.json          # 只存用户覆盖：{"ghidra":{"path":"/opt/ghidra_11.2"}}
   cache/programs/<sha256>/
     index.json                   # ProgramIndex（带 backend + version，不匹配即重分析）
-    ghidra/                      # Ghidra 项目目录（decompile 要复用，不能删）
     pseudocode/<va>.c            # 反编译缓存
   jobs/<job_id>/
     job.json  stdout.log  stderr.log  work/  out/
+~/Library/Caches/prism/ghidra-projects/<sha256>/   # Ghidra 项目目录（decompile 要复用，不能删）
 ```
 
 - 缓存键：`sha256 + backend + backend_version`；三者任一变化 → 重分析；
+- **Ghidra 项目目录不放 `~/.prism`**：Ghidra 的 GhidraURL 校验拒绝 `.` 开头的
+  路径段（`Path element starting with '.' is not permitted`），`~/.prism` /
+  `~/.cache` 这类隐藏缓存目录全被它挡住——macOS 用 `Library/Caches/prism`，
+  Windows 用 `LOCALAPPDATA/prism`，Linux 用 `/var/tmp/prism`（XDG 缓存同样带点）；
 - 淘汰：`cache/programs` 总量上限 **8 GiB**，按 `index.json` 的 mtime LRU 删；
   `jobs/` 只留最近 20 个（与 `runtime` 沙箱目录同一策略）；
 - 清理在启动时和每次 job 结束后各跑一次，不做定时器。

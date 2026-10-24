@@ -159,7 +159,7 @@ struct Prepared {
     sample: StagedSample,
     meta: Value,
     sample_ref: SampleRef,
-    /// `~/.prism/cache/programs/<sha>/ghidra`；保留给反编译复用。
+    /// Ghidra 项目目录（见 [`ghidra_project_root`]）；保留给反编译复用。
     project_dir: PathBuf,
     /// 交给 `-import` 的路径：文件名固定 `sample.bin`。
     import_path: PathBuf,
@@ -186,10 +186,8 @@ fn prepare_staged(
         "Ghidra 状态是 ready，但没有 analyzeHeadless 路径：点「重新检测」再试。".to_string()
     })?;
     let sample_ref = sample_ref(&sample, &meta);
-    let project_dir = index::cache_root()
-        .ok_or_else(|| "找不到 ~/.prism 目录".to_string())?
-        .join(&sample.sha256)
-        .join("ghidra");
+    let project_dir = ghidra_project_root()?
+        .join(&sample.sha256);
     std::fs::create_dir_all(&project_dir).map_err(|error| {
         format!(
             "建 Ghidra 项目目录失败（{}）：{error}",
@@ -207,6 +205,30 @@ fn prepare_staged(
         project_dir,
         import_path,
     })
+}
+
+/// Ghidra 项目目录的根。**不能**放在 `~/.prism` 或 `~/.cache` 下面——
+/// Ghidra 的 GhidraURL 校验拒绝 `.` 开头的路径段
+/// （`Path element starting with '.' is not permitted`），这规矩挡住的
+/// 恰好是所有惯例的隐藏缓存目录，只能按平台挑明面位置。
+fn ghidra_project_root() -> Result<PathBuf, String> {
+    let root = if cfg!(target_os = "macos") {
+        let home = std::env::var_os("HOME").ok_or("没有 HOME，放不了 Ghidra 项目目录")?;
+        PathBuf::from(home).join("Library/Caches/prism/ghidra-projects")
+    } else if cfg!(target_os = "windows") {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join("AppData/Local")))
+            .ok_or("没有 LOCALAPPDATA / HOME，放不了 Ghidra 项目目录")?;
+        base.join("prism/ghidra-projects")
+    } else {
+        // Linux 的 XDG 缓存目录（~/.cache）同样以点开头，Ghidra 不收；
+        // /var/tmp 跨重启保留，够这个用途。
+        PathBuf::from("/var/tmp/prism/ghidra-projects")
+    };
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("建 Ghidra 项目目录失败（{}）：{error}", root.display()))?;
+    Ok(root)
 }
 
 /// 下游工具用：复用已经 staged 的样本生成/读取 IR（缓存优先）。
@@ -269,7 +291,7 @@ fn require_ghidra() -> Result<BackendStatus, String> {
                 .to_string(),
         ),
         BackendState::TooOld { found, need } => Err(format!(
-            "Ghidra 版本太低：检测到 {found}，至少要 {need}。升级：brew upgrade --cask ghidra"
+            "Ghidra 版本太低：检测到 {found}，至少要 {need}。升级：brew upgrade ghidra"
         )),
         BackendState::Broken(why) => Err(format!(
             "找到 Ghidra，但跑不起来（{why}）。Ghidra 需要 JDK 17+，装好后点「重新检测」。"
@@ -313,10 +335,18 @@ fn script_dir(ctx: &ToolContext<'_>) -> Result<PathBuf, String> {
 }
 
 /// `JAVA_HOME` 不往子进程传，Ghidra 可能找不到 JDK；显式透传。
+///
+/// 应用进程没设 `JAVA_HOME` 时用 [`super::probe::locate_java`] 兜底——
+/// Homebrew 的 keg-only openjdk 不在 PATH 上，analyzeHeadless 自己找不到。
 fn java_home() -> Option<String> {
     std::env::var_os("JAVA_HOME")
         .filter(|value| !value.is_empty())
         .map(|value| PathBuf::from(value).display().to_string())
+        .or_else(|| {
+            super::probe::locate_java()
+                .and_then(|(_, home)| home)
+                .map(|home| home.display().to_string())
+        })
 }
 
 fn run_ghidra(
@@ -430,12 +460,28 @@ fn analyze_inner(
     let text = match std::fs::read_to_string(&out_json) {
         Ok(text) => text,
         Err(error) => {
+            // Ghidra 的 stderr 只有 JVM 的 -showversion 横幅，INFO / 报错栈
+            // 全在 stdout——tail_text 的"stderr 优先"在这里恰好把真话藏掉。
+            let detail = if output.stdout.iter().any(|byte| !byte.is_ascii_whitespace()) {
+                output.stdout_text()
+            } else {
+                output.stderr_text()
+            };
+            let tail: String = detail
+                .trim()
+                .chars()
+                .rev()
+                .take(800)
+                .collect::<Vec<char>>()
+                .into_iter()
+                .rev()
+                .collect();
             return Err(format!(
                 "Ghidra 说分析完了，但读不到 {}（退出码 {}）：{error}\n{}",
                 out_json.display(),
                 output.code.unwrap_or(-1),
-                output.tail_text(400)
-            ))
+                tail
+            ));
         }
     };
 

@@ -636,6 +636,7 @@ export interface BackendView {
   minVersion: string | null
   /** override | env | path | known-dir | unknown */
   source: string
+  /** 后端自己的一句话说明；`broken` 时是失败原因（超时 / 没权限 / 读不到版本…）。 */
   note: string | null
   /** 一句可复制的安装指引。 */
   install: string

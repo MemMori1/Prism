@@ -455,14 +455,14 @@ function backendHint(backend: BackendView) {
   if (backend.state === 'ready') {
     const version = backend.version ? `v${backend.version}` : '版本未知'
     const source = SOURCE_LABEL[backend.source]
-    return `${version}${source ? ` · 来自${source}` : ''}${backend.path ? ` · ${backend.path}` : ''}`
+    return `${version}${source ? ` · 来自${source}` : ''}${backend.path ? ` · ${backend.path}` : ''}${backend.note ? ` · ${backend.note}` : ''}`
   }
   if (backend.state === 'too-old') {
     const need = backend.minVersion ? `，至少要 ${backend.minVersion}` : ''
     return `检测到 ${backend.version ?? '未知版本'}${need}。升级：${backend.install}`
   }
   if (backend.state === 'broken') {
-    return `${backend.note ?? '跑起来了但读不到版本'}。装好依赖后点「重新检测」。`
+    return `${backend.note ?? '没探出具体原因'}。装好依赖后点「重新检测」。`
   }
   return backend.install || '没有登记安装指引。'
 }
