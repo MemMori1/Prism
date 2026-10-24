@@ -1099,6 +1099,332 @@ const PACKERS: &[Packer] = &[
     },
 ];
 
+// ---------------------------------------------------------------- Android 壳
+
+/// 一个 Android 加固方案的识别规则。
+///
+/// 与上面的 `Packer`（PE/ELF 视角，靠节名 + 字节特征串）不同，APK 的壳
+/// 证据几乎全在**文件名清单**上：`lib/` 下的加固 so、`assets/` 里的特征文件、
+/// `classes.dex` 的数量与体积。这些文件名在 zip 中央目录里是明文存的，
+/// 不依赖解压，扫一遍中央目录就能拿到结构事实——比「编译器内嵌字符串」硬得多。
+struct AndroidPacker {
+    name: &'static str,
+    /// `lib/` 下出现的加固 so 文件名（不含路径前缀）。这是最硬的结构证据：
+    /// 一个正常 app 不会带 `libjiagu.so`。
+    libs: &'static [&'static str],
+    /// `assets/` 或根目录下出现的特征文件（子串匹配，大小写敏感）。
+    assets: &'static [&'static str],
+    hint: &'static str,
+}
+
+/// Android 加固方案特征表。顺序有意义：同级命中按表序返回。
+const ANDROID_PACKERS: &[AndroidPacker] = &[
+    AndroidPacker {
+        name: "360 加固",
+        libs: &["libjiagu.so", "libjiagu_art.so", "libjiagu_x86.so", "libjiagu_a64.so"],
+        assets: &["jiagu"],
+        hint: "libjiagu* 是特征。壳入口在 Application.attachBaseContext 之后，脱壳点通常在它调用完 dex 加载之后。",
+    },
+    AndroidPacker {
+        name: "腾讯加固（乐固）",
+        libs: &["libshell.so", "libshella-", "libshellx-", "libtup.so", "libexec.so"],
+        assets: &["libshell", "libshella", "tosprotection"],
+        hint: "libshell* 是特征。先看壳的 dex 抽取时机，再找内存里完整的 dex。",
+    },
+    AndroidPacker {
+        name: "梆梆加固",
+        libs: &["libsecexe.so", "libsecmain.so", "libSecShell.so", "libDexHelper.so", "libDexHelper-x86.so"],
+        assets: &["secData0.jar", "secData", "classes0.jar"],
+        hint: "libsec* 与 libDexHelper 是特征。脱壳点在 dex 被完整加载进内存之后。",
+    },
+    AndroidPacker {
+        name: "阿里加固（聚安全）",
+        libs: &["libmobisec.so", "libmobisecz.so", "libmobisecy.so"],
+        assets: &["mobisec"],
+        hint: "libmobisec 是特征。先确认是整体加固还是仅 dex 加密。",
+    },
+    AndroidPacker {
+        name: "百度加固",
+        libs: &["libbaiduprotect.so", "libbaiduprotect_x86.so"],
+        assets: &["baiduprotect", "libbaiduprotect"],
+        hint: "libbaiduprotect 是特征。注意它有反调试与完整性校验，改动前先备份。",
+    },
+    AndroidPacker {
+        name: "娜迦加固",
+        libs: &["libchaosvmp.so", "libchaosvmp-x86.so", "libddog.so", "libfdog.so"],
+        assets: &["naga", "chaosvmp"],
+        hint: "libchaosvmp 是特征。VM 保护，优先找 dex 完整落地的时机。",
+    },
+    AndroidPacker {
+        name: "爱加密",
+        libs: &["libexecmain.so", "libexec.so", "ijm_lib.so"],
+        assets: &["ijiami.dat", "ijiami", "libexecmain"],
+        hint: "libexecmain 是特征。先看 attachBaseContext 链，再找内存 dex。",
+    },
+    AndroidPacker {
+        name: "顶象加固",
+        libs: &["libx3g.so", "libDxAnti.so", "libXposedCheck.so"],
+        assets: &["dxsdk", "DxAnti"],
+        hint: "libDxAnti / libx3g 是特征。顶象偏业务安全，先确认是不是纯壳还是带风控。",
+    },
+    AndroidPacker {
+        name: "网易易盾加固",
+        libs: &["libnesec.so", "libwbox.so", "libmoxiang.so"],
+        assets: &["nesec", "yidun"],
+        hint: "libnesec 是特征。网易易盾通常伴随风控 SDK，脱壳后还要看风控链路。",
+    },
+];
+
+/// zip 中央目录里挑出来的一条记录，只保留壳检测关心的列。
+struct ZipEntry {
+    name: String,
+    /// 未压缩大小（用于算 classes.dex 的真实体积）。
+    uncompressed_size: u64,
+}
+
+/// 轻量 zip 中央目录解析：只读文件名清单，不碰本地文件头、不解压。
+///
+/// APK 的壳特征（so 文件名、assets 文件名）都在中央目录里明文存储，
+/// 所以只需要定位 EOCD → 中央目录 → 逐条读文件名，就能拿到全部结构证据。
+/// 对 zip64、加密、数据描述符这些不关心的字段直接跳过，解析失败就返回 None，
+/// 由调用方按「无中央目录信息」降级——纪律是「解析不出就省略，不猜」。
+fn apk_entries(blob: &[u8]) -> Option<Vec<ZipEntry>> {
+    // EOCD 至少 22 字节，标志是 0x06054b50。从尾部往前扫，兼容带注释的 zip。
+    if blob.len() < 22 {
+        return None;
+    }
+    let mut eocd = None;
+    let scan_from = blob.len().saturating_sub(22 + 65536);
+    for at in (scan_from..=blob.len() - 22).rev() {
+        if &blob[at..at + 4] == b"PK\x05\x06" {
+            eocd = Some(at);
+            break;
+        }
+    }
+    let eocd = eocd?;
+    let count = read_u16(blob, eocd + 10, true)? as usize;
+    let cd_offset = read_u32(blob, eocd + 16, true)? as usize;
+    if cd_offset >= blob.len() {
+        return None;
+    }
+
+    let mut entries = Vec::new();
+    let mut at = cd_offset;
+    for _ in 0..count {
+        // 中央目录文件头：0x02014b50，固定 46 字节。
+        if &blob[at..at + 4] != b"PK\x01\x02" {
+            break;
+        }
+        let name_len = read_u16(blob, at + 28, true)? as usize;
+        let extra_len = read_u16(blob, at + 30, true)? as usize;
+        let comment_len = read_u16(blob, at + 32, true)? as usize;
+        let uncompressed = read_u32(blob, at + 24, true)? as u64;
+        let name_start = at + 46;
+        let name_end = name_start.checked_add(name_len)?;
+        if name_end > blob.len() {
+            break;
+        }
+        let name = String::from_utf8_lossy(&blob[name_start..name_end]).to_string();
+        entries.push(ZipEntry {
+            name,
+            uncompressed_size: uncompressed,
+        });
+        at = name_end + extra_len + comment_len;
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+/// APK 壳检测：纯函数，输入整个（或头部的）APK 字节与真实文件大小。
+///
+/// 返回与 `detect_pack` 同构的 payload，`format` 固定 `apk`。识别依据：
+/// 1. `lib/` 下的加固 so 文件名（最硬，结构事实）；
+/// 2. `assets/` 或根目录的特征文件；
+/// 3. `classes.dex` 的数量与体积异常（抽取壳会让 classes.dex 变成极小 stub）；
+/// 4. `AndroidManifest.xml` 之外，是否有 `classes.dex` 被塞进 assets（整体加固）。
+fn detect_apk_pack(blob: &[u8], size: u64) -> Value {
+    let entries = apk_entries(blob);
+
+    // ---- 从条目清单提炼结构信号
+    let mut lib_files: Vec<&str> = Vec::new();
+    let mut classes_dex: Vec<(usize, u64)> = Vec::new();
+    let mut has_manifest = false;
+    let mut suspicious_assets: Vec<&str> = Vec::new();
+    if let Some(list) = &entries {
+        for entry in list {
+            let name = entry.name.as_str();
+            if name == "AndroidManifest.xml" {
+                has_manifest = true;
+            }
+            if let Some(base) = name.rsplit('/').next() {
+                if name.starts_with("lib/") && base.ends_with(".so") {
+                    lib_files.push(base);
+                }
+            }
+            if name == "classes.dex" {
+                classes_dex.push((0, entry.uncompressed_size));
+            } else if let Some(suffix) = name.strip_prefix("classes") {
+                if let Some(rest) = suffix.strip_suffix(".dex") {
+                    if let Ok(index) = rest.parse::<usize>() {
+                        classes_dex.push((index, entry.uncompressed_size));
+                    }
+                }
+            }
+        }
+    }
+    // classes.dex 若被挪进 assets/（整体加固常见），这里也能捞到。
+    if let Some(list) = &entries {
+        for entry in list {
+            let name = entry.name.as_str();
+            if name.starts_with("assets/") && (name.ends_with(".dex") || name.ends_with(".jar")) {
+                suspicious_assets.push(name);
+            }
+        }
+    }
+
+    // ---- 按壳特征匹配
+    let mut found: Vec<Value> = Vec::new();
+    let mut top: Option<Strength> = None;
+    if let Some(list) = &entries {
+        for packer in ANDROID_PACKERS {
+            let mut evidence: Vec<String> = Vec::new();
+            for entry in list {
+                let base = entry.name.rsplit('/').next().unwrap_or(entry.name.as_str());
+                let lib_hit = entry.name.starts_with("lib/")
+                    && packer.libs.iter().any(|lib| {
+                        base == *lib || base.starts_with(&lib[..lib.len().saturating_sub(1)])
+                    });
+                if lib_hit {
+                    evidence.push(format!("lib/ 出现 {}", base));
+                }
+                let asset_hit = packer.assets.iter().any(|asset| entry.name.contains(asset));
+                if asset_hit && !lib_hit {
+                    evidence.push(format!("assets/ 出现特征 {}", base));
+                }
+            }
+            if evidence.is_empty() {
+                continue;
+            }
+            // so 文件名是结构事实，直接定 high；只有 assets 特征时降为 low。
+            let has_lib = evidence.iter().any(|item| item.starts_with("lib/"));
+            let strength = if has_lib { Strength::High } else { Strength::Low };
+            top = Some(top.map_or(strength, |current| current.max(strength)));
+            found.push(json!({
+                "name": packer.name,
+                "confidence": strength.as_str(),
+                "evidence": evidence,
+                "hint": packer.hint,
+            }));
+        }
+    }
+    found.sort_by(|left, right| {
+        let l = left["confidence"].as_str().unwrap_or("");
+        let r = right["confidence"].as_str().unwrap_or("");
+        strength_rank(r).cmp(&strength_rank(l))
+    });
+
+    // ---- 结构信号
+    let manifest_missing = entries.is_some() && !has_manifest;
+    let dex_count = classes_dex.len();
+    let min_dex_size = classes_dex.iter().map(|(_, size)| *size).min().unwrap_or(0);
+    // 抽取壳的典型形态：classes.dex 只有一个且极小（stub），真实代码在 so 里。
+    let dex_stub = dex_count == 1 && min_dex_size > 0 && min_dex_size < 16 * 1024;
+
+    // 强信号只放「结构异常」：dex 被抽取成 stub、assets 里塞了 dex/jar（整体加固）。
+    let strong = usize::from(dex_stub) + usize::from(!suspicious_assets.is_empty());
+    let weak = usize::from(manifest_missing);
+
+    let packed = match top {
+        Some(Strength::High) | Some(Strength::Certain) => true,
+        Some(Strength::Low) => strong > 0,
+        None => strong >= 1 || weak >= 1,
+    };
+    let confidence = match top {
+        Some(strength) => strength.as_str(),
+        None if packed => "low",
+        None => "none",
+    };
+    let names: Vec<&str> = found
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect();
+    let joined = names.join(" / ");
+    let verdict = match top {
+        Some(Strength::Certain) => format!("确认被 {joined} 加固"),
+        Some(Strength::High) => format!("高度疑似 {joined}"),
+        Some(Strength::Low) => format!("疑似 {joined}，但只有弱特征，需要人工确认"),
+        None if packed => format!("没有匹配到已知壳，但发现 {strong} 项加固结构信号，可能是私有壳或抽取壳"),
+        None => "未发现加壳特征".to_string(),
+    };
+
+    let mut advice: Vec<String> = Vec::new();
+    if packed {
+        advice.push(
+            "先确认这是抽取壳还是整体加固：抽取壳的 classes.dex 是 stub，真代码在 lib/ 下的 so 里，脱壳要抓内存 dex；整体加固则要过 Application.attachBaseContext。"
+                .to_string(),
+        );
+        for packer in &found {
+            if let Some(hint) = packer["hint"].as_str() {
+                advice.push(hint.to_string());
+            }
+        }
+    } else {
+        advice.push(
+            "未发现加固特征，可以直接对 classes.dex 跑 bin.dex.disasm / bin.dex.xref 拿代码级证据。"
+                .to_string(),
+        );
+    }
+    if dex_stub {
+        advice.push(format!(
+            "classes.dex 只有 {min_dex_size} 字节，小于 16 KiB 的 stub 几乎肯定是抽取壳：真实 dex 在运行时从 so 里释放，静态反汇编拿到的是壳加载器而非业务代码。"
+        ));
+    }
+
+    let mut payload = json!({
+        "format": "apk",
+        "packed": packed,
+        "confidence": confidence,
+        "verdict": verdict,
+        "packers": found,
+        "signals": {
+            "entryCount": entries.as_ref().map(|list| list.len()),
+            "manifestPresent": entries.as_ref().map(|_| has_manifest),
+            "classesDexCount": dex_count,
+            "minClassesDexSize": min_dex_size,
+            "dexIsStub": dex_stub,
+            "nativeLibCount": lib_files.len(),
+            "nativeLibs": lib_files,
+            "suspiciousAssets": suspicious_assets,
+            "strongSignals": strong,
+            "weakSignals": weak,
+        },
+        "advice": advice,
+    });
+    // 没解析出中央目录（截断 / zip64 / 损坏）时如实标注，不装知道。
+    if entries.is_none() {
+        payload["note"] = json!(
+            "无法解析 zip 中央目录（文件可能被截断或用了 zip64）。以下结论只基于文件头部字节，可能漏掉加固 so 证据，建议用完整样本重跑。"
+        );
+    }
+    if size > 0 && entries.as_ref().map(|list| list.is_empty()).unwrap_or(true) {
+        // 中央目录为空但有体积：可能是 zip 头损坏，如实降级。
+        payload["note"] = json!("中央目录为空，无法枚举条目名，加固判断不可靠。");
+    }
+    payload
+}
+
+fn strength_rank(value: &str) -> u8 {
+    match value {
+        "certain" => 3,
+        "high" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
 fn pack_schema() -> Value {
     json!({
         "type": "function",
@@ -1123,9 +1449,21 @@ fn run_pack(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
         Err(failure) => return failure,
     };
     let deep = args.get("deep").and_then(Value::as_bool).unwrap_or(false);
-    let blob = match read_head(&path, if deep { PACK_SCAN } else { PACK_HEAD }) {
-        Ok(bytes) => bytes,
-        Err(error) => return ToolResult::fail(error),
+    // zip / APK 的中央目录与 EOCD 在文件末尾，读头部拿不到；对这类文件读整包
+    //（上限 PACK_SCAN），否则超过 8 MiB 的加固 APK 会漏掉壳 so 证据。
+    let is_zip = read_head(&path, 4)
+        .map(|bytes| bytes.as_slice() == b"PK\x03\x04")
+        .unwrap_or(false);
+    let blob = if is_zip {
+        match read_head(&path, PACK_SCAN) {
+            Ok(bytes) => bytes,
+            Err(error) => return ToolResult::fail(error),
+        }
+    } else {
+        match read_head(&path, if deep { PACK_SCAN } else { PACK_HEAD }) {
+            Ok(bytes) => bytes,
+            Err(error) => return ToolResult::fail(error),
+        }
     };
     let mut payload = detect_pack(&blob, size);
     payload["path"] = json!(path.display().to_string());
@@ -1297,6 +1635,16 @@ fn entropy(bytes: &[u8]) -> f64 {
 
 /// 纯函数：给一段内容判壳。`size` 是文件真实大小，只在算 overlay 时用到。
 pub fn detect_pack(blob: &[u8], size: u64) -> Value {
+    // APK 的壳证据全在文件名清单上（加固 so / assets 特征 / classes.dex 结构），
+    // 跟 PE 的「节名 + stub 特征串 + 结构信号」是两套逻辑，先按格式分派。
+    // 判断依据是中央目录里有没有 `AndroidManifest.xml` 条目——这比 `identify`
+    // 的「头部窗口里搜到文件名」可靠（真实 APK 的文件名在尾部中央目录，头部窗口搜不到）。
+    let is_apk = apk_entries(blob)
+        .map(|entries| entries.iter().any(|entry| entry.name == "AndroidManifest.xml"))
+        .unwrap_or(false);
+    if is_apk {
+        return detect_apk_pack(blob, size);
+    }
     let facts = pe_facts(blob);
     let empty = Vec::new();
     let sections = facts
@@ -2016,5 +2364,140 @@ mod tests {
         assert!(result.outcome.error.is_none(), "{}", result.outcome.text);
         assert!(result.outcome.text.contains("\"packed\": true"));
         assert!(result.outcome.text.contains("\"scannedBytes\""));
+    }
+
+    // ------------------------------------------------------------ APK 壳识别
+
+    /// 造一个能被 `apk_entries` 解析的最小 APK（zip）。
+    /// 只写中央目录与 EOCD，不写本地文件头——壳检测只读中央目录的文件名清单。
+    /// `entries` 是 `(文件名, 未压缩大小)`。
+    fn build_apk_zip(entries: &[(&str, u64)]) -> Vec<u8> {
+        // 文件头伪造出 `PK\x03\x04`，让 `identify` 能认成 apk（配合 AndroidManifest.xml 条目名）。
+        let mut bytes = vec![0u8; 512];
+        bytes[..4].copy_from_slice(b"PK\x03\x04");
+        // 在头部窗口里塞一个 AndroidManifest.xml 字样，让 identify 判定为 apk 而非 zip。
+        bytes[64..83].copy_from_slice(b"AndroidManifest.xml");
+
+        // 中央目录从 512 之后开始。
+        let mut cd = Vec::new();
+        let mut local = 0u32; // 本地头偏移，壳检测不读，填 0 即可。
+        for (name, size) in entries {
+            let name_bytes = name.as_bytes();
+            // 中央目录文件头：PK\x01\x02 + 46 字节结构。
+            cd.extend_from_slice(b"PK\x01\x02");
+            cd.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            cd.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            cd.extend_from_slice(&0u16.to_le_bytes()); // flags
+            cd.extend_from_slice(&0u16.to_le_bytes()); // method (store)
+            cd.extend_from_slice(&0u16.to_le_bytes()); // time
+            cd.extend_from_slice(&0u16.to_le_bytes()); // date
+            cd.extend_from_slice(&0u32.to_le_bytes()); // crc32
+            cd.extend_from_slice(&(*size as u32).to_le_bytes()); // compressed size
+            cd.extend_from_slice(&(*size as u32).to_le_bytes()); // uncompressed size
+            cd.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes()); // name len
+            cd.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            cd.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            cd.extend_from_slice(&0u16.to_le_bytes()); // disk number
+            cd.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            cd.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            cd.extend_from_slice(&local.to_le_bytes()); // local header offset
+            cd.extend_from_slice(name_bytes);
+            local += 1; // 占位推进，实际检测不读
+        }
+        let cd_offset = bytes.len() as u32;
+        let cd_size = cd.len() as u32;
+        bytes.extend_from_slice(&cd);
+
+        // EOCD。
+        let eocd_at = bytes.len();
+        bytes.extend_from_slice(b"PK\x05\x06");
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // cd start disk
+        bytes.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // entries on disk
+        bytes.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // total entries
+        bytes.extend_from_slice(&cd_size.to_le_bytes()); // cd size
+        bytes.extend_from_slice(&cd_offset.to_le_bytes()); // cd offset
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        debug_assert_eq!(eocd_at, cd_offset as usize + cd_size as usize);
+        bytes
+    }
+
+    #[test]
+    fn apk_entries_parses_central_directory() {
+        let bytes = build_apk_zip(&[
+            ("AndroidManifest.xml", 1024),
+            ("classes.dex", 4096),
+            ("lib/arm64-v8a/libjiagu.so", 2_000_000),
+        ]);
+        let entries = apk_entries(&bytes).unwrap();
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["AndroidManifest.xml", "classes.dex", "lib/arm64-v8a/libjiagu.so"]
+        );
+        assert_eq!(entries[2].uncompressed_size, 2_000_000);
+    }
+
+    #[test]
+    fn apk_pack_detects_360_by_so_name() {
+        let bytes = build_apk_zip(&[
+            ("AndroidManifest.xml", 1024),
+            ("classes.dex", 2048),
+            ("lib/arm64-v8a/libjiagu.so", 2_000_000),
+        ]);
+        let payload = detect_apk_pack(&bytes, bytes.len() as u64);
+        assert_eq!(payload["format"], "apk", "{payload}");
+        assert_eq!(payload["packed"], json!(true), "{payload}");
+        assert_eq!(payload["packers"][0]["name"], "360 加固", "{payload}");
+        assert_eq!(payload["packers"][0]["confidence"], "high", "{payload}");
+        assert_eq!(payload["signals"]["nativeLibCount"], json!(1));
+    }
+
+    #[test]
+    fn apk_pack_flags_dex_stub() {
+        // classes.dex 只有 4 KiB（stub），没有已知壳 so：走结构信号判私有/抽取壳。
+        let bytes = build_apk_zip(&[
+            ("AndroidManifest.xml", 1024),
+            ("classes.dex", 4096),
+            ("lib/arm64-v8a/libcustom.so", 1_500_000),
+        ]);
+        let payload = detect_apk_pack(&bytes, bytes.len() as u64);
+        assert_eq!(payload["packed"], json!(true), "{payload}");
+        assert_eq!(payload["signals"]["dexIsStub"], json!(true));
+        assert!(payload["verdict"].as_str().unwrap().contains("结构信号"), "{payload}");
+    }
+
+    #[test]
+    fn apk_pack_clears_a_normal_apk() {
+        let bytes = build_apk_zip(&[
+            ("AndroidManifest.xml", 4096),
+            ("classes.dex", 3_000_000),
+            ("classes2.dex", 1_000_000),
+            ("lib/arm64-v8a/libnative.so", 200_000),
+            ("resources.arsc", 50_000),
+        ]);
+        let payload = detect_apk_pack(&bytes, bytes.len() as u64);
+        assert_eq!(payload["packed"], json!(false), "{payload}");
+        assert_eq!(payload["confidence"], "none");
+        assert_eq!(payload["verdict"], "未发现加壳特征");
+        // 正常 app 的 classes.dex 不小，dexIsStub 应为 false。
+        assert_eq!(payload["signals"]["dexIsStub"], json!(false));
+    }
+
+    /// 真文件回归：真实 APK（未加固的 aerial-guard）不该被判成加固。
+    /// 手动跑：`cargo test --lib -- --ignored apk_pack_clears_a_real_apk`。
+    #[test]
+    #[ignore]
+    fn apk_pack_clears_a_real_apk() {
+        let path = Path::new("/Users/edwa2d4th/Desktop/未命名文件夹 7/aerial-guard.apk");
+        if !path.exists() {
+            return;
+        }
+        let size = std::fs::metadata(path).unwrap().len();
+        let bytes = read_head(path, PACK_SCAN).unwrap();
+        let payload = detect_pack(&bytes, size);
+        assert_eq!(payload["format"], "apk", "{payload}");
+        // aerial-guard 是普通 TV 管家，不应命中任何加固壳名。
+        assert_eq!(payload["packers"], json!([]), "{payload}");
     }
 }

@@ -858,6 +858,7 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
         list.extend(super::browser_tools::tools());
         list.extend(super::forensics::tools());
         list.extend(super::analysis::tools());
+        list.extend(super::dex::tools());
         list.extend(super::dag_tools::tools());
         list
     })

@@ -28,6 +28,7 @@ pub mod compact;
 pub mod config;
 pub mod context;
 pub mod dag_tools;
+pub mod dex;
 pub mod engine;
 pub mod forensics;
 pub mod guard;

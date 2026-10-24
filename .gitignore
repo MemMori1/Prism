@@ -18,3 +18,4 @@ release-artifacts/
 
 # 本地工作记忆（agent 上下文，因人而异）
 .workbuddy/
+.zcode/
