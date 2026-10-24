@@ -30,6 +30,11 @@ button {
   border: none;
   padding: 0;
   cursor: pointer;
+  /* 触控与可点性保底：任何按钮都不小于 20×20。
+     写了 height: 18px 的（插件开关那种）会被垫到 20px——宁可多 2px 余量，
+     也不留比指头还小的点击目标。组件要更小的尺寸请先把这层对齐再谈。 */
+  min-width: 20px;
+  min-height: 20px;
 }
 
 ::-webkit-scrollbar {

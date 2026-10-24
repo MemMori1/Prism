@@ -119,7 +119,15 @@
   font-size: 9.5px;
 }
 
+/* 按钮只有两档高度：行内 24（tiny 22）、块级 30；同一行里必须同高。
+   盒模型与居中方式统一写在这里——`button` 默认基线对齐，字号或内边距一变就会
+   上下跳一两个像素，看着像"按钮大小有时候不一样"。 */
 .ghost-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  box-sizing: border-box;
   height: 24px;
   padding: 0 8px;
   border: 1px solid var(--border);
@@ -127,6 +135,7 @@
   background: var(--panel-2);
   color: var(--muted);
   font-size: 10.5px;
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -150,6 +159,11 @@
 }
 
 .primary-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  box-sizing: border-box;
   width: 100%;
   height: 30px;
   padding: 0 12px;
@@ -159,6 +173,7 @@
   color: var(--accent-text);
   font-size: 11px;
   font-weight: 600;
+  line-height: 1;
 }
 
 .primary-btn.compact {
@@ -1377,10 +1392,23 @@
   line-height: 1.6;
 }
 
-/* 运行条上的次级按钮：和 header 的同名类不是一套尺寸，单独收窄 */
+/* 运行条 / 动作行里的次级按钮：小一号，但仍是独立一档（22px），
+   不靠缩 padding 假装变小——那样文字会往上偏。 */
 .ghost-btn.tiny {
-  padding: 2px 7px;
+  height: 22px;
+  padding: 0 7px;
   font-size: 10px;
+}
+
+/* 「放行 / 拒绝」这种一行里混主次的地方：高度统一 24，主次只靠颜色区分。
+   原来是 tiny(22) 挨着 primary(30)，一高一矮非常明显。 */
+.run-gate .ghost-btn,
+.run-gate .ghost-btn.tiny,
+.run-gate .primary-btn {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 10.5px;
+  line-height: 1;
 }
 
 .ghost-btn.danger {
