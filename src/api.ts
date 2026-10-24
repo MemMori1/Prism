@@ -32,6 +32,8 @@ import type {
   NativeModel,
   NativeProviderInput,
   PermissionRequest,
+  PhoneLinkStatus,
+  PhonePushEvents,
   PluginInfo,
   ProjectItem,
   QuotaSummary,
@@ -183,6 +185,18 @@ export const api = {
   routineRun: (id: string) => invoke<void>('routine_run', { id }),
   routineLogs: (id: string, limit?: number) =>
     invoke<RoutineLogEntry[]>('routine_logs', { id, limit: limit ?? null }),
+  phoneLinkStatus: () => invoke<PhoneLinkStatus>('phone_link_status'),
+  phoneLinkEnable: (enabled: boolean) =>
+    invoke<PhoneLinkStatus>('phone_link_enable', { enabled }),
+  phoneLinkPairRefresh: () => invoke<PhoneLinkStatus>('phone_link_pair_refresh'),
+  phoneLinkUnpair: () => invoke<PhoneLinkStatus>('phone_link_unpair'),
+  phoneLinkConfigSave: (patch: { engine?: string; webhookUrl?: string; events?: PhonePushEvents }) =>
+    invoke<PhoneLinkStatus>('phone_link_config_save', {
+      engine: patch.engine ?? null,
+      webhookUrl: patch.webhookUrl ?? null,
+      events: patch.events ?? null,
+    }),
+  phoneLinkWebhookTest: () => invoke<void>('phone_link_webhook_test'),
   usageSummary: (days: number) => invoke<UsageSummary>('usage_summary', { days }),
   quotaSummary: (force: boolean) => invoke<QuotaSummary>('quota_summary', { force }),
   trayStatus: (running: number, waiting: number) =>

@@ -25,6 +25,7 @@ import {
 import { friendlyUpdateError } from '../updateStatus'
 import { readTheme, setThemeMode, THEME_MODES, type ThemeMode } from '../theme'
 import ModelProviders from './ModelProviders.vue'
+import PhoneLink from './PhoneLink.vue'
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -613,6 +614,10 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
 
           <section v-show="activeSection === 'models'" class="settings-page">
             <ModelProviders @changed="emit('models-changed')" />
+          </section>
+
+          <section v-show="activeSection === 'phone'" class="settings-page">
+            <PhoneLink />
           </section>
 
           <section v-show="activeSection === 'engines'" class="settings-page">

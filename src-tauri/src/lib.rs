@@ -11,6 +11,7 @@ mod gitinfo;
 mod ipc;
 mod kernel;
 mod mcp_client;
+mod phone_link;
 mod plugins;
 mod routines;
 mod tasks;
@@ -109,6 +110,12 @@ pub fn run() {
             ipc::routine_delete,
             ipc::routine_run,
             ipc::routine_logs,
+            ipc::phone_link_status,
+            ipc::phone_link_enable,
+            ipc::phone_link_pair_refresh,
+            ipc::phone_link_unpair,
+            ipc::phone_link_config_save,
+            ipc::phone_link_webhook_test,
             ipc::tray_status,
             ipc::native_config,
             ipc::native_config_set,
@@ -144,6 +151,8 @@ pub fn run() {
                 // 外部工具：读 `~/.prism/mcp.json`，没配置就什么都不做。
                 Arc::new(plugins::McpTools),
                 Arc::new(plugins::Routines::new(app.handle().clone())),
+                // 手机链接：LAN 配对对话 + 微信 webhook 推送，回合走引擎注册表。
+                Arc::new(plugins::PhoneLink::new(app.handle().clone())),
                 // 编排的执行器：往注册表里登记 native，没有它「运行」会直接说不支持。
                 Arc::new(plugins::DagExecutorPlugin::new(app.handle().clone())),
                 // 外部引擎执行器：每个引擎一个开关，关掉某个不影响别的。

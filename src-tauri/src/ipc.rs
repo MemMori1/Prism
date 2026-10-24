@@ -27,6 +27,8 @@ use crate::engines::quota;
 use crate::engines::usage::{self, UsageSummary};
 use crate::engines::{mcp, workshop};
 use crate::files::{self, FileHit, GitBranches, GitSnapshot};
+use crate::phone_link;
+use crate::phone_link::store::PushEvents;
 use crate::routines::store::{RoutineDefinition, RoutineLogEntry, RoutineView};
 use crate::routines::{runner, scheduler::RoutinesState, store};
 use crate::tasks::{SpawnRequest, TaskInfo, TasksState};
@@ -1663,6 +1665,56 @@ pub async fn routine_logs(
 ) -> Result<Vec<RoutineLogEntry>, String> {
     let dir = store::logs_dir().ok_or_else(|| "无法定位 ~/.prism 数据目录".to_string())?;
     Ok(store::read_logs(&dir, &id, limit.unwrap_or(20)))
+}
+
+// ---------------------------------------------------------------- 手机链接（phone.link）
+
+/// 手机链接总状态：服务 / 配对 / 设备 / webhook 配置。
+#[tauri::command]
+pub async fn phone_link_status(app: tauri::AppHandle) -> Result<phone_link::StatusView, String> {
+    phone_link::status(&app)
+}
+
+/// 启用 / 停用（起停 LAN 服务；启用时生成新一轮配对码）。
+#[tauri::command]
+pub async fn phone_link_enable(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<phone_link::StatusView, String> {
+    phone_link::set_enabled(&app, enabled)
+}
+
+/// 刷新配对码（旧的作废；二维码随之更新）。
+#[tauri::command]
+pub async fn phone_link_pair_refresh(
+    app: tauri::AppHandle,
+) -> Result<phone_link::StatusView, String> {
+    phone_link::refresh_pairing(&app)
+}
+
+/// 解除配对（设备令牌作废，手机端下次请求即 401）。
+#[tauri::command]
+pub async fn phone_link_unpair(app: tauri::AppHandle) -> Result<phone_link::StatusView, String> {
+    phone_link::unpair(&app)
+}
+
+/// 保存增量配置（引擎 / webhook / 推送事件开关；webhook 留空 = 保持原值）。
+#[tauri::command]
+pub async fn phone_link_config_save(
+    app: tauri::AppHandle,
+    engine: Option<String>,
+    webhook_url: Option<String>,
+    events: Option<PushEvents>,
+) -> Result<phone_link::StatusView, String> {
+    phone_link::save_config(&app, engine, webhook_url, events)
+}
+
+/// 给配置的微信群发一条测试消息（webhook 最多挂 10s，丢到阻塞线程）。
+#[tauri::command]
+pub async fn phone_link_webhook_test(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || phone_link::webhook_test(&app))
+        .await
+        .map_err(|cause| cause.to_string())?
 }
 
 /// 托盘状态刷新：前端把「执行中 / 待审批」实时推给菜单栏（尽力而为，失败静默）。

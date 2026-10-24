@@ -26,6 +26,7 @@ use crate::engines::opencode::runtime::Runtime as OpencodeRuntime;
 use crate::engines::quota::QuotaState;
 use crate::kernel::{KernelCtx, Plugin};
 use crate::mcp_client::{self, ServerSpec, StdioClient};
+use crate::phone_link;
 use crate::routines::scheduler::{self, RoutinesState};
 use crate::tasks::TasksState;
 
@@ -254,6 +255,43 @@ impl Plugin for Routines {
         ctx.manage(RoutinesState::new());
         // 调度线程随进程退出而结束，没有需要单独回收的资源。
         scheduler::start(self.app.clone());
+        Ok(())
+    }
+}
+
+/// 手机链接：LAN 配对对话服务 + 企业微信 webhook 推送。
+///
+/// 与 routines 一样是「驱动引擎运行轴」的一方，所以声明依赖 `engine.host`。
+/// 起服失败（比如端口被占）只记日志不拦装配——设置页里能看到服务没在跑，
+/// 用户重新开关一次即可重试，不该让整个应用起不来。
+pub struct PhoneLink {
+    app: AppHandle,
+}
+
+impl PhoneLink {
+    pub fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl Plugin for PhoneLink {
+    fn id(&self) -> &'static str {
+        "phone.link"
+    }
+
+    fn requires(&self) -> &'static [&'static str] {
+        // 手机回合与权限答复都要按引擎名从注册表取 runtime。
+        &["engine.host"]
+    }
+
+    fn setup(&self, ctx: &mut KernelCtx<'_>) -> Result<(), String> {
+        ctx.manage(phone_link::PhoneLinkState::new());
+        // 配置里开着就随应用启动服务。
+        if let Err(error) = phone_link::boot(&self.app) {
+            eprintln!("[prism] 手机链接服务启动失败：{error}");
+        }
+        let app = self.app.clone();
+        ctx.on_shutdown(move || phone_link::shutdown(&app));
         Ok(())
     }
 }

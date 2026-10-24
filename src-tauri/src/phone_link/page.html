@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#151419">
+<title>Prism 手机链接</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+    background: #151419; color: #e8e6ef;
+    display: flex; flex-direction: column;
+  }
+  header {
+    flex: none; display: flex; align-items: center; gap: 8px;
+    padding: calc(env(safe-area-inset-top) + 12px) 16px 12px;
+    border-bottom: 1px solid #2a2833; background: #1a1822;
+  }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: #6d5ae6; }
+  header .dot.off { background: #8b8798; }
+  header .dot.busy { background: #d9a13c; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+  header b { font-size: 15px; font-weight: 600; }
+  header small { color: #8b8798; font-size: 11px; margin-left: auto; }
+  header button {
+    border: 1px solid #3a3745; background: transparent; color: #b6b2c4;
+    border-radius: 7px; padding: 4px 10px; font-size: 12px;
+  }
+  #log { flex: 1; overflow-y: auto; padding: 14px 14px 6px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 86%; padding: 9px 12px; border-radius: 12px; font-size: 14.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .msg.me { align-self: flex-end; background: #6d5ae6; color: #fff; border-bottom-right-radius: 4px; }
+  .msg.bot { align-self: flex-start; background: #23212c; border-bottom-left-radius: 4px; }
+  .msg.bot.err { background: #3a2430; color: #f2b8c6; }
+  .meta { align-self: center; color: #8b8798; font-size: 11px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .perm { align-self: stretch; background: #2b2438; border: 1px solid #4a3f66; border-radius: 12px; padding: 10px 12px; font-size: 13px; }
+  .perm .title { color: #d9c9ff; margin-bottom: 8px; word-break: break-all; }
+  .perm .acts { display: flex; gap: 8px; }
+  .perm button { flex: 1; padding: 7px 0; border-radius: 8px; border: 0; font-size: 13px; }
+  .perm .ok { background: #6d5ae6; color: #fff; }
+  .perm .no { background: transparent; border: 1px solid #4a4757; color: #b6b2c4; }
+  .perm.done { opacity: 0.55; }
+  footer {
+    flex: none; display: flex; gap: 8px; align-items: flex-end;
+    padding: 10px 12px calc(env(safe-area-inset-bottom) + 10px);
+    border-top: 1px solid #2a2833; background: #1a1822;
+  }
+  textarea {
+    flex: 1; resize: none; background: #23212c; color: #e8e6ef;
+    border: 1px solid #3a3745; border-radius: 12px; padding: 9px 12px;
+    font-size: 15px; font-family: inherit; line-height: 1.4; height: 42px; outline: none;
+  }
+  textarea:focus { border-color: #6d5ae6; }
+  footer button {
+    flex: none; width: 46px; height: 42px; border-radius: 12px; border: 0;
+    background: #6d5ae6; color: #fff; font-size: 15px;
+  }
+  footer button:disabled { opacity: 0.45; }
+  footer button.stop { background: #3a3745; }
+  #pair { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; }
+  #pair h2 { font-size: 17px; }
+  #pair p { color: #8b8798; font-size: 13px; line-height: 1.6; }
+  #pair .err { color: #f2b8c6; }
+</style>
+</head>
+<body>
+  <header id="bar" style="display:none">
+    <span class="dot" id="dot"></span>
+    <b>Prism</b>
+    <small id="engine"></small>
+    <button id="stop" style="display:none">停止</button>
+  </header>
+  <div id="log"></div>
+  <div id="pair">
+    <h2>正在配对…</h2>
+    <p id="pairText">正在向桌面端换取设备凭据。</p>
+  </div>
+  <footer id="foot" style="display:none">
+    <textarea id="input" rows="1" placeholder="给桌面 Agent 发消息…"></textarea>
+    <button id="send">↑</button>
+  </footer>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var log = $('log'), input = $('input'), send = $('send');
+  var TOKEN_KEY = 'prism-phone-token';
+  var token = localStorage.getItem(TOKEN_KEY) || '';
+  var seq = 0, running = false, currentBubble = null, turnFailed = false;
+
+  function auth() { return { 'Content-Type': 'application/json', 'X-Device-Token': token }; }
+
+  function esc(text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  function bubble(cls, text) {
+    var div = document.createElement('div');
+    div.className = 'msg ' + cls;
+    div.innerHTML = esc(text);
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    return div;
+  }
+
+  function meta(text) { bubble('meta', ''); log.lastChild.className = 'meta'; log.lastChild.textContent = text; }
+
+  // ---------- 配对 ----------
+  function pairPathToken() {
+    var match = location.pathname.match(/^\/p\/([0-9a-f]+)\/?$/);
+    return match ? match[1] : '';
+  }
+
+  function pair() {
+    var pathToken = pairPathToken();
+    if (token && !pathToken) { start(); return; }
+    if (!pathToken) {
+      $('pairText').innerHTML = '请用桌面端「设置 → 手机链接」的二维码重新扫码。<span class="err">（链接里没有配对码）</span>';
+      return;
+    }
+    fetch('/api/pair', { method: 'POST', headers: auth(), body: JSON.stringify({ token: pathToken }) })
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (result) {
+        if (!result.ok) {
+          if (token) { start(); return; } // 已配过对：旧凭据也许还有效，直接试
+          $('pairText').innerHTML = '<span class="err">' + esc(result.data.error || '配对失败') + '</span><br>请用桌面端刷新后的二维码重新扫码。';
+          return;
+        }
+        token = result.data.deviceToken;
+        localStorage.setItem(TOKEN_KEY, token);
+        history.replaceState(null, '', '/');
+        start();
+      })
+      .catch(function () {
+        $('pairText').innerHTML = '<span class="err">连不上桌面端</span><br>确认手机和电脑在同一个 Wi-Fi，且桌面端已启用手机链接。';
+      });
+  }
+
+  // ---------- 对话 ----------
+  function setRunning(value) {
+    running = value;
+    $('dot').className = 'dot' + (running ? ' busy' : '');
+    $('send').textContent = running ? '■' : '↑';
+    $('send').className = running ? 'stop' : '';
+    $('stop').style.display = running ? '' : 'none';
+  }
+
+  function start() {
+    $('pair').style.display = 'none';
+    $('bar').style.display = '';
+    $('foot').style.display = '';
+    setRunning(false);
+    poll();
+  }
+
+  function poll() {
+    fetch('/api/events?since=' + seq, { headers: auth() })
+      .then(function (res) {
+        if (res.status === 401) {
+          localStorage.removeItem(TOKEN_KEY);
+          location.reload();
+          throw new Error('reauth');
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        (data.events || []).forEach(handle);
+        seq = data.latest || seq;
+        poll();
+      })
+      .catch(function (error) {
+        if (error.message === 'reauth') return;
+        meta('连接断开，3 秒后重连…');
+        setTimeout(poll, 3000);
+      });
+  }
+
+  function handle(event) {
+    if (event.type === 'status') { setRunning(true); return; }
+    if (event.type === 'delta') {
+      if (!currentBubble) currentBubble = bubble('bot', '');
+      currentBubble.textContent += event.data.text;
+      log.scrollTop = log.scrollHeight;
+      return;
+    }
+    if (event.type === 'tool') {
+      meta('⚙ ' + event.data.name);
+      return;
+    }
+    if (event.type === 'permission') { addPermission(event.data.id, event.data.title); return; }
+    if (event.type === 'permission_done') { resolvePermission(event.data.id); return; }
+    if (event.type === 'turn_end') {
+      setRunning(false);
+      if (currentBubble) {
+        if (event.data.text) currentBubble.textContent = event.data.text;
+        if (event.data.error || event.data.status === 'failed' || event.data.status === 'timeout') {
+          currentBubble.className = 'msg bot err';
+          currentBubble.textContent = (event.data.text ? event.data.text + '\n\n' : '') + (event.data.error || '这轮没有跑完');
+        }
+        currentBubble = null;
+      } else if (event.data.error) {
+        bubble('bot err', event.data.error);
+      }
+      meta('— ' + event.data.status + ' —');
+      return;
+    }
+  }
+
+  function addPermission(id, title) {
+    var card = document.createElement('div');
+    card.className = 'perm';
+    card.dataset.id = id;
+    card.innerHTML = '<div class="title">🔐 ' + esc(title || '权限请求') + '</div>' +
+      '<div class="acts"><button class="ok">本次允许</button><button class="no">拒绝</button></div>';
+    card.querySelector('.ok').onclick = function () { answer(id, card, 'once'); };
+    card.querySelector('.no').onclick = function () { answer(id, card, 'reject'); };
+    log.appendChild(card);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function resolvePermission(id) {
+    var card = log.querySelector('.perm[data-id="' + id + '"]');
+    if (card) { card.classList.add('done'); var acts = card.querySelector('.acts'); if (acts) acts.remove(); }
+  }
+
+  function answer(id, card, decision) {
+    fetch('/api/permission', { method: 'POST', headers: auth(), body: JSON.stringify({ id: id, decision: decision }) })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data.error) { bubble('bot err', data.error); return; }
+        resolvePermission(id);
+        meta(decision === 'reject' ? '已拒绝' : '已允许（本次）');
+      });
+  }
+
+  function submit() {
+    var text = input.value.trim();
+    if (!text || running) return;
+    input.value = '';
+    input.style.height = '42px';
+    bubble('me', text);
+    currentBubble = null;
+    setRunning(true);
+    fetch('/api/message', { method: 'POST', headers: auth(), body: JSON.stringify({ text: text }) })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data.error) { bubble('bot err', data.error); setRunning(false); }
+      })
+      .catch(function () { bubble('bot err', '发送失败，检查网络'); setRunning(false); });
+  }
+
+  send.onclick = function () { if (running) { fetch('/api/interrupt', { method: 'POST', headers: auth() }); } else { submit(); } };
+  $('stop').onclick = function () { fetch('/api/interrupt', { method: 'POST', headers: auth() }); };
+  input.addEventListener('input', function () {
+    input.style.height = '42px';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  });
+  input.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); }
+  });
+
+  pair();
+})();
+</script>
+</body>
+</html>

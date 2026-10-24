@@ -366,6 +366,37 @@ export interface RoutineEventPayload {
   requestId: string | null
 }
 
+/** 手机链接：推送事件开关（对应 Rust `store::PushEvents`）。 */
+export interface PhonePushEvents {
+  onDone: boolean
+  onPermission: boolean
+  onError: boolean
+}
+
+/** 手机链接总状态（对应 Rust `phone_link::StatusView`）。 */
+export interface PhoneLinkStatus {
+  enabled: boolean
+  engine: string
+  serverRunning: boolean
+  port: number
+  lanIp: string | null
+  pairing: { expiresAt: number } | null
+  qrSvg: string | null
+  pairUrl: string | null
+  device: { name: string; pairedAt: number; lastSeenAt: number } | null
+  webhookConfigured: boolean
+  webhookHint: string | null
+  events: PhonePushEvents
+  chatRunning: boolean
+  sessionId: string | null
+}
+
+/** 手机链接事件（配对 / 解绑 / 回合收口）。 */
+export interface PhoneLinkEventPayload {
+  kind: 'paired' | 'unpaired' | 'turn' | 'device-active'
+  detail: unknown
+}
+
 /** 跨引擎用量：token 分项（各列口径互不重叠，可直接相加）。 */
 export interface TokenTotals {
   input: number

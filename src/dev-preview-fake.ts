@@ -20,6 +20,8 @@ import type {
   DagPlan,
   DagRun,
   DagSummary,
+  PhoneLinkStatus,
+  PhonePushEvents,
   PluginInfo,
   SessionSummary,
 } from './types'
@@ -1022,6 +1024,25 @@ function startRun(plan: DagPlan): DagRun {
   return run
 }
 
+// 手机链接（phone.link）：静态样例。qrSvg 给一张 1×1 占位 SVG，结构一致即可。
+const phoneLinkStatus: PhoneLinkStatus = {
+  enabled: true,
+  engine: 'opencode',
+  serverRunning: true,
+  port: 15211,
+  lanIp: '192.168.1.5',
+  pairing: { expiresAt: Date.now() + 120_000 },
+  qrSvg:
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 21 21" shape-rendering="crispEdges"><rect width="21" height="21" fill="#ffffff"/><path d="M2 2h3v3H-1zM16 2h3v3h-3zM2 16h3v3H2zM7 2h1v1H7zM9 3h1v1H9zM11 2h1v1h-1zM13 4h1v1h-1zM2 7h1v1H2zM4 9h1v1H4zM3 11h1v1H3zM5 13h1v1H5zM8 8h1v1H8zM10 10h1v1h-1zM12 9h1v1h-1zM14 11h1v1h-1zM9 13h1v1H9zM11 15h1v1h-1zM13 13h1v1h-1zM15 15h1v1h-1zM16 8h3v3h-3zM7 16h1v1H7zM9 17h1v1H9zM12 16h1v1h-1zM14 18h1v1h-1zM16 12h1v1h-1z" fill="#000000"/></svg>',
+  pairUrl: 'http://192.168.1.5:15211/p/fake-pairing-token',
+  device: null,
+  webhookConfigured: false,
+  webhookHint: null,
+  events: { onDone: true, onPermission: true, onError: true },
+  chatRunning: false,
+  sessionId: null,
+}
+
 const invoke: Invoke = async (cmd, args = {}) => {
   calls[cmd] = (calls[cmd] ?? 0) + 1
   // 真 listen() 走这个命令：把 handler 记下来，脚本里用 __emitEngine 推事件。
@@ -1417,6 +1438,29 @@ index 1a2b3c4..5d6e7f8 100644
       return null
     case 'routines_list':
       return []
+    // 手机链接（phone.link 插件）：静态状态样例，启用态配对码永远有效（不倒计时过期）。
+    case 'phone_link_status':
+    case 'phone_link_pair_refresh':
+      return phoneLinkStatus
+    case 'phone_link_enable':
+      phoneLinkStatus.enabled = Boolean(args.enabled)
+      phoneLinkStatus.serverRunning = Boolean(args.enabled)
+      return { ...phoneLinkStatus }
+    case 'phone_link_unpair':
+      phoneLinkStatus.device = null
+      return { ...phoneLinkStatus }
+    case 'phone_link_config_save':
+      if (typeof args.engine === 'string') phoneLinkStatus.engine = args.engine
+      if (typeof args.webhookUrl === 'string' && args.webhookUrl) {
+        phoneLinkStatus.webhookConfigured = true
+        phoneLinkStatus.webhookHint = `…${args.webhookUrl.slice(-4)}`
+      }
+      if (args.events && typeof args.events === 'object') {
+        phoneLinkStatus.events = { ...phoneLinkStatus.events, ...(args.events as object) } as PhonePushEvents
+      }
+      return { ...phoneLinkStatus }
+    case 'phone_link_webhook_test':
+      return null
     case 'workshop_assets':
       // 一个技能样张：内容里有注入 + 危险命令，用来验「加载前拦截」的提示卡。
       return [

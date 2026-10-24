@@ -6,6 +6,7 @@ export type SettingsSectionId =
   | 'models'
   | 'engines'
   | 'channels'
+  | 'phone'
   | 'intelligence'
   | 'extensions'
   | 'permissions'
@@ -75,6 +76,17 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
       'M15 8V5',
       'M7 8h10v4a5 5 0 0 1-10 0V8Z',
       'M12 17v4',
+    ],
+  },
+  {
+    id: 'phone',
+    label: '手机链接',
+    title: '手机链接',
+    description: '扫码把手机连上桌面 Agent，任务进展推送到微信。',
+    icon: [
+      'M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z',
+      'M10.5 18.5h3',
+      'M9 3v1.5a1.5 1.5 0 0 0 1.5 1.5h3A1.5 1.5 0 0 0 15 4.5V3',
     ],
   },
   {
