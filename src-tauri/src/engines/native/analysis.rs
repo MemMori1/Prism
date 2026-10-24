@@ -83,6 +83,7 @@ fn static_tool(
             network: Network::None,
             sandbox: None,
             scope: ToolScope::Any,
+            needs: &[],
         },
         run,
     )
@@ -548,8 +549,18 @@ fn locate(regions: &[Region], offset: u64) -> (Option<&str>, Option<u64>) {
     (None, None)
 }
 
+/// 文件偏移 → (段名, 虚拟地址)。PE / ELF 可映射，其他格式返回 `(None, None)`。
+///
+/// `bin.crypto.hash_identify` 用它把"常量在第几字节"变成"常量在哪个函数里"。
+/// 映射不上就如实留空，不按函数大小瞎猜。
+pub(crate) fn map_offset(head: &[u8], offset: u64) -> (Option<String>, Option<u64>) {
+    let regions = regions(head);
+    let (name, va) = locate(&regions, offset);
+    (name.map(str::to_string), va)
+}
+
 /// 按首字节过滤的全量搜索。比逐窗口 `position` 快，也不引新依赖。
-fn find_all(haystack: &[u8], needle: &[u8], limit: usize) -> (Vec<usize>, bool) {
+pub(crate) fn find_all(haystack: &[u8], needle: &[u8], limit: usize) -> (Vec<usize>, bool) {
     let mut hits = Vec::new();
     if needle.is_empty() || haystack.len() < needle.len() {
         return (hits, false);
@@ -1061,7 +1072,10 @@ fn run_import_export(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
 
 /// 已知常量。用前 16-32 字节做指纹即可，不必比整表：
 /// 命中一段连续常量已经足够可疑，而全表比对会把大样本的扫描时间拖长。
-const SIGNATURES: &[(&str, &[u8], &str, &str)] = &[
+///
+/// `bin.crypto.scan` 与 `bin.crypto.hash_identify` 共用这一张表：前者报
+/// "样本里有 SHA-256 常量"，后者负责归到函数、看有没有循环。
+pub(crate) const SIGNATURES: &[(&str, &[u8], &str, &str)] = &[
     (
         "aes-sbox",
         &[
@@ -1103,6 +1117,35 @@ const SIGNATURES: &[(&str, &[u8], &str, &str)] = &[
         ],
         "SHA-1 初始向量",
         "high",
+    ),
+    // SHA-512 的 IV / K 按内存字节序（小端）匹配：x86/ARM 上编译器把
+    // 64 位常量按小端存成连续表，按大端写会一个都命中不了。
+    (
+        "sha512-iv",
+        &[
+            0x08, 0xc9, 0xbc, 0xf3, 0x67, 0xe6, 0x09, 0x6a, 0x3b, 0xa7, 0xca, 0x84, 0x85, 0xae,
+            0x67, 0xbb,
+        ],
+        "SHA-512 初始向量",
+        "high",
+    ),
+    (
+        "sha512-iv-be",
+        &[
+            0x6a, 0x09, 0xe6, 0x67, 0xf3, 0xbc, 0xc9, 0x08, 0xbb, 0x67, 0xae, 0x85, 0x84, 0xca,
+            0xa7, 0x3b,
+        ],
+        "SHA-512 初始向量（大端字节序）",
+        "high",
+    ),
+    (
+        "sha512-k",
+        &[
+            0x22, 0xae, 0x28, 0xd7, 0x98, 0x2f, 0x8a, 0x42, 0xcd, 0x65, 0xef, 0x23, 0x91, 0x44,
+            0x37, 0x71,
+        ],
+        "SHA-512 轮常量",
+        "medium",
     ),
     (
         "md5-iv",

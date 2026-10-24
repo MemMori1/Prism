@@ -460,6 +460,7 @@ fn register_server_tools(server: &str, spec: &ServerSpec, client: Arc<StdioClien
                 network: tools::Network::Outbound,
                 sandbox: None,
                 scope: tools::ToolScope::Any,
+                needs: &[],
             },
             run: ToolImpl::Boxed(run),
         };

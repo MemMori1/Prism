@@ -6,6 +6,7 @@ import type {
   AssetFile,
   AssetItem,
   BackgroundTask,
+  BackendView,
   BrowserSnapshot,
   ChangeReport,
   ContextStats,
@@ -228,6 +229,14 @@ export const api = {
     invoke<NativeConfigView>('native_tool_toggle', { name, enabled }),
   /** 工具清单：内置 + 插件运行时注册的外部工具。 */
   toolList: () => invoke<ToolView[]>('tool_list'),
+  /** 外部程序后端：当前状态（没探过的会被探一次）。 */
+  toolchainList: () => invoke<BackendView[]>('toolchain_list'),
+  /** 重新探测一个后端；不传 = 全部。 */
+  toolchainProbe: (id?: string | null) =>
+    invoke<BackendView[]>('toolchain_probe', { id: id ?? null }),
+  /** 手动指定路径；`path` 为空 = 恢复自动探测。 */
+  toolchainSetPath: (id: string, path?: string | null) =>
+    invoke<BackendView[]>('toolchain_set_path', { id, path: path ?? null }),
   nativeModelsFetch: (input: {
     providerId?: string | null
     baseUrl?: string | null

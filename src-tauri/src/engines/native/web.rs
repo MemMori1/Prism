@@ -64,6 +64,7 @@ pub fn tools() -> Vec<std::sync::Arc<ToolDef>> {
             network: Network::Outbound,
             sandbox: None,
             scope: ToolScope::Any,
+            needs: &[],
         },
         run_fetch,
     )]

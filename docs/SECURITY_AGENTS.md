@@ -236,14 +236,14 @@ pub struct ArtifactRef {
 | 样本预处理 | `bin.hash.compute` | md5 / sha1 / sha256 | 只读 / 低 | 哈希清单 | ✅ 已实现 |
 | 样本预处理 | `bin.strings.extract` | ASCII/UTF-16 字符串 + 可疑标记（IP/URL/路径/cmd） | 只读 / 低 | strings JSON | ✅ 已实现 |
 | 样本预处理 | `bin.pack.detect` | UPX / VMProtect / Themida / ConfuserEx / 加固厂商等 38 条规则 + 节表结构信号 | 只读 / 低 | 壳名 + 置信度 + 证据偏移 | ✅ 已实现（`forensics.rs::detect_pack`） |
-| 脱壳 | `bin.unpack.upx` | UPX 自动解压 | 写临时区 / 中 | 新二进制 + parent | ⬜ 需本机装 `upx` |
+| 脱壳 | `bin.unpack.upx` | UPX 自动解压（`-t` 预检、不 `--force`、产物带 parent） | 只读 / 低 | 新二进制 + parent | ✅ 已实现（后端探测 + 执行契约；需本机装 `upx`） |
 | 脱壳 | `bin.unpack.dumper` | 沙箱内 dump 脱壳 | `bin:dyn-sandbox` / 高 | 新二进制 + parent | ⬜ 需沙箱 |
 | 脱壳 | `bin.dotnet.deobfuscate` | .NET 反混淆导出 IL | 写 / 中 | IL | ⬜ 需 dnlib / ILSpy |
 | 静态分析 | `bin.ghidra.analyze` | Ghidra headless 自动分析 | 只读 / 中 | 项目归档 + 函数索引 | ⬜ 需 Ghidra |
 | 静态分析 | `bin.ghidra.decompile_func` | 按需反编译单函数 | 只读 / 中 | 单函数伪 C | ⬜ 需 Ghidra |
 | 静态分析 | `bin.xref.search` | 交叉引用检索 | 只读 / 低 | 引用地址列表 | ✅ 已实现（带段与 VA 换算） |
 | 静态分析 | `bin.importexport.list` | IAT/EAT + 高危 API 标记 | 只读 / 低 | 高危 API 清单 | ✅ 已实现（PE IAT/EAT + ELF 动态符号） |
-| 静态分析 | `bin.radare2.scan` | 轻量 opcode / 函数边界扫描 | 只读 / 中 | 扫描报告 | ⬜ 需 radare2 |
+| 静态分析 | `bin.radare2.scan` | 轻量 opcode / 函数边界扫描 | 只读 / 中 | 扫描报告 | ✅ 已实现（后端探测 + `ProgramIndex` IR；需本机装 `radare2`） |
 | 密码分析 | `bin.crypto.signature_scan` | AES S 盒 / RC4 表 / RSA 模数特征 | 只读 / 中 | 算法 + 地址 | ✅ 已实现（`bin.crypto.scan`） |
 | 密码分析 | `bin.crypto.xor_brute` | 单/多字节 XOR 爆破 | 只读 / 中 | 密钥 + 解密结果 | ✅ 已实现（1..16 字节密钥，按已知明文反推） |
 | 密码分析 | `bin.crypto.asn1.parse` | PEM/DER 证书与密钥解析 | 只读 / 低 | 密钥信息 | ✅ 已实现（X.509 / PKCS#7 / RSA / EC / PKCS#8） |
@@ -261,19 +261,20 @@ pub struct ArtifactRef {
 | 通用支撑 | `bin.yara.rule_gen` | 自动生成 yara 规则 | 写 / 低 | 规则集 | ⬜ P3 |
 | 通用支撑 | `bin.report.rev` | 逆向报告渲染 | 只读 / 低 | 报告 artifact | ⬜ P3（现由 `sec-assist` 工种代劳） |
 
-**这张表 28 行，已实现 11 行**（其中 2 行合并成一个工具）。另外还落地了表里没有的
+**这张表 28 行，已实现 13 行**（其中 2 行合并成一个工具）。另外还落地了表里没有的
 **7 个 Planner 工具**（`prism.dag.*`，见 `engines/native/dag_tools.rs`），
-所以本机可用的领域工具是 **9 个 `bin.*` + 2 个 `prism.artifact.*` + 7 个 `prism.dag.*` = 18 个**。
+所以本机可用的领域工具是 **11 个 `bin.*` + 2 个 `prism.artifact.*` + 7 个 `prism.dag.*` = 20 个**
+（`bin.unpack.upx` 要本机装了 `upx`、`bin.radare2.scan` 要装了 `radare2`，才会出现在模型清单里）。
 
 白名单是给工种配能力的，但**自省工具 `tools.list` 不参与裁剪**：它回答"我现在有什么"，
 被白名单剪掉就等于让模型在被裁剪之后失去自查手段——恰好是最需要它的时候用不上。
 `deny` 显式拒绝仍然优先。模型不确定某个 `bin.*` 是否可用时先调它，比猜工具名划算。
 
-剩下 17 行不是"没写"，是**卡在环境依赖**上，分三类：
+剩下 15 行不是"没写"，是**卡在环境依赖**上，分三类：
 
 | 依赖 | 涉及条目 | 说明 |
 |---|---|---|
-| 外部程序（装了就能接） | Ghidra ×2、radare2、upx、dnlib | 走 CLI / MCP，Prism 侧只负责调用与产物落盘 |
+| 外部程序（装了就能接） | Ghidra ×2、radare2、dnlib | 探测 / 执行 / 产物三层已落地（`backends/`）；upx 已接通，其余只差各自的后端适配 |
 | 系统级隔离 | `bin.dyn.*` ×4、`unpack.dumper`、`vm.detect` | 没有真沙箱就不该跑样本，`dynamic-sandbox` 工种现在明确写「本机没有隔离」 |
 | 需要反汇编基础设施 | `cfg.extract`、`crypto.hash_identify`、`text.extract` | 都是 Ghidra 的下游，先有反汇编才有它们 |
 

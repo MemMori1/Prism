@@ -96,6 +96,7 @@ fn dag_tool(
             network: Network::None,
             sandbox: None,
             scope: ToolScope::Dag,
+            needs: &[],
         },
         run,
     )

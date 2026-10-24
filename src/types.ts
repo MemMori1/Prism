@@ -620,6 +620,29 @@ export interface ToolView {
   network: string
   /** code | malware */
   sandbox: string | null
+  /** 外部依赖没接上时的原因；null = 依赖齐全。 */
+  needs: string | null
+}
+
+/** 外部程序后端（upx / radare2 / Ghidra / .NET 工具链）的探测结果。 */
+export interface BackendView {
+  id: string
+  name: string
+  /** ready | missing | too-old | broken | unknown */
+  state: string
+  path: string | null
+  version: string | null
+  /** 最低版本要求；null = 不比版本。 */
+  minVersion: string | null
+  /** override | env | path | known-dir | unknown */
+  source: string
+  note: string | null
+  /** 一句可复制的安装指引。 */
+  install: string
+  /** 受它影响的工具（内部名）。 */
+  tools: string[]
+  /** 用户是否手动指定过路径。 */
+  overridden: boolean
 }
 
 /** 新增 / 编辑一个模型服务；`apiKey` 留空 = 沿用已存的密钥。 */

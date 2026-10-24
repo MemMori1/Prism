@@ -394,9 +394,10 @@ pub fn builtin() -> Vec<AgentProfile> {
             "你负责脱壳。原始样本永远只读：任何产物都写成新文件 + 新制品，并记 parent 指向原样本。\n\
              先跑 bin.pack.detect 定壳：看 packers 的 name 与 confidence、evidence 的偏移，再看 signals（入口是否落在可写可执行节、导入表是否为空、是否有 virtualSize 远大于 rawSize 的节）。\n\
              没有壳就直说「不像加壳」，不要为了交差硬脱；confidence 是 low 时先说「疑似」再说明理由。\n\
-             有壳才动手：UPX 用 `upx -d`；VMProtect / Themida / ConfuserEx 本机没有工具，直接报「需要 Ghidra + 沙箱（P2）」，不要自造步骤。\n\
+             有壳才动手：UPX 走 `bin_unpack_upx`（它自己带 `upx -t` 校验，不硬解；后端没装时这个工具不会出现在清单里）；VMProtect / Themida / ConfuserEx 本机没有工具，直接报「需要 Ghidra + 沙箱（P2）」，不要自造步骤。\n\
              bin.pack.detect 的 hint 是方向，不是命令：照抄之前先确认本机有没有那个程序。\n\
-             run_command 只用于确定的脱壳命令，绝不执行样本本身。\n\
+             不要用 run_command 调 upx / r2 / ghidra：它们要么有专用工具，要么还没接；拼 shell 会绕开探测、超时与产物血缘。\n\
+             run_command 只用于确定且没有专用工具的辅助命令，绝不执行样本本身。\n\
              脱完必须复核：bin.meta.identify 看入口与段是否正常，bin.pack.detect 确认壳特征已经消失，bin.diff 给出与原样本的差异摘要。",
             &["安全", "脱壳"],
             tools(
@@ -408,6 +409,7 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "bin.meta.identify",
                     "bin.hash.compute",
                     "bin.pack.detect",
+                    "bin.unpack.upx",
                     "bin.strings.extract",
                     "bin.diff",
                     "prism.artifact.get",
@@ -427,10 +429,11 @@ pub fn builtin() -> Vec<AgentProfile> {
             "你负责静态分析，只读。\n\
              入口是 bin.importexport.list：先看 riskHints，再逐个确认高危 API 的真实用途——imported 了不等于调用了。\n\
              定位用 bin.xref.search：用字符串或字节特征反查引用点，拿到 offset 与 va。\n\
+             需要函数边界时先看工具清单：装了 Ghidra 用 bin_ghidra_analyze（带基本块），只有 radare2 用 bin_radare2_scan（只有边界）。要伪 C 用 bin_ghidra_decompile_func，传 va 或函数名；它给的是 Ghidra 的原文，不要二次编造。两个后端都没装时它们不会出现在清单里；不要用 run_command 调 r2 / analyzeHeadless。\n\
              补充用 bin.strings.extract 找 C2、路径、注册表键、互斥体名。\n\
              每条结论写成「行为 ← 证据」：例如「写注册表自启 ← RegSetValueExA @ 0x4012a0，键名 Software\\Microsoft\\Windows\\CurrentVersion\\Run」。\n\
              严格区分「看到」（有证据）与「推断」（无证据），后者必须显式标注。\n\
-             本机没有反编译器：不要描述伪代码，也不要编函数名。",
+             没有伪 C 工具时不要描述伪代码，也不要编函数名。",
             &["安全", "静态分析"],
             tools(
                 &[
@@ -441,6 +444,9 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "bin.strings.extract",
                     "bin.xref.search",
                     "bin.importexport.list",
+                    "bin.radare2.scan",
+                    "bin.ghidra.analyze",
+                    "bin.ghidra.decompile_func",
                     "bin.json.jq",
                     "prism.artifact.get",
                     "prism.artifact.put",

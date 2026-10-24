@@ -11,6 +11,7 @@ import { api } from '../api'
 import type {
   AssetItem,
   AssetKind,
+  BackendView,
   DshPermissionView,
   EngineHealth,
   McpServer,
@@ -71,6 +72,15 @@ const tools = ref<ToolView[]>([])
 const toolError = ref<string | null>(null)
 /** 正在保存开关的工具名：只锁那一行，别的行照常可点。 */
 const toolSaving = ref<string | null>(null)
+
+/** 外部程序后端（upx / r2 / Ghidra）：探测结果只在本次进程内有效。 */
+const backends = ref<BackendView[]>([])
+const toolchainError = ref<string | null>(null)
+/** 正在重探的后端 id（`*` = 全部）：只锁按钮，不锁整页。 */
+const probing = ref<string | null>(null)
+/** 正在手填路径的后端 id；null = 没有在编辑。 */
+const editingBackend = ref<string | null>(null)
+const draftPath = ref('')
 
 type UpdatePhase = 'idle' | 'checking' | 'latest' | 'available' | 'downloading' | 'ready' | 'error'
 const updatePhase = ref<UpdatePhase>('idle')
@@ -294,6 +304,60 @@ async function loadTools() {
   }
 }
 
+async function loadBackends() {
+  toolchainError.value = null
+  try {
+    backends.value = await api.toolchainList()
+  } catch (cause) {
+    toolchainError.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+/** 重探一个后端（或全部）。探测要起进程读版本，按钮期间只锁这一行。 */
+async function probeBackend(id?: string) {
+  if (probing.value) return
+  probing.value = id ?? '*'
+  toolchainError.value = null
+  try {
+    backends.value = await api.toolchainProbe(id ?? null)
+    // 后端从"没装"变成"装好了"，工具清单也会跟着变。
+    await loadTools()
+  } catch (cause) {
+    toolchainError.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    probing.value = null
+  }
+}
+
+function startEdit(backend: BackendView) {
+  editingBackend.value = backend.id
+  draftPath.value = backend.path ?? ''
+}
+
+/** 保存手填路径。空字符串 = 恢复自动探测（等价于点「自动」）。 */
+async function savePath(id: string) {
+  const path = draftPath.value.trim()
+  editingBackend.value = null
+  toolchainError.value = null
+  try {
+    backends.value = await api.toolchainSetPath(id, path || null)
+    await loadTools()
+  } catch (cause) {
+    toolchainError.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+async function resetPath(id: string) {
+  editingBackend.value = null
+  toolchainError.value = null
+  try {
+    backends.value = await api.toolchainSetPath(id, null)
+    await loadTools()
+  } catch (cause) {
+    toolchainError.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
 /**
  * 翻一个工具的开关。
  *
@@ -351,8 +415,56 @@ function toolTitle(tool: ToolView) {
   const sandbox = tool.sandbox ? SANDBOX_LABEL[tool.sandbox] : null
   if (sandbox) parts.push(sandbox)
   if (tool.tags.length) parts.push(`标签 ${tool.tags.join(' ')}`)
+  // 后端没接上时，模型根本看不到这个工具——这里说清是"机器缺件"而不是"你关了它"。
+  if (tool.needs) parts.push(tool.needs)
   parts.push(tool.enabled ? '已开启' : '已关闭')
   return parts.join(' · ')
+}
+
+/** 后端状态的界面说法；未知值原样透出，后端加状态时前端不必同步改。 */
+const BACKEND_STATE: Record<string, { label: string; tone: string }> = {
+  ready: { label: '已就绪', tone: 'ok' },
+  missing: { label: '未检测到', tone: 'error' },
+  'too-old': { label: '版本太低', tone: 'warn' },
+  broken: { label: '跑不起来', tone: 'error' },
+  unknown: { label: '未探测', tone: 'muted' },
+}
+
+function backendStateLabel(backend: BackendView) {
+  return BACKEND_STATE[backend.state]?.label ?? backend.state
+}
+
+function backendTone(backend: BackendView) {
+  return BACKEND_STATE[backend.state]?.tone ?? 'muted'
+}
+
+/** 路径是从哪儿来的：用户指定 / 环境变量 / PATH / 常见安装位。 */
+const SOURCE_LABEL: Record<string, string> = {
+  override: '手动指定',
+  env: '环境变量',
+  path: 'PATH',
+  'known-dir': '常见安装位',
+}
+
+/**
+ * 一行说明：就绪报版本与路径，缺件报安装指引，坏掉报原因。
+ *
+ * 三种状态用同一行位置，扫视时不用换行找重点。
+ */
+function backendHint(backend: BackendView) {
+  if (backend.state === 'ready') {
+    const version = backend.version ? `v${backend.version}` : '版本未知'
+    const source = SOURCE_LABEL[backend.source]
+    return `${version}${source ? ` · 来自${source}` : ''}${backend.path ? ` · ${backend.path}` : ''}`
+  }
+  if (backend.state === 'too-old') {
+    const need = backend.minVersion ? `，至少要 ${backend.minVersion}` : ''
+    return `检测到 ${backend.version ?? '未知版本'}${need}。升级：${backend.install}`
+  }
+  if (backend.state === 'broken') {
+    return `${backend.note ?? '跑起来了但读不到版本'}。装好依赖后点「重新检测」。`
+  }
+  return backend.install || '没有登记安装指引。'
 }
 
 async function checkForUpdate() {
@@ -430,6 +542,7 @@ onMounted(() => {
   void loadPrismVersion()
   void loadWorkshop()
   void loadTools()
+  void loadBackends()
   window.addEventListener('keydown', onKeydown)
 })
 
@@ -897,8 +1010,100 @@ function statusOf(item: EngineHealth | null): { label: string; tone: string } {
                         <span class="tool-chip-dot" :class="`risk-${tool.risk || 'read'}`" />
                       </span>
                       <span class="tool-chip-blurb">{{ tool.description || '没有写说明' }}</span>
+                      <span v-if="tool.needs" class="tool-chip-need">{{ tool.needs }}</span>
                       <span v-if="tool.tags.length" class="tool-chip-tag">{{ tool.tags.join(' · ') }}</span>
                     </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section v-show="activeSection === 'toolchain'" class="settings-page">
+            <div class="settings-card">
+              <header class="settings-card-head">
+                <div class="settings-card-title">外部程序</div>
+                <div class="settings-card-hint">
+                  探测结果只在本次运行内有效；换了版本点「重新检测」。
+                </div>
+              </header>
+
+              <div v-if="toolchainError" class="settings-error">{{ toolchainError }}</div>
+
+              <div v-if="!backends.length" class="settings-row">
+                <div class="settings-row-main">
+                  <div class="settings-row-title">正在检测…</div>
+                  <div class="settings-row-desc">读一次版本号，通常不到一秒。</div>
+                </div>
+              </div>
+
+              <div v-for="backend in backends" :key="backend.id" class="settings-row">
+                <div class="settings-row-main">
+                  <div class="settings-row-title">
+                    {{ backend.name }}
+                    <span class="settings-pill" :class="`tone-${backendTone(backend)}`">
+                      {{ backendStateLabel(backend) }}
+                    </span>
+                  </div>
+                  <div class="settings-row-desc">{{ backendHint(backend) }}</div>
+                  <div v-if="backend.tools.length" class="toolchain-tools">
+                    影响：{{ backend.tools.join('、') }}
+                  </div>
+                  <div v-if="editingBackend === backend.id" class="toolchain-edit">
+                    <input
+                      v-model="draftPath"
+                      class="toolchain-input"
+                      :placeholder="backend.install || '可执行文件或安装目录的绝对路径'"
+                      spellcheck="false"
+                      @keydown.enter="savePath(backend.id)"
+                      @keydown.esc="editingBackend = null"
+                    />
+                    <button class="settings-action" @click="savePath(backend.id)">保存</button>
+                    <button class="settings-action" @click="editingBackend = null">取消</button>
+                  </div>
+                </div>
+                <div class="toolchain-actions">
+                  <button
+                    class="settings-action"
+                    :disabled="probing !== null"
+                    @click="probeBackend(backend.id)"
+                  >
+                    {{ probing === backend.id ? '检测中…' : '重新检测' }}
+                  </button>
+                  <button class="settings-action" @click="startEdit(backend)">
+                    {{ backend.overridden ? '改路径' : '指定路径' }}
+                  </button>
+                  <button
+                    v-if="backend.overridden"
+                    class="settings-action"
+                    @click="resetPath(backend.id)"
+                  >
+                    自动
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <header class="settings-card-head">
+                <div class="settings-card-title">为什么只探测</div>
+                <div class="settings-card-hint">Prism 不替你装、不替你下载。</div>
+              </header>
+              <div class="settings-row">
+                <div class="settings-row-main">
+                  <div class="settings-row-title">安装包只有几十 MB</div>
+                  <div class="settings-row-desc">
+                    Ghidra 自带 JDK 要 400 MB 以上。装到哪、用哪个版本，由你决定；
+                    Prism 只负责找到它、按版本约束调用它。
+                  </div>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-main">
+                  <div class="settings-row-title">没接上就不给模型看</div>
+                  <div class="settings-row-desc">
+                    缺后端时对应的工具不进模型清单，模型不会照着记忆编命令；
+                    硬调会报「需要 X（未检测到）」并带安装指引。
                   </div>
                 </div>
               </div>

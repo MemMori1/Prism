@@ -5,6 +5,7 @@ export type SettingsSectionId =
   | 'appearance'
   | 'models'
   | 'engines'
+  | 'toolchain'
   | 'channels'
   | 'phone'
   | 'intelligence'
@@ -64,6 +65,17 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
       'm12 12 8-4.5',
       'm12 12-8-4.5',
       'M12 12v9',
+    ],
+  },
+  {
+    id: 'toolchain',
+    label: '工具链',
+    title: '工具链',
+    description: '脱壳、反汇编、反编译要用的外部程序。',
+    icon: [
+      'm4 7.5 8-4.2 8 4.2-8 4.2-8-4.2Z',
+      'm4 12.4 8 4.2 8-4.2',
+      'm4 17.1 8 4.2 8-4.2',
     ],
   },
   {

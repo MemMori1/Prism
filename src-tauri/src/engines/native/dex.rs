@@ -23,6 +23,9 @@ use super::tools::{
 
 /// DEX 读取上限。超过这个大小的单文件很可能是被塞了资源的多 dex 容器或畸形样本。
 const DEX_LIMIT: u64 = 64 * 1024 * 1024;
+/// 最多遍历多少个 class_def：几千个类全展开会把上下文撑爆。
+#[cfg_attr(not(test), allow(dead_code))]
+const MAX_CLASSES: u32 = 5000;
 /// 单方法反汇编输出条数上限：巨型方法（R8 混淆产物里常见）撑爆上下文。
 const INSN_DEFAULT: usize = 200;
 const INSN_MAX: usize = 4000;
@@ -58,6 +61,7 @@ fn static_tool(
             network: Network::None,
             sandbox: None,
             scope: ToolScope::Any,
+            needs: &[],
         },
         run,
     )
@@ -306,6 +310,64 @@ impl<'a> Dex<'a> {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------- IR 摘要
+
+/// 一个方法的 IR 摘要：下游只拿这些字段画函数边界。
+///
+/// P2.4 的 `cfg.extract` 接进来后，这一段的 `allow` 就能删掉。
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DexMethod {
+    /// `Lpkg/Cls;->method`。
+    pub name: String,
+    /// DEX 没有虚拟地址：这里是 `code_item` 的文件偏移，只作不透明 id。
+    pub va: u64,
+    /// 字节码长度（`insns_size * 2`），不含 code_item 头。
+    pub size: u32,
+    /// `access_flags` 原值。
+    pub access: u32,
+}
+
+/// [`methods`] 的结果：解析失败被跳过的类要如实带出去。
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DexMethods {
+    pub methods: Vec<DexMethod>,
+    pub skipped_classes: usize,
+}
+
+/// 遍历全部类，导出有 `code_item` 的方法。
+///
+/// 单个类的 `class_data` 坏了只跳过这个类并计数，不拖垮整份文件——
+/// 混淆样本里常见"一个类畸形、其余正常"。文件头不是 DEX 才整体报错。
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn methods(bytes: &[u8]) -> Result<DexMethods, String> {
+    let dex = Dex::parse(bytes).map_err(|error| error.to_string())?;
+    let class_count = dex.sections.class_defs.0.min(MAX_CLASSES);
+    let mut out = Vec::new();
+    let mut skipped = 0usize;
+    for class_def_index in 0..class_count {
+        let result = dex.each_method(class_def_index, |method_idx, access, code_off| {
+            let name = dex.method_ref(method_idx)?;
+            let insns_size = read_u32(dex.bytes, code_off as usize + 0x0c, true).unwrap_or(0);
+            out.push(DexMethod {
+                name,
+                va: code_off as u64,
+                size: insns_size.saturating_mul(2),
+                access,
+            });
+            Ok(())
+        });
+        if result.is_err() {
+            skipped += 1;
+        }
+    }
+    Ok(DexMethods {
+        methods: out,
+        skipped_classes: skipped,
+    })
 }
 
 // ---------------------------------------------------------------- 指令解码
@@ -965,6 +1027,14 @@ mod tests {
         // 若漏跳 field，会读到垃圾值（上一轮 P0 的 code_off=1）。
         assert_eq!(found_code, 1);
         assert_eq!(method_idx_seen, 0);
+
+        // IR 摘要走同一条路径：va 用 code_off，size 是 insns_size * 2。
+        let found = methods(&d).expect("IR 摘要应能解析");
+        assert_eq!(found.skipped_classes, 0);
+        assert_eq!(found.methods.len(), 1);
+        assert_eq!(found.methods[0].name, "V->V");
+        assert_eq!(found.methods[0].va, 0x320);
+        assert_eq!(found.methods[0].size, 2);
     }
 
     #[test]

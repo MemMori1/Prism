@@ -793,8 +793,7 @@
 }
 
 /* 状态点的颜色同时承载风险档：只读是 accent，可写转琥珀，能跑命令转红。
-   不加字、不加行，扫视时颜色先到位，细节留给 tooltip。 */
-.tool-chip-dot.risk-write {
+   不加字、不加行，扫视时颜色先到位，细节留给 tooltip。 */.tool-chip-dot.risk-write {
   background: var(--amber);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 16%, transparent);
 }
@@ -936,4 +935,79 @@
   color: var(--muted);
   font-size: 11.5px;
   line-height: 1.45;
+}
+
+/* ---------- 工具链（外部程序后端） ---------- */
+
+/* 工具卡上的"缺件"提示：和标签不同，这条是**阻塞**信息——后端不装，
+   这个工具连 schema 都进不去，所以用琥珀色而不是灰色。 */
+.tool-chip-need {
+  align-self: flex-start;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+  color: var(--amber);
+  font-size: 9.5px;
+  line-height: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.toolchain-tools {
+  margin-top: 4px;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.toolchain-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 手填路径：一行放得下就一行，放不下就折行——路径本来就长。 */
+.toolchain-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.toolchain-input {
+  flex: 1;
+  min-width: 220px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+}
+
+.toolchain-input:focus {
+  border-color: var(--accent);
+}
+
+/* 状态药丸的色调：只改字色与描边，不铺底色（一行里已经够花了）。 */
+.settings-pill.tone-ok {
+  border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+  color: var(--green);
+}
+
+.settings-pill.tone-warn {
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+  color: var(--amber);
+}
+
+.settings-pill.tone-error {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+  color: var(--red);
 }

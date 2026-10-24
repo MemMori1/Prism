@@ -118,7 +118,8 @@ pub struct ToolMeta {
 
 pub enum Need {
     Backend(&'static str),              // 后端 Ready 才可见
-    Sandbox(SandboxTier),               // S2 才可见（见 §6.3）
+    // Sandbox(SandboxTier) —— P3 有真实 S2 时再加；
+    // 现在加一个恒假的变体，只会让人以为沙箱已经接了一半。
 }
 ```
 
@@ -612,34 +613,75 @@ enabled（开关）→ permission（权限档）→ scope（dag/any）→ needs�
 
 ## 10. 实施顺序与验收
 
-### P2.0 地基（先做，~800 行）
+### P2.0 地基（✅ 已落地，~900 行）
 
-`backends/{mod,probe,exec,job}.rs` + `ToolMeta.needs` + 过滤链 + `toolchain_*` / `job_*` IPC。
+`backends/{mod,probe,exec}.rs` + `ToolMeta.needs` + 过滤链 + `toolchain_*` IPC。
+
+落地时的两处调整（都比原计划更小）：
+
+- **没有单独的 `job.rs`**：作业目录就是 `backends::JobDir`（40 行，drop 自删），
+  只有 Ghidra 那种"分析几分钟、产物要留"的场景才需要持久任务表，随 P2.3 一起加；
+- **后端表按工具落地逐条加**（upx → radare2 → ghidra）：`dotnet` 在它自己的工具落地时
+  再进表。现在登记一个没有任何工具用的后端，设置页只会多一行看不懂的东西。
 
 **验收**：本机没装 radare2 时，`bin.radare2.scan` 不在 schema 里；
 `tools.list` 列出它并写"需要 radare2（未检测到）"；手动调用报同一条原因；
-设置页能看到 4 个后端的状态。用假后端脚本（临时目录里的 `r2` 打印版本）跑通探测优先级。
+设置页能看到已登记后端的状态。用假后端脚本（临时目录里的 `upx` 打印版本）跑通探测优先级
+——`unpacks_through_a_fake_backend` 走完了探测 → `-t` → `-d` → 读产物整条链路。
 
-### P2.1 `bin.unpack.upx`（第一个端到端）
+### P2.1 `bin.unpack.upx`（✅ 已落地，第一个端到端）
 
 最小的一个：一个二进制、一个产物、一个 parent。跑通就等于验证了探测 + 执行 + 制品 + 血缘。
 
+落地时的两个决定：
+
+- **聊天里也有交付物**：没有 DAG 作用域时产物落 `~/.prism/unpacked/<sha 前 12 位>-<原名>`，
+  留最近 20 个。否则这个工具在聊天里只能报一个哈希，等于什么都没做；
+- **`parent_id` 两条来源**：`artifact:<id>` 直接用；普通路径则在同一 DAG 的制品索引里
+  按 `sha256 + size` 找最新的那份。找不到就不硬编——`parent` 字段缺省，比挂错爹强。
+
 **验收**：对一个真 UPX 样本，产物 `sha256` 与 `upx -d` 手工结果一致，`parent_id` 指向原样本；
 对非 UPX 文件报 UPX 的原话，不硬解；样本目录 `ls -la` 前后一致。
+（真文件回归是 `#[ignore]` 的 `unpacks_a_real_sample`，本机没装 upx，未跑。）
 
-### P2.2 radare2 + IR
+### P2.2 radare2 + IR（✅ 已落地）
 
 `radare2.rs` + `index.rs`（类型 + 映射 + 缓存）。DEX 线同时接进 IR（`dex.rs` 已有数据）。
 
+落地时的三个决定：
+
+- **`index.rs` 只管形状与缓存**：`aflj` 与 DEX 各自映射，Ghidra 的导出脚本 P2.3 再补；
+  缓存键严格按 `sha256 + backend + backend_version`，后端升级后旧 IR 不再命中；
+- **`blocks` 先空着**：`aflj` 不给基本块，`cfg.extract` 的 detail pass（P2.4）再跑 `afbj` 回填；
+- **DEX 的 `va` 是 `code_off`**：IR 里写明"不透明 id"，下游不假设可重定位；
+  内置解析器的版本写成 `builtin-<应用版本>`，升级即失效。
+
 **验收**：同一 Mach-O 用 r2 出 `functions`，函数数与 `r2 -c 'afl'` 一致；
 二次调用不再 spawn（用假后端计数验证）；DEX 样本能出 IR 且 `cfg.extract` 可用。
+（本机没装 radare2：映射/截断/缓存/失败原文用 fixture 与假后端验证，
+真样本回归是 `#[ignore]` 的 `scans_a_real_sample`；DEX 的 IR 映射在 `index.rs` 单测里覆盖。）
 
-### P2.3 Ghidra analyze
+### P2.3 Ghidra analyze + decompile（✅ 已落地）
 
-`ghidra.rs` + `PrismExport.java` + 缓存项目目录 + JVM 并发限制。
+`ghidra.rs` + `PrismExport.java` + `PrismDecompile.java` + 缓存项目目录 + JVM 并发限制。
+
+落地时的四个决定：
+
+- **一次只跑一个 JVM**：`JVM` 互斥锁包住 analyze 与 decompile；反编译缺项目时
+  在**同一把锁内**补一次分析，不递归、不抢锁；
+- **程序名固定 `sample.bin`**：优先硬链接、其次符号链接、最后复制到作业目录，
+  这样 `-process sample.bin` 永远找得到；样本目录仍然不写；
+- **脚本随应用走**：`bundle.resources` 带 `resources/ghidra/*`，运行时按
+  `PRISM_GHIDRA_SCRIPTS` → Tauri 资源目录 → `CARGO_MANIFEST_DIR/resources/ghidra`
+  → 可执行文件旁依次找；找不到就报"安装包不完整"，不静默降级；
+- **超时给部分结果**：`-analysisTimeoutPerFile 900` 让 Ghidra 自己收尾；
+  只要 `functions.json` 写出来了就交付并标 `truncated`，硬超时（1800s）才判失败。
 
 **验收**：真样本出 `functions`，与 r2 的函数数差异 < 15%（差异要能解释：thunk / PLT）；
 `JAVA_HOME` 缺失时状态是 `Broken` 并给出原因；分析超时返回部分结果 + `truncated`。
+（本机没装 Ghidra / JDK：探测、版本、假后端 analyze → 缓存 → decompile → 补分析
+整条链路用假 `analyzeHeadless` 验证；真样本回归是 `#[ignore]` 的
+`analyzes_and_decompiles_a_real_sample`。）
 
 ### P2.4 反编译 + 下游四件
 
@@ -747,7 +789,7 @@ PE 动态分析、`de4dot` 链路。没做之前，PE 样本的动态工具直�
 
 | 部分 | 估算 | 说明 |
 |---|---|---|
-| `backends/{mod,probe,exec,job}` | ~800 行 | 地基，含单测 |
+| `backends/{mod,probe,exec}` | ~900 行 | 地基，含单测（`job.rs` 随 P2.3 Ghidra 落地） |
 | 过滤链 + IPC + 设置页 | ~300 行 | Rust 180 + TS/Vue 120 |
 | `upx.rs` | ~90 行 | 最小 |
 | `radare2.rs` | ~220 行 | 含 `aflj`/`afbj` 解析 |
@@ -767,14 +809,18 @@ PE 动态分析、`de4dot` 链路。没做之前，PE 样本的动态工具直�
 
 ---
 
-## 14. 待确认
+## 14. 已拍板与仍待确认
 
-- [ ] Ghidra 版本钉到 11.x 哪一档？本机现在装的是哪个版本（决定 `PrismExport.java` 用的 API）？
-- [ ] 是否允许 Prism 自带/引导下载 Ghidra（约 400 MB）？还是只做"探测 + 让用户自己装"？
-- [ ] radare2 还是 rizin？（命令大体兼容，`aflj` 字段名有差异；只支持一个能省一半解析代码）
-- [ ] `upx --force` 要不要给一个显式参数（默认关）？现在设计是彻底不给。
-- [ ] 沙箱镜像怎么分发：首次运行下载 / 单独安装包 / 用户自备？macOS 用 QEMU+HVF 还是 Virtualization.framework？
+已定（用户授权按实现方判断）：
+
+- [x] **Ghidra 只探测，不自带、不下载**——400 MB 不进安装包，按 11.x 的 Program API 写脚本；
+- [x] **选 radare2，不选 rizin**——装机量大，`aflj` 在 5.x 稳定；
+- [x] **沙箱镜像首次使用时明确询问后下载**，QEMU + HVF（P3 才动，先不阻塞）；
+- [x] **`upx --force` 彻底不给**——`bin.unpack.upx` 没有这个参数，改过头的样本走动态 dump；
+- [x] `bin.vm.detect` 归 IR 组、`yara.rule_gen` / `report.rev` 提前到 P2.5；
+- [x] `bin.dyn.*` 的审批不提供"总是允许"。
+
+仍待确认（都要真样本/真后端才能答）：
+
+- [ ] Ghidra 11.x 的具体小版本（决定 `PrismExport.java` 用哪套 API；本机没装，P2.3 开工时问）；
 - [ ] `.NET` 去混淆做到 T2（de4dot）就够，还是要自研 dnlib 静态改写器？
-- [ ] `bin.vm.detect` 从沙箱组挪到 IR 组，是否认可？（依据见 §1.2）
-- [ ] `yara.rule_gen` / `report.rev` 提前到 P2.5，是否认可？
-- [ ] `bin.dyn.*` 的审批"不提供总是允许"，是否接受？（与现有审批语义的唯一偏离）

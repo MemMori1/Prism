@@ -63,6 +63,7 @@ fn static_tool(
             network: Network::None,
             sandbox: None,
             scope: ToolScope::Any,
+            needs: &[],
         },
         run,
     )

@@ -14,6 +14,7 @@
 //! - `browser_tools` Agent 的浏览器（`browser.open/read/act`，操作面板里那块真 webview）
 //! - `artifact_tools` 制品读写（只在 DAG 节点作用域里出现）
 //! - `forensics` 安全研究线的本机工具（`bin.meta.identify` 等）
+//! - `backends` 外部程序后端：探测 / 统一执行 / 作业目录（upx、r2、Ghidra）
 //! - `analysis`  安全研究线的分析工具（xref / 导入导出 / 密码特征 / 差异）
 //! - `dag_tools` Planner 的七工具（改图），只在 DAG 作用域里出现
 //! - `compact`  `/compact`：把历史压成摘要再重写会话（省上下文）
@@ -23,6 +24,7 @@ pub mod agent;
 pub mod analysis;
 pub mod approval;
 pub mod artifact_tools;
+pub mod backends;
 pub mod browser_tools;
 pub mod compact;
 pub mod config;

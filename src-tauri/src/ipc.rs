@@ -248,6 +248,8 @@ pub struct ToolView {
     pub network: String,
     /// code / malware；没有沙箱为 None。
     pub sandbox: Option<String>,
+    /// 外部依赖没接上时的原因（`需要 UPX（未检测到）`）；None = 依赖齐全。
+    pub needs: Option<String>,
 }
 
 #[tauri::command]
@@ -263,6 +265,84 @@ pub async fn tool_list() -> Result<Vec<ToolView>, String> {
         views.push(tool_view(&def, &enabled, owner));
     }
     Ok(views)
+}
+
+/// 一个外部后端（upx / radare2 / Ghidra / .NET 工具链）的界面视图。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendView {
+    pub id: String,
+    pub name: String,
+    /// ready | missing | too-old | broken | unknown
+    pub state: String,
+    pub path: Option<String>,
+    pub version: Option<String>,
+    /// 最低版本要求；None = 不比版本。
+    pub min_version: Option<String>,
+    /// override | env | path | known-dir | unknown
+    pub source: String,
+    pub note: Option<String>,
+    /// 一句可复制的安装指引。
+    pub install: String,
+    /// 受它影响的工具（内部名）。
+    pub tools: Vec<String>,
+    /// 用户是否手动指定过路径（决定"恢复自动探测"要不要显示）。
+    pub overridden: bool,
+}
+
+fn backend_view(status: native::backends::probe::BackendStatus) -> BackendView {
+    let overridden = native::backends::probe::overrides().contains_key(status.id);
+    BackendView {
+        id: status.id.to_string(),
+        name: status.name.to_string(),
+        state: status.state.as_str().to_string(),
+        path: status.path.map(|path| path.display().to_string()),
+        version: status.version,
+        min_version: native::backends::probe::find(status.id)
+            .and_then(|def| def.min_version)
+            .map(str::to_string),
+        source: status.source.as_str().to_string(),
+        note: status.note,
+        install: status.install.to_string(),
+        tools: status.tools.iter().map(|name| name.to_string()).collect(),
+        overridden,
+    }
+}
+
+/// 外部后端的当前状态（没探过的会被探一次，通常几毫秒）。
+#[tauri::command]
+pub async fn toolchain_list() -> Result<Vec<BackendView>, String> {
+    let list = tauri::async_runtime::spawn_blocking(native::backends::all)
+        .await
+        .map_err(|cause| cause.to_string())?;
+    Ok(list.into_iter().map(backend_view).collect())
+}
+
+/// 重新探测：不传 id = 全部。探测要起进程读版本，放到阻塞线程池。
+#[tauri::command]
+pub async fn toolchain_probe(id: Option<String>) -> Result<Vec<BackendView>, String> {
+    let list = tauri::async_runtime::spawn_blocking(move || match id {
+        Some(id) => vec![native::backends::refresh(&id)],
+        None => native::backends::refresh_all(),
+    })
+    .await
+    .map_err(|cause| cause.to_string())?;
+    Ok(list.into_iter().map(backend_view).collect())
+}
+
+/// 手动指定一个后端的路径；`path` 为空 = 恢复自动探测。
+#[tauri::command]
+pub async fn toolchain_set_path(
+    id: String,
+    path: Option<String>,
+) -> Result<Vec<BackendView>, String> {
+    let list = tauri::async_runtime::spawn_blocking(move || {
+        native::backends::probe::set_override(&id, path.as_deref())?;
+        Ok::<_, String>(vec![native::backends::refresh(&id)])
+    })
+    .await
+    .map_err(|cause| cause.to_string())??;
+    Ok(list.into_iter().map(backend_view).collect())
 }
 
 fn tool_view(
@@ -287,6 +367,8 @@ fn tool_view(
         risk: def.meta.risk.as_str().to_string(),
         network: def.meta.network.as_str().to_string(),
         sandbox: def.meta.sandbox.map(|sandbox| sandbox.as_str().to_string()),
+        // 后端没接上不算"关掉"：开关是用户的意图，这里是机器的现状。
+        needs: native::backends::needs_met(def.meta.needs).err(),
     }
 }
 

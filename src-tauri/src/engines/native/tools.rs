@@ -260,6 +260,8 @@ pub struct ToolMeta {
     pub network: Network,
     pub sandbox: Option<Sandbox>,
     pub scope: ToolScope,
+    /// 这条工具要的外部条件。缺一项就**不进 schema**（§4.4）。
+    pub needs: &'static [Need],
 }
 
 impl Default for ToolMeta {
@@ -270,8 +272,20 @@ impl Default for ToolMeta {
             network: Network::None,
             sandbox: None,
             scope: ToolScope::Any,
+            needs: &[],
         }
     }
+}
+
+/// 工具对外部世界的依赖。
+///
+/// 只声明"装没装"，不声明"怎么调用"——后者是各 `backends/*.rs` 的事。
+/// 沙箱档位（`Sandbox(tier)`）等 P3 有真实能力时再加：现在没有 S2，
+/// 提前加一个恒假的变体只会让人以为沙箱已经接了一半。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    /// 需要某个外部后端处于 `Ready`（见 [`super::backends::probe`]）。
+    Backend(&'static str),
 }
 
 /// 工具开关集合。
@@ -773,6 +787,7 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
                     network: Network::None,
                     sandbox: None,
                     scope: ToolScope::Any,
+                    needs: &[],
                 },
                 run_run_command,
             ),
@@ -794,6 +809,7 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
                     network: Network::Outbound,
                     sandbox: Some(Sandbox::Code),
                     scope: ToolScope::Any,
+                    needs: &[],
                 },
                 run_run_script,
             ),
@@ -812,6 +828,7 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
                     network: Network::None,
                     sandbox: None,
                     scope: ToolScope::Any,
+                    needs: &[],
                 },
                 run_trash,
             ),
@@ -860,6 +877,8 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
         list.extend(super::analysis::tools());
         list.extend(super::dex::tools());
         list.extend(super::dag_tools::tools());
+        // 要外部程序才能跑的（upx / r2 / Ghidra）：后端没接上时 `visible` 会挡掉。
+        list.extend(super::backends::tools());
         list
     })
 }
@@ -1029,10 +1048,12 @@ fn all_tools() -> Vec<Arc<ToolDef>> {
     tools
 }
 
-/// 按「开关 + 权限 + 作用域（+ 是否可委派）」筛出此刻真正可用的登记项。
+/// 按「开关 + 权限 + 作用域 + 外部依赖（+ 是否可委派）」筛出此刻真正可用的登记项。
 ///
 /// [`specs`]、[`specs_for`] 和自省工具 `tools.list` 都走这里：过滤逻辑只写
 /// 一份，"发给模型的清单"和"模型问到的清单"才不会各说各话。
+///
+/// 外部依赖（`needs`）放在最后：探测要起进程，能在前面几步就否掉的不必探。
 pub fn visible(
     enabled: &EnabledTools,
     max: Permission,
@@ -1046,6 +1067,7 @@ pub fn visible(
                 && tool.permission.within(max)
                 && enabled.is_on(tool)
                 && (dag || tool.meta.scope == ToolScope::Any)
+                && super::backends::needs_met(tool.meta.needs).is_ok()
         })
         .collect()
 }
@@ -1322,6 +1344,8 @@ fn tools_list(ctx: &ToolContext<'_>, args: &Value) -> ToolOutcome {
                 tool.permission.as_str(),
                 cap.as_str()
             ))
+        } else if let Err(why) = super::backends::needs_met(tool.meta.needs) {
+            Some(why)
         } else {
             None
         };
@@ -2279,6 +2303,23 @@ mod tests {
         let text = list_with(Some("workspace-write"), r#"{"tag":"exec"}"#);
         assert!(text.contains("- run_command"), "{text}");
         assert!(!text.contains("- read_file"), "tag 过滤不该漏出无关工具：{text}");
+    }
+
+    /// 后端没接上时，工具要么在可用清单里，要么在"被挡住"里带原因——
+    /// 最糟的是"两边都没有"，模型只能靠猜。
+    #[test]
+    fn tools_list_explains_missing_backends() {
+        let text = list_with(Some("workspace-write"), "{}");
+        let upx_ready =
+            crate::engines::native::backends::needs_met(&[Need::Backend("upx")]).is_ok();
+        if upx_ready {
+            assert!(text.contains("- bin_unpack_upx"), "{text}");
+        } else {
+            assert!(
+                text.contains("bin_unpack_upx：需要 UPX（未检测到）"),
+                "{text}"
+            );
+        }
     }
 
     /// provider 的函数名只接受 `[A-Za-z0-9_-]`。
