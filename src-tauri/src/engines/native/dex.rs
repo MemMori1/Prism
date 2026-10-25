@@ -574,7 +574,24 @@ fn decode_code_item(
             0x6e..=0x72 | 0x74..=0x78 => {
                 let idx = read_u(unit + 1)? as u32;
                 refs.push(Ref::Method(idx));
-                mnemonic = format!("{:#x} meth@{idx}", op);
+                // 助记符要照实写。原来输出 `0x6e meth@13255`，读的人还得自己
+                // 去 method_id 表里查这是谁——那等于没有代码级证据。真实后果：
+                // 报告里"确认这个偏移是不是 invoke-virtual Cipher.init"这条
+                // 验证动作，即便工具修好了也做不出来。
+                let name = match op {
+                    0x6e => "invoke-virtual",
+                    0x6f => "invoke-super",
+                    0x70 => "invoke-direct",
+                    0x71 => "invoke-static",
+                    0x72 => "invoke-interface",
+                    0x74 => "invoke-virtual/range",
+                    0x75 => "invoke-super/range",
+                    0x76 => "invoke-direct/range",
+                    0x77 => "invoke-static/range",
+                    0x78 => "invoke-interface/range",
+                    _ => "invoke",
+                };
+                mnemonic = format!("{name} meth@{idx}");
             }
             // 31t（switch / fill-array-data）
             0x2b => {
@@ -812,7 +829,19 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
                 Ok((registers, ins_size, insns)) => {
                     let instructions: Vec<Value> = insns
                         .iter()
-                        .map(|insn| json!({ "insn": insn.mnemonic }))
+                        .map(|insn| {
+                            let mut item = json!({ "insn": insn.mnemonic });
+                            // invoke 补上目标方法全名。只有 meth@idx 时，读的人
+                            // 还得自己去查 method_id 表——那就不叫代码级证据了。
+                            for reference in &insn.refs {
+                                if let Ref::Method(idx) = reference {
+                                    if let Ok(target) = dex.method_ref(*idx) {
+                                        item["target"] = json!(target);
+                                    }
+                                }
+                            }
+                            item
+                        })
                         .collect();
                     let item = json!({
                         "method": name,
@@ -1368,6 +1397,75 @@ mod tests {
             methods.len(),
             calls
         );
+    }
+
+    /// 核验那份 APK 报告里的关键事实（只做对照，不改报告）。
+    ///
+    /// `cargo test --lib -- --ignored audit_report_claims --nocapture`
+    #[test]
+    #[ignore]
+    fn audit_report_claims() {
+        let path = "/Users/edwa2d4th/Desktop/未命名文件夹 7/work/apk/x/classes.dex";
+        assert!(std::path::Path::new(path).exists(), "样本不在 {path}");
+        let bytes = read_head(std::path::Path::new(path), DEX_LIMIT).unwrap();
+        let dex = Dex::parse(&bytes).expect("真实样本应能解析");
+
+        // 报告 4.2 那张表：method_id → 签名。对上了，第 4 章的"crypto 调用面
+        // 只有 8 个 API"才有据；对不上，整章的否定结论都要重做。
+        println!("--- 报告 4.2 的 method_id 对照 ---");
+        for id in [8728u32, 8729, 12743, 12744, 12745, 13255, 13256, 13257] {
+            match dex.method_ref(id) {
+                Ok(name) => println!("method[{id}] = {name}"),
+                Err(error) => println!("method[{id}] 读取失败：{error}"),
+            }
+        }
+
+        // 报告 4.3 的唯一候选调用点：`LW/a;` 的 g 方法。
+        println!("--- 报告 4.3 的候选类 ---");
+        let mut found = None;
+        for i in 0..dex.sections.class_defs.0 {
+            if let Ok(name) = dex.class_name(i) {
+                if name == "LW/a;" {
+                    found = Some(i);
+                    break;
+                }
+            }
+        }
+        println!("LW/a; 的 class_def 下标 = {found:?}");
+        if let Some(index) = found {
+            let _ = dex.each_method(index, |method_idx, _access, code_off| {
+                let name = dex.method_ref(method_idx).unwrap_or_else(|_| String::new());
+                // 报告 4.3 点名的就是 g 方法。
+                if !name.ends_with("->g") {
+                    return Ok(());
+                }
+                let Ok((_, _, insns)) = decode_code_item(dex.bytes, code_off, 4000) else {
+                    println!("  g @0x{code_off:x} 解码失败");
+                    return Ok(());
+                };
+                println!(
+                    "  g @0x{code_off:x}：{} 条指令，指令起点 0x{:x}",
+                    insns.len(),
+                    code_off + 16
+                );
+                for (i, insn) in insns.iter().enumerate() {
+                    if !insn.mnemonic.starts_with("invoke") {
+                        continue;
+                    }
+                    let target = insn.refs.iter().find_map(|reference| {
+                        if let Ref::Method(idx) = reference {
+                            dex.method_ref(*idx).ok()
+                        } else {
+                            None
+                        }
+                    });
+                    // 报告用「code_item 内单元偏移」计数：指令起点 + i*2 字节。
+                    let at = code_off + 16 + i as u32 * 2;
+                    println!("    单元 {i:>3}  文件偏移 0x{at:x}  {} → {:?}", insn.mnemonic, target);
+                }
+                Ok(())
+            });
+        }
     }
 
     fn write_u16(bytes: &mut [u8], at: usize, value: u16) {
