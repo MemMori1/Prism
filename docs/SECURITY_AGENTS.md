@@ -1,7 +1,7 @@
 # 安全研究 Agent 与工具矩阵 · 需求分析
 
 > 状态：**P0 / P0.5 / P1 / P1.5 已实现**（制品仓库、节点数据流、工具标签、
-> 7 个安全研究工种 + 编排规划、8 个 `bin.*` 分析工具、Planner 七工具）。
+> 8 个安全研究工种 + 编排规划、8 个 `bin.*` 分析工具、Planner 七工具）。
 > 未实现：P2（Ghidra 反编译）、渗透线 `recon.*` / `exp.*`。
 > P3 沙箱只做了第一层：命令与脚本在 macOS 上走 seatbelt（写入限工作目录、默认禁网），
 > Windows 目前只有策略层（命令检测 + 受保护路径 + 环境清洗），见 `docs/RUNTIME_SANDBOX.md`。
@@ -29,7 +29,7 @@ Prism 现在是一套能跑起来的**软工编排底座**（Planner 拆图 → 
 | 制品工具 | `engines/native/artifact_tools.rs`：`prism.artifact.put` / `prism.artifact.get`，`dag_id` 由执行器注入 | ✅ |
 | 静态样本工具 | `engines/native/forensics.rs`：`bin.meta.identify` / `bin.hash.compute` / `bin.strings.extract`，纯 Rust 解析 PE/ELF/Mach-O/DEX/APK | ✅ |
 | P1 分析工具 | `engines/native/analysis.rs`：`bin.json.jq` / `bin.xref.search` / `bin.importexport.list` / `bin.crypto.scan` / `bin.crypto.asn1.parse` / `bin.crypto.xor_brute` / `bin.diff`，全部纯 Rust、只读、带上限 | ✅ |
-| **安全研究工种** | `src-tauri/src/agents.rs::builtin()` 新增 7 个 preset：`sample-prep` / `unpacker` / `static-analysis` / `crypto-analysis` / `dynamic-sandbox` / `control-flow` / `sec-assist`；各自绑定方法论提示、工具白名单、权限档、工作区 | ✅ |
+| **安全研究工种** | `src-tauri/src/agents.rs::builtin()` 新增 8 个 preset：`sample-prep` / `unpacker` / `static-analysis` / `crypto-analysis` / `dynamic-sandbox` / `control-flow` / `sec-audit` / `sec-assist`；各自绑定方法论提示、工具白名单、权限档、工作区 | ✅ |
 | Planner 工具面 | `engines/native/dag_tools.rs`：`prism.dag.plan.read` / `node.add` / `node.update` / `node.remove` / `edge.add` / `edge.remove` / `validate`；`scope=dag`，校验不过整体回滚 | ✅ |
 | 编排规划工种 | `dag-planner` preset：在 DAG 节点里调上面七个工具改图 | ✅ |
 | 前端 | `DagPane.vue` 节点卡片展示制品（key / kind / 大小 / sha256 / 引用 id / 查看全文 / 派生血缘）；设置页工具清单带标签与风险色 | ✅ |
@@ -47,7 +47,7 @@ UPX 节名定案与 `.adata` 弱特征不定案）；
 
 | 维度 | 分析时的代码事实 | 目标（清单要求） | 差距（回填后） |
 |---|---|---|---|
-| Agent 工种 | 8 个软工 preset：探索 / 通用 / 前端 / 后端 / 架构 / 文档 / 验证 / DeepSeek 调研 | 样本预处理 / 脱壳 / 静态分析 / 密码 / 动态沙箱 / 控制流 / 辅助 | **已补**：7 个工种全部落地，各自绑定方法论、工具白名单与风险档 |
+| Agent 工种 | 8 个软工 preset：探索 / 通用 / 前端 / 后端 / 架构 / 文档 / 验证 / DeepSeek 调研 | 样本预处理 / 脱壳 / 静态分析 / 密码 / 动态沙箱 / 控制流 / 审计 / 辅助 | **已补**：8 个工种全部落地，各自绑定方法论、工具白名单与风险档 |
 | 工具集 | 7 个裸名工具：`read_file` `list_files` `grep` `write_file` `edit_file` `run_command` `task_status` | 60+ 个 `bin.*` / `recon.*` / `exp.*`，带权限 tag | **≈ 28%**：命名空间与 tag 已建，落地 9 个 `bin.*`（4 个样本 + 5 个分析）；渗透线 `recon.*` / `exp.*` 未动 |
 | 产物传递 | 节点输出 `NodeOutput.text`，下游用 `{{nodes.x.output}}` **整段内联** | artifact 引用 + `input_artifacts` / `output_artifact_key` + 血缘 | **已补**：8 KB 截断 + `{{artifacts.<别名>.*}}` + 显式/隐式别名 |
 | 制品仓库 | `artifact.rs` 只是**交付物预览**（读本地 html/svg/图片给前端看） | `artifact.put/get`，同 DAG 内可读、跨 DAG 隔离 | **已补**：`dag/artifact.rs` + `prism.artifact.*`，配额与隔离齐 |
@@ -226,6 +226,25 @@ pub struct ArtifactRef {
 清单里"两套沙箱物理隔离"是对的，但本期不做；先把标签和开关位置留出来，
 避免以后接 Cuckoo 时被迫改 Agent profile 结构。
 
+### 3.7 审计环（`sec-audit`）
+
+分析节点跑满预算时，最先垮掉的不是覆盖率，是**否定性结论的可靠性**：grep 子串
+搜不到就写"不存在"、jadx 跳过的类就写"未定位"。`aerial-guard` 那次四条错误结论
+全是这个形状，而 `bin.dex.disasm` 当时已经在仓库里——只是没进任何白名单。
+
+`sec-audit` 只做一件事：挑错。判定只有三档 `refuted` / `confirmed` / `unverified`，
+每条主张最多 3 次工具调用，必须换方法（拆词、换语料根、换工具），不许做新分析。
+复核优先级：`0 命中` > `未定位` > `仅/只有/全部` > 数字。
+
+`grep` 这一侧也补了反证能力：0 命中必须带扫描回执（扫了多少文本文件、跳过了
+哪些大文件 / 二进制 / 读不了的），模式含元字符而没开 `regex` 时明确提示；要
+正则就显式传 `"regex": true`。「扫过但跳过」与「真的不存在」必须能分开说。
+
+接线由 Planner 规则 4 负责：安全分析类目标（分析节点 ≥2）在汇总前插审计节点，
+汇总依赖审计、`gate=true`；`sec-assist` 的提示词按审计裁决改写结论（refuted 必须改、
+unverified 不得据以上调定级）。审计节点只读，写入靠执行器自动落盘的主产出，
+节点 id 即下游引用别名。
+
 ## 4. 工具矩阵
 
 ### 4.1 逆向线（主体）
@@ -236,6 +255,7 @@ pub struct ArtifactRef {
 | 样本预处理 | `bin.hash.compute` | md5 / sha1 / sha256 | 只读 / 低 | 哈希清单 | ✅ 已实现 |
 | 样本预处理 | `bin.strings.extract` | ASCII/UTF-16 字符串 + 可疑标记（IP/URL/路径/cmd） | 只读 / 低 | strings JSON | ✅ 已实现 |
 | 样本预处理 | `bin.pack.detect` | UPX / VMProtect / Themida / ConfuserEx / 加固厂商等 38 条规则 + 节表结构信号 | 只读 / 低 | 壳名 + 置信度 + 证据偏移 | ✅ 已实现（`forensics.rs::detect_pack`） |
+| 样本预处理 | `bin.apk.sign` | APK 签名结构：v1 META-INF、v2 / v3 / v3.1 Signing Block、证书与摘要算法 | 只读 / 低 | 签名方案 + 证书指纹 | ✅ 已实现（`apksig.rs::inspect`；只解析结构，不验签） |
 | 脱壳 | `bin.unpack.upx` | UPX 自动解压（`-t` 预检、不 `--force`、产物带 parent） | 只读 / 低 | 新二进制 + parent | ✅ 已实现（后端探测 + 执行契约；需本机装 `upx`） |
 | 脱壳 | `bin.unpack.dumper` | 沙箱内 dump 脱壳 | `bin:dyn-sandbox` / 高 | 新二进制 + parent | ⬜ 需沙箱 |
 | 脱壳 | `bin.dotnet.deobfuscate` | .NET 反混淆导出 IL | 写 / 中 | IL | ⬜ 需 dnlib / ILSpy |
@@ -261,9 +281,13 @@ pub struct ArtifactRef {
 | 通用支撑 | `bin.yara.rule_gen` | 自动生成 yara 规则 | 写 / 低 | 规则集 | ⬜ P3 |
 | 通用支撑 | `bin.report.rev` | 逆向报告渲染 | 只读 / 低 | 报告 artifact | ⬜ P3（现由 `sec-assist` 工种代劳） |
 
-**这张表 28 行，已实现 13 行**（其中 2 行合并成一个工具）。另外还落地了表里没有的
+DEX 专用反汇编不在表里但已经落地：`bin.dex.disasm`（列类、按方法反汇编）
+与 `bin.dex.xref`（跨类调用边）。它们不依赖 Ghidra，静态分析 / 控制流 /
+密码分析三个工种的默认白名单都已带上——APK 里 jadx 跳过的方法靠这两件复核。
+
+**这张表 29 行，已实现 14 行**（其中 2 行合并成一个工具）。另外还落地了表里没有的
 **7 个 Planner 工具**（`prism.dag.*`，见 `engines/native/dag_tools.rs`），
-所以本机可用的领域工具是 **11 个 `bin.*` + 2 个 `prism.artifact.*` + 7 个 `prism.dag.*` = 20 个**
+所以本机可用的领域工具是 **12 个 `bin.*` + 2 个 `prism.artifact.*` + 7 个 `prism.dag.*` = 21 个**
 （`bin.unpack.upx` 要本机装了 `upx`、`bin.radare2.scan` 要装了 `radare2`，才会出现在模型清单里）。
 
 白名单是给工种配能力的，但**自省工具 `tools.list` 不参与裁剪**：它回答"我现在有什么"，
@@ -305,6 +329,12 @@ pub struct ArtifactRef {
 `bin.strings.extract`（ASCII + UTF-16LE，限条数、可疑标记）、
 `bin.pack.detect`（38 条壳/保护器/打包器规则 + 节表结构信号 + 熵）。
 四者都走 `ToolDef` 新标签，产物写 artifact，不进上下文。
+
+`bin.apk.sign` 是同一批的第五件（`apksig.rs`）：解析 EOCD / 中央目录 / APK
+Signing Block，报 v1 `META-INF`、v2 `0x7109871a`、v3 `0xf05368c0`、v3.1
+`0x1b93ad61` 的存在性与签名者证书（主体 / 签发者 / 有效期 / SHA-256 指纹）。
+**它只解析结构，不做密码学验签**——输出与提示词都必须写清这一点。`aerial-guard`
+实测：v1 + v2 存在、v3 / v3.1 不存在，证书自报 `CN=Android Debug`。
 
 `bin.pack.detect` 的置信度只有三档，且**纯特征串最高只到 `high`**：
 节名在 PE 头里是结构事实（`certain`），字符串可能只是编译器内嵌的（`high` + `note` 提示按偏移人工确认）。

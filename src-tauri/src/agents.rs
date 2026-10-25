@@ -34,7 +34,10 @@ pub enum Origin {
 }
 
 /// 权限档位。与 dsh 的三档同名，语义对齐（便于执行器直接透传环境变量）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 变体的先后顺序就是宽严顺序（`ReadOnly < WorkspaceWrite < FullAccess`），
+/// [`Permission::at_most`] 靠它取交集——顺序不能随手调。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Permission {
     /// 只能看：写文件与跑命令一律拒绝。
@@ -53,6 +56,14 @@ impl Permission {
             Permission::WorkspaceWrite => "workspace-write",
             Permission::FullAccess => "danger-full-access",
         }
+    }
+
+    /// 取更严的一档：Agent 画像与节点 / 计划声明求交集。
+    ///
+    /// 节点只能收紧 Agent 的权限，不能借节点配置提权——只读 Agent 被派进
+    /// 一个默认 `workspace-write` 的节点时，仍然只读。
+    pub fn at_most(self, other: Permission) -> Permission {
+        self.min(other)
     }
 }
 
@@ -329,7 +340,7 @@ pub fn builtin() -> Vec<AgentProfile> {
              小步改：一次一个动作（加一个节点、接一条边），每次都用返回的 issues 确认没坏。\n\
              工具会在校验不过时整体回滚并告诉你原因——那不是失败，是让你看清问题再改一次。\n\
              能复用现有节点就别新建；节点的 task 里引用上游用 {{nodes.<id>.output}}，长报告用 {{artifacts.<id>.summary}}。\n\
-             选 Agent 时按工种匹配：识别哈希字符串用 sample-prep，看导入表用 static-analysis，找算法用 crypto-analysis，出报告用 sec-assist。",
+             选 Agent 时按工种匹配：识别哈希字符串用 sample-prep，看导入表用 static-analysis，找算法用 crypto-analysis，复核结论用 sec-audit，出报告用 sec-assist。",
             &["编排", "规划"],
             tools(
                 &[
@@ -350,7 +361,7 @@ pub fn builtin() -> Vec<AgentProfile> {
             ),
         ),
         // ---------------------------------------------------------- 安全研究线
-        // 下面七个不是"给软工 Agent 挂上 bin.* 工具"，而是各自绑定了不同的
+        // 下面八个不是"给软工 Agent 挂上 bin.* 工具"，而是各自绑定了不同的
         // 方法论、工具组合与风险档：给「前端工程师」装上 bin.strings.extract，
         // 它只会把结果当文本读；逆向需要的是"先识别、再定优先级、每条结论带偏移"
         // 这套流程，那只能写在系统提示里。
@@ -363,10 +374,11 @@ pub fn builtin() -> Vec<AgentProfile> {
             Workspace::Shared,
             "你负责样本预处理，只产出事实，不做行为判断。\n\
              顺序固定：bin.meta.identify（格式/架构/入口/编译时间）→ bin.hash.compute（三哈希，作为去重与情报比对的锚点）→ bin.pack.detect（有没有壳，直接决定下游能不能静态分析）→ bin.strings.extract（带可疑标记）。\n\
+             如果样本是 APK，再用 bin.apk.sign 记录 v1 / v2 / v3 / v3.1 方案与签名证书指纹；它只解析结构，不验签——不要写「签名有效」。\n\
              bin.pack.detect 的 packed=false 才能说「可直接静态分析」；confidence 是 low 时必须写成「疑似」，并把 evidence 的偏移抄在结论里。\n\
              每条结论都要带偏移或字段名，例如「偏移 0x1a40 有 http://…」。解析不出来的字段写「未知」，不要猜。\n\
              最后给一个 1-5 的优先级与一句理由（有网络特征/有反调试/有已知 C2 域名 → 高）。\n\
-             产出写成 JSON 制品（key=report），供下游节点直接取用。",
+             产出写成 JSON 正文（执行器会自动落盘成 key=report 的制品），供下游节点直接取用；只读档调不了 prism.artifact.put，不用试。",
             &["安全", "预处理"],
             tools(
                 &[
@@ -375,10 +387,10 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "bin.meta.identify",
                     "bin.hash.compute",
                     "bin.pack.detect",
+                    "bin.apk.sign",
                     "bin.strings.extract",
                     "bin.json.jq",
                     "prism.artifact.get",
-                    "prism.artifact.put",
                 ],
                 &[],
                 &[],
@@ -429,7 +441,9 @@ pub fn builtin() -> Vec<AgentProfile> {
             "你负责静态分析，只读。\n\
              入口是 bin.importexport.list：先看 riskHints，再逐个确认高危 API 的真实用途——imported 了不等于调用了。\n\
              定位用 bin.xref.search：用字符串或字节特征反查引用点，拿到 offset 与 va。\n\
-             需要函数边界时先看工具清单：装了 Ghidra 用 bin_ghidra_analyze（带基本块），只有 radare2 用 bin_radare2_scan（只有边界）。要伪 C 用 bin_ghidra_decompile_func，传 va 或函数名；它给的是 Ghidra 的原文，不要二次编造。两个后端都没装时它们不会出现在清单里；不要用 run_command 调 r2 / analyzeHeadless。\n\
+             需要函数边界时先看工具清单：装了 Ghidra 用 bin_ghidra_analyze（带基本块），只有 radare2 用 bin_radare2_scan（只有边界）。\n\
+             APK / DEX 不走这两条：bin.dex.disasm 列类并按方法反汇编（能读到 jadx 跳过的方法），bin.dex.xref 给跨类调用边。\n\
+             要伪 C 用 bin_ghidra_decompile_func，传 va 或函数名；它给的是 Ghidra 的原文，不要二次编造。两个后端都没装时它们不会出现在清单里；不要用 run_command 调 r2 / analyzeHeadless。\n\
              补充用 bin.strings.extract 找 C2、路径、注册表键、互斥体名。\n\
              每条结论写成「行为 ← 证据」：例如「写注册表自启 ← RegSetValueExA @ 0x4012a0，键名 Software\\Microsoft\\Windows\\CurrentVersion\\Run」。\n\
              严格区分「看到」（有证据）与「推断」（无证据），后者必须显式标注。\n\
@@ -443,13 +457,14 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "bin.meta.identify",
                     "bin.strings.extract",
                     "bin.xref.search",
+                    "bin.dex.disasm",
+                    "bin.dex.xref",
                     "bin.importexport.list",
                     "bin.radare2.scan",
                     "bin.ghidra.analyze",
                     "bin.ghidra.decompile_func",
                     "bin.json.jq",
                     "prism.artifact.get",
-                    "prism.artifact.put",
                 ],
                 &[],
                 &[],
@@ -467,7 +482,7 @@ pub fn builtin() -> Vec<AgentProfile> {
              RC4 的 0..255 递增表误报很高：没有其它证据时不要写成「用了 RC4」。\n\
              有已知明文特征时用 bin.crypto.xor_brute 反推密钥：默认 1..8 字节，命中多把时取位置最集中的那把；confidence=low 的是未验证候选，不能直接下结论。单字节快查仍可用 bin.crypto.scan 的 xorProbe。\n\
              遇到 PEM / DER / CERT.RSA / CERT.EC，用 bin.crypto.asn1.parse 拿 issuer、有效期、算法与指纹；私钥只报元信息，绝不还原私钥内容。\n\
-             找算法调用点用 bin.xref.search 反查常量所在地址周围的引用。\n\
+             找算法调用点用 bin.xref.search 反查常量所在地址周围的引用；APK / DEX 用 bin.dex.xref 看调用边、bin.dex.disasm 读方法体。\n\
              不给出「无法解密的密文」这种结论；解不出来就写清缺什么（密钥、IV、算法参数）。",
             &["安全", "密码"],
             tools(
@@ -480,9 +495,10 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "bin.crypto.asn1.parse",
                     "bin.crypto.xor_brute",
                     "bin.xref.search",
+                    "bin.dex.disasm",
+                    "bin.dex.xref",
                     "bin.json.jq",
                     "prism.artifact.get",
-                    "prism.artifact.put",
                 ],
                 &[],
                 &[],
@@ -527,7 +543,8 @@ pub fn builtin() -> Vec<AgentProfile> {
              用 bin.xref.search 把「字符串/常量 → 引用地址 → 所在函数」串成链，每一步都记 offset 与 va。\n\
              用 bin.importexport.list 判断调用是直接（IAT 有名）还是间接（GetProcAddress 动态取址）——后者才是混淆的迹象。\n\
              输出用缩进树或边列表描述调用关系，不要画 ASCII 艺术图。\n\
-             本机没有反汇编器：只能给到「引用地址」这一级，不要编造基本块、跳转表或函数边界，那需要 Ghidra（P2）。",
+             机器码样本本机没有反汇编器：只能给到「引用地址」这一级，不要编造基本块、跳转表或函数边界，那需要 Ghidra（P2）。\n\
+             DEX（APK / dex）不在此列：bin.dex.disasm 列类、按方法反汇编，bin.dex.xref 给跨类调用边（invoke 目标名齐全）——先用它们把链走通，再谈结论。",
             &["安全", "控制流"],
             tools(
                 &[
@@ -535,20 +552,58 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "grep",
                     "bin.meta.identify",
                     "bin.xref.search",
+                    "bin.dex.disasm",
+                    "bin.dex.xref",
                     "bin.importexport.list",
                     "bin.strings.extract",
                     "bin.json.jq",
                     "prism.artifact.get",
-                    "prism.artifact.put",
                 ],
                 &[],
                 &[],
             ),
         ),
         preset(
+            "sec-audit",
+            "结论审计",
+            "复核上游的否定性与关键结论：换方法重跑，给出成立/推翻/无法复核。只读。",
+            "native",
+            Permission::ReadOnly,
+            Workspace::Shared,
+            "你负责结论审计，不负责分析。\n\
+             上游已经给出结论；你的任务是挑错：把每一条「否定性 / 排他性 / 关键性」主张找出来，换一种方法重跑，判定它成立不成立。\n\
+             判定只有三档：refuted（找到反证，必须给「文件:行号」或工具原始输出，并写清影响）；confirmed（用与上游不同的方法复现）；unverified（拿不到证据，写清缺什么）。没有第四档，也不许写「疑似成立」。\n\
+             必须复核四类：①「0 命中 / 未发现 / 不存在 / 无」——默认怀疑，先怀疑搜索方法再怀疑结论；②「未定位 / 在失败类 / 未确认」——用 bin.dex.disasm 先列类名再按方法反汇编；③「仅 / 只有 / 全部」这类排他性主张——专门找漏网的；④数字（大小 / 哈希 / 版本 / 条目数）——重算。\n\
+             复核要换方法：拆词、加大小写、换语料根（sources / resources / 原始 dex 字符串）、换工具（grep ↔ bin.dex.xref ↔ bin.strings.extract）。复用上游同一条命令不算复核。\n\
+             APK 的「已签名 / 签名有效 / 证书是谁」用 bin.apk.sign 复核：它能证明签名结构是否存在、证书自报字段是什么，但不能证明密码学有效；上游若写「签名有效」，只能改成「存在 v2 签名，未验签」。\n\
+             每条主张最多 3 次工具调用；查不到就判 unverified 并写清缺什么，不要烧预算硬猜。\n\
+             读全文，不读摘要：上游摘要是截断过的，用 prism.artifact.get 取原文再下判断。\n\
+             不做新分析：不要顺手研究上游没提的东西——你的产出是判定，不是第二份报告。\n\
+             输出：第一段三行（审了 N 条 / 推翻 X / 确认 Y / 无法复核 Z，加一句最严重的一条）；然后逐条写「编号 | 原文摘录 | 判定 | 方法 | 证据 | 影响（是否改定级）」；最后一行写未覆盖的主张类型与原因。这段正文会被自动落盘成制品，下游按你的节点 id 引用。",
+            &["安全", "审计"],
+            tools(
+                &[
+                    "read_file",
+                    "list_files",
+                    "grep",
+                    "bin.json.jq",
+                    "bin.dex.disasm",
+                    "bin.dex.xref",
+                    "bin.strings.extract",
+                    "bin.meta.identify",
+                    "bin.hash.compute",
+                    "bin.apk.sign",
+                    "bin.jadx.decompile",
+                    "prism.artifact.get",
+                ],
+                &[],
+                &["write_file", "edit_file", "run_command"],
+            ),
+        ),
+        preset(
             "sec-assist",
             "安全辅助",
-            "把上游结论整理成报告：不改结论、不补证据、缺的一律标未验证。",
+            "把上游结论整理成报告：以审计为准，缺的一律标未验证。",
             "native",
             Permission::WorkspaceWrite,
             Workspace::Shared,
@@ -556,6 +611,7 @@ pub fn builtin() -> Vec<AgentProfile> {
              输入是上游节点的制品；用 prism.artifact.get 取全文或 bin.json.jq 取需要的字段，不要凭记忆复述。\n\
              报告结构固定：结论摘要（3 条以内）→ 证据表（行为 / 证据 / 位置 / 置信度）→ 未验证项 → 建议下一步。\n\
              禁止补写上游没有的证据；上游说「疑似」的地方，报告里也必须写「疑似」。\n\
+             若上游有结论审计节点（sec-audit，产出按它的节点 id 引用）：refuted 的主张必须按审计证据改写并注明「审计 A1 推翻」；confirmed 可保留但引用审计编号；unverified 写成「未复核（缺 X）」，不得据此上调风险等级。审计与上游冲突时以审计为准——除非审计拿不出「文件:行号」。\n\
              用 write_file 落 Markdown，同时 prism.artifact.put 存一份（key=report）给下游。",
             &["安全", "报告"],
             tools(
@@ -574,7 +630,7 @@ pub fn builtin() -> Vec<AgentProfile> {
             ),
         ),
     ];
-    // 七个工种里只有它会碰宿主（真的跑命令），所以默认过人工闸门。
+    // 八个工种里只有它会碰宿主（真的跑命令），所以默认过人工闸门。
     // 其余全是只读或只写工作区，没必要每次都点一下。
     if let Some(profile) = presets
         .iter_mut()
@@ -823,13 +879,14 @@ mod tests {
             "docs",
             "verifier",
             "dsh-research",
-            // 安全研究线七个工种
+            // 安全研究线八个工种
             "sample-prep",
             "unpacker",
             "static-analysis",
             "crypto-analysis",
             "dynamic-sandbox",
             "control-flow",
+            "sec-audit",
             "sec-assist",
         ] {
             assert!(ids.contains(&expected.to_string()), "缺少内置 Agent：{expected}");
@@ -848,6 +905,7 @@ mod tests {
             "crypto-analysis",
             "dynamic-sandbox",
             "control-flow",
+            "sec-audit",
             "sec-assist",
         ];
         for id in security {
@@ -867,6 +925,85 @@ mod tests {
                 "{id} 缺少「安全」标签"
             );
         }
+    }
+
+    /// 样本预处理要能读 APK 签名结构，但提示词必须禁止它把"结构存在"说成"验签通过"。
+    #[test]
+    fn sample_prep_reads_apk_signature_structure_only() {
+        let all = builtin();
+        let prep = all.iter().find(|item| item.id == "sample-prep").unwrap();
+        let shared = prep.tools.shared.as_ref().expect("预处理要显式列工具");
+        assert!(
+            shared.contains(&"bin.apk.sign".to_string()),
+            "预处理缺 bin.apk.sign：{shared:?}"
+        );
+        assert!(
+            prep.system_prompt.contains("不验签"),
+            "提示词必须写清只解析结构：{}",
+            prep.system_prompt
+        );
+        assert!(
+            prep.system_prompt.contains("不要写「签名有效」"),
+            "提示词必须禁止把结构存在当成验签结论：{}",
+            prep.system_prompt
+        );
+    }
+
+    /// 审计工种必须能读到 jadx 跳过的方法。
+    ///
+    /// 这条是工种存在的理由：aerial-guard 那次 45 个方法 `Method dump skipped`，
+    /// 报告只能写「未定位」，而 `bin.dex.disasm` 本来就在仓库里——不给它白名单，
+    /// 审计就退化成把上游结论再读一遍。
+    #[test]
+    fn sec_audit_can_reach_undedecompiled_methods() {
+        let all = builtin();
+        let audit = all.iter().find(|item| item.id == "sec-audit").unwrap();
+        let shared = audit.tools.shared.as_ref().expect("审计要显式列工具");
+        for tool in [
+            "bin.dex.disasm",
+            "bin.dex.xref",
+            "bin.apk.sign",
+            "prism.artifact.get",
+        ] {
+            assert!(
+                shared.contains(&tool.to_string()),
+                "审计缺 {tool}，反编译失败的方法就没人复核：{shared:?}"
+            );
+        }
+        assert_eq!(audit.permission, Permission::ReadOnly, "审计不该有写权限");
+        // 三档判定是提示词的骨架，缺一个模型就会退回「疑似成立」。
+        for verdict in ["refuted", "confirmed", "unverified"] {
+            assert!(
+                audit.system_prompt.contains(verdict),
+                "审计提示词缺判定档 {verdict}"
+            );
+        }
+    }
+
+    /// 反编译失败的方法要能靠 DEX 反汇编补证：三个分析工种都得有这两件套。
+    #[test]
+    fn analysis_presets_can_disassemble_dex() {
+        let all = builtin();
+        for id in ["static-analysis", "control-flow", "crypto-analysis"] {
+            let profile = all.iter().find(|item| item.id == id).expect(id);
+            let shared = profile.tools.shared.as_ref().expect("分析工种要显式列工具");
+            for tool in ["bin.dex.disasm", "bin.dex.xref"] {
+                assert!(
+                    shared.contains(&tool.to_string()),
+                    "{id} 缺 {tool}：APK 的调用链只能停在「引用地址」这一级"
+                );
+            }
+        }
+    }
+
+    /// 节点配置只能收紧 Agent 的权限，不能提权。
+    #[test]
+    fn node_permission_cannot_exceed_the_agent() {
+        use Permission::*;
+        assert_eq!(WorkspaceWrite.at_most(ReadOnly), ReadOnly);
+        assert_eq!(ReadOnly.at_most(WorkspaceWrite), ReadOnly);
+        assert_eq!(FullAccess.at_most(WorkspaceWrite), WorkspaceWrite);
+        assert_eq!(WorkspaceWrite.at_most(FullAccess), WorkspaceWrite);
     }
 
     /// 只有会碰宿主的工种默认过闸门——闸门遍地开就没有信息量了。

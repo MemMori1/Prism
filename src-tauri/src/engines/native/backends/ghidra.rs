@@ -1064,7 +1064,17 @@ mod tests {
         make_executable(&fake);
 
         let sample = root.join("sample.exe");
-        std::fs::write(&sample, b"FAKE GHIDRA SAMPLE").expect("写样本");
+        // 样本内容带纳秒：程序索引缓存以 sha256 为键，固定内容会让"第一次必须
+        // spawn"的断言在第二次跑同一测试时命中上一轮的缓存。测试不能依赖用户
+        // 缓存目录是不是空的。
+        let sample_body = format!(
+            "FAKE GHIDRA SAMPLE {}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        );
+        std::fs::write(&sample, sample_body.as_bytes()).expect("写样本");
 
         let previous_home = std::env::var_os("PRISM_GHIDRA_HOME");
         let previous_java = std::env::var_os("JAVA_HOME");
@@ -1081,6 +1091,7 @@ mod tests {
             provider: None,
             model: None,
             permission: None,
+            selection: None,
             enabled: &enabled,
             dag: None,
             should_stop: &|| false,
@@ -1146,7 +1157,9 @@ mod tests {
         }
         super::super::refresh("ghidra");
 
-        if let Some(dir) = index::cache_root().map(|root| root.join(sha256_of(b"FAKE GHIDRA SAMPLE"))) {
+        if let Some(dir) =
+            index::cache_root().map(|root| root.join(sha256_of(sample_body.as_bytes())))
+        {
             let _ = std::fs::remove_dir_all(dir);
         }
         let _ = std::fs::remove_dir_all(&root);
@@ -1170,6 +1183,7 @@ mod tests {
             provider: None,
             model: None,
             permission: None,
+            selection: None,
             enabled: &enabled,
             dag: None,
             should_stop: &|| false,

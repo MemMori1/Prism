@@ -22,6 +22,7 @@ import {
   waitingNodes,
 } from '../dagRun'
 import type {
+  AgentPermission,
   AgentProfile,
   ArtifactRef,
   DagIssue,
@@ -585,6 +586,22 @@ function focusNode(id: string): void {
 function effectiveExecutor(agentId: string | null | undefined): string {
   const target = agentId ?? plan.value?.defaults.agent ?? ''
   return agents.value.find(agent => agent.id === target)?.executor ?? '—'
+}
+
+/** 节点实际会用的权限：节点覆盖 → 计划默认，再与 Agent 画像取严。 */
+function effectivePermission(
+  agentId: string | null | undefined,
+  own: AgentPermission | null,
+): AgentPermission {
+  const planned = own ?? plan.value?.defaults.permission ?? 'workspace-write'
+  const agent = agents.value.find(item => item.id === (agentId ?? plan.value?.defaults.agent))
+  if (!agent) return planned
+  const rank: Record<AgentPermission, number> = {
+    'read-only': 0,
+    'workspace-write': 1,
+    'danger-full-access': 2,
+  }
+  return rank[agent.permission] <= rank[planned] ? agent.permission : planned
 }
 
 /** 状态类名（`is-running` 这种）：样式表只认前缀，不认整串。 */
@@ -1487,8 +1504,16 @@ defineExpose({ reload: () => loadPlans(true) })
               </div>
               <div class="kv">
                 <span>权限</span>
-                <b>{{ permissionLabel(selectedNode.permission ?? plan.defaults.permission) }}</b>
+                <b>{{ permissionLabel(effectivePermission(selectedNode.agent, selectedNode.permission)) }}</b>
               </div>
+              <p
+                v-if="selectedNode.permission !== null
+                  && effectivePermission(selectedNode.agent, selectedNode.permission) !== selectedNode.permission"
+                class="hint small"
+              >
+                节点要的是「{{ permissionLabel(selectedNode.permission) }}」，但 Agent 的权限上限更低——
+                实际按上面那档跑。节点只能收紧，不能提权。
+              </p>
             </div>
           </template>
 
@@ -1527,6 +1552,14 @@ defineExpose({ reload: () => loadPlans(true) })
                 <div v-for="(step, index) in selectedSteps" :key="index" class="run-step">
                   <span class="run-step-index mono">{{ index + 1 }}</span>
                   <span class="run-step-text mono">{{ step }}</span>
+                </div>
+              </div>
+
+              <div v-if="selectedRun.failures?.length" class="run-steps">
+                <div class="run-steps-title">工具失败（已随上游清单传给下游）</div>
+                <div v-for="(failure, index) in selectedRun.failures" :key="`fail-${index}`" class="run-step">
+                  <span class="run-step-index mono">!</span>
+                  <span class="run-step-text mono">{{ failure }}</span>
                 </div>
               </div>
 

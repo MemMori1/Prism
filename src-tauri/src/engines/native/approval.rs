@@ -333,6 +333,9 @@ mod tests {
     fn parse_falls_back_to_ask() {
         assert_eq!(parse(Some("read-only")), Mode::ReadOnly);
         assert_eq!(parse(Some("full")), Mode::Full);
+        assert_eq!(parse(Some("danger-full-access")), Mode::Ask);
+        // `workspace-write` 不能被认成 full：DAG 里危险命令会被自动放行。
+        assert_eq!(parse(Some("workspace-write")), Mode::Ask);
         assert_eq!(parse(Some("ask")), Mode::Ask);
         assert_eq!(parse(None), Mode::Ask);
         assert_eq!(parse(Some("随便什么")), Mode::Ask);

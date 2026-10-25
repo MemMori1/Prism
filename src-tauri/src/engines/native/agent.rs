@@ -885,6 +885,7 @@ fn run_turns(
                         provider: Some(provider),
                         model: Some(model),
                         permission: Some(permission.as_str()),
+                        selection: None,
                         enabled: &enabled,
                         dag: None,
                         should_stop: &|| slot.stopped(),

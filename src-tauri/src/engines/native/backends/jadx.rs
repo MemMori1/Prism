@@ -422,6 +422,7 @@ ERROR - finished with errors, count: 78
             provider: None,
             model: None,
             permission: Some("read-only"),
+            selection: None,
             enabled: &enabled,
             dag: None,
             should_stop: &stop,

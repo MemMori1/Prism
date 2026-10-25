@@ -113,6 +113,82 @@ pub struct NodeOutput {
     pub tokens_cached: i64,
     pub turns: u32,
     pub steps: Vec<String>,
+    /// 这一节点里**失败过的工具调用**。节点仍可能成功（模型换了方法或绕开），
+    /// 但下游必须知道"这条线索没查成"，否则会把缺口当成"查过且没有问题"。
+    /// 执行器把这些条目传给直接 / 间接下游。
+    pub failures: Vec<String>,
+}
+
+/// 失败清单的上限：太长的清单既花提示词预算，也没人看。
+pub const FAILURES_MAX: usize = 12;
+/// 单条失败说明保留多少字符。
+pub const FAILURE_TEXT_LIMIT: usize = 240;
+
+/// 记一条工具失败。
+///
+/// 同一个工具反复失败（模型对同一个坏路径重试）只留第一次并记次数；
+/// 条目数到上限后不再展开，最后一行改成"还有 N 条已省略"——事实不丢，
+/// 但别让一份清单吃掉下游的提示词预算。
+pub fn record_failure(output: &mut NodeOutput, tool: &str, error: &str) {
+    let reason: String = error
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(FAILURE_TEXT_LIMIT)
+        .collect();
+    let prefix = format!("{tool}：");
+    if let Some(existing) = output.failures.iter_mut().find(|item| item.starts_with(&prefix)) {
+        let count = repeat_count(existing) + 1;
+        let base = truncate_repeat(existing);
+        *existing = format!("{base}（重复 {count} 次）");
+        return;
+    }
+
+    // 留一格给"省略了 N 条"：清单有上限，但缺口数量本身也是信息。
+    let body_limit = FAILURES_MAX.saturating_sub(1);
+    if output.failures.len() < body_limit {
+        output.failures.push(format!("{prefix}{reason}"));
+        return;
+    }
+    let omitted = output
+        .failures
+        .iter()
+        .last()
+        .and_then(|last| omitted_count(last))
+        .unwrap_or(0)
+        + 1;
+    let summary = format!("…另有 {omitted} 条工具失败未展开（清单上限 {body_limit} 条）");
+    if output.failures.len() == body_limit {
+        output.failures.push(summary);
+    } else if let Some(last) = output.failures.last_mut() {
+        *last = summary;
+    }
+}
+
+fn repeat_count(line: &str) -> u32 {
+    const MARK: &str = "（重复 ";
+    line.rfind(MARK)
+        .and_then(|at| {
+            line[at + MARK.len()..]
+                .split_whitespace()
+                .next()?
+                .parse::<u32>()
+                .ok()
+        })
+        .unwrap_or(1)
+}
+
+fn truncate_repeat(line: &str) -> &str {
+    match line.rfind("（重复 ") {
+        Some(at) => &line[..at],
+        None => line,
+    }
+}
+
+fn omitted_count(line: &str) -> Option<u32> {
+    let rest = line.strip_prefix("…另有 ")?;
+    rest.split(' ').next()?.parse::<u32>().ok()
 }
 
 /// 节点执行器插件。
@@ -610,35 +686,31 @@ impl NodeRunner for NativeRunner {
                 }
                 let args: Value =
                     serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
-                // 无人值守：只读档的写类动作直接拒，其余放行（见文件头说明）。
-                let denied = match (request.permission, crate::engines::native::approval::action_of(&call.name)) {
-                    (Permission::ReadOnly, Some(action)) => Some(format!(
-                        "节点权限是「只读」：{action} 被拦下了"
-                    )),
-                    _ => None,
-                };
-                let result = match denied {
-                    Some(reason) => tools::ToolOutcome::fail(reason),
-                    None => {
-                        tools::run_with_args(
-                            &tools::ToolContext {
-                                app: self.app.as_ref(),
-                                session_id: &format!("dag:{}:{}", request.run_id, request.node_id),
-                                directory: &request.directory,
-                                call_id: &call.id,
-                                provider: Some(&provider_cfg),
-                                model: Some(&model),
-                                permission: Some(permission_str(request.permission)),
-                                enabled: &enabled,
-                                dag: Some(&scope),
-                                should_stop: &should_stop,
-                            },
-                            &call.name,
-                            &args,
-                        )
-                        .outcome
-                    }
-                };
+                // 权限档与白名单都在 `run_with_args` 里统一拦（聊天 / 编排 /
+                // 子代理共用一处出口）。这里不再特判——特判过的那一版只挡了
+                // 「有审批动作」的工具，白名单外的工具照样能调。
+                let result = tools::run_with_args(
+                    &tools::ToolContext {
+                        app: self.app.as_ref(),
+                        session_id: &format!("dag:{}:{}", request.run_id, request.node_id),
+                        directory: &request.directory,
+                        call_id: &call.id,
+                        provider: Some(&provider_cfg),
+                        model: Some(&model),
+                        permission: Some(request.permission.as_str()),
+                        selection: Some(&request.selection),
+                        enabled: &enabled,
+                        dag: Some(&scope),
+                        should_stop: &should_stop,
+                    },
+                    &call.name,
+                    &args,
+                )
+                .outcome;
+                if let Some(error) = &result.error {
+                    // 失败也要让下游看见：模型可能绕过去了，但证据缺口还在。
+                    record_failure(&mut output, &call.name, error);
+                }
                 if output.steps.len() < 24 {
                     let step = format!(
                         "{}{}",
@@ -716,13 +788,6 @@ fn stop_error(stop: &StopHandle, output: NodeOutput) -> String {
     text
 }
 
-fn permission_str(permission: Permission) -> &'static str {
-    match permission {
-        Permission::ReadOnly => "read-only",
-        _ => "full",
-    }
-}
-
 /// 系统提示：只用 profile 写的那段 + 一条运行环境事实。
 ///
 /// 不在这里塞"你是一个 AI"这类话：那是模型自己的事，写进去只花 token。
@@ -758,14 +823,10 @@ fn permission_label(permission: Permission) -> &'static str {
 
 /// 按 Agent 的工具策略筛 schema。
 ///
+/// 判定本身在 [`tools::selection_allows`]：schema 裁剪与调用闸门必须共用同一
+/// 份规则，否则「模型看得见」和「实际跑得动」会各说各话。
 /// `shared: None` 表示"该档权限下的全部公用工具"，不是"没有工具"——这个
 /// 区别在 `agents::ToolSelection` 那里已经讲清，这里只是照着执行。
-/// 元工具：回答"我现在有什么能力"，因此**不参与白名单裁剪**。
-///
-/// 白名单是给具体工种配能力的；自省工具被裁掉，模型就失去在被裁剪之后自查
-/// 的手段——恰好是最需要它的时候用不上。`deny` 仍然优先（显式禁就是禁）。
-const META_TOOLS: &[&str] = &["tools_list"];
-
 fn filter_specs(specs: Vec<Value>, selection: &ToolSelection) -> Vec<Value> {
     specs
         .into_iter()
@@ -775,21 +836,7 @@ fn filter_specs(specs: Vec<Value>, selection: &ToolSelection) -> Vec<Value> {
                 .and_then(|value| value.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            // schema 里是 wire 名（`bin_meta_identify`），白名单里是内部名
-            // （`bin.meta.identify`）——两边都压平再比，否则带点号的工具会被
-            // 白名单全部筛掉：模型看不到工具，节点只会回一句"我做不到"。
-            let listed = |item: &String| tools::wire_name(item) == name;
-            if selection.deny.iter().any(listed) {
-                return false;
-            }
-            if META_TOOLS.contains(&name) {
-                return true;
-            }
-            let in_shared = match &selection.shared {
-                None => true,
-                Some(list) => list.iter().any(listed),
-            };
-            in_shared || selection.private.iter().any(listed)
+            tools::selection_allows(selection, name)
         })
         .collect()
 }
@@ -1196,6 +1243,36 @@ mod tests {
         assert!(
             filter_specs(specs, &denied).is_empty(),
             "显式 deny 应当压过元工具例外"
+        );
+    }
+
+    #[test]
+    fn tool_failure_is_recorded_and_trimmed() {
+        let mut output = NodeOutput::default();
+        let long = "超时 ".repeat(200);
+        record_failure(&mut output, "bin.jadx.decompile", &long);
+        assert_eq!(output.failures.len(), 1);
+        assert!(output.failures[0].starts_with("bin.jadx.decompile："));
+        assert!(
+            output.failures[0].chars().count() < FAILURE_TEXT_LIMIT + 40,
+            "失败信息必须截断，否则一条就能吃掉下游预算"
+        );
+
+        // 同一个工具重复失败：合并计数，不刷屏。
+        record_failure(&mut output, "bin.jadx.decompile", "又超时");
+        record_failure(&mut output, "bin.jadx.decompile", "第三次");
+        assert_eq!(output.failures.len(), 1);
+        assert!(output.failures[0].contains("重复 3 次"), "{:?}", output.failures);
+
+        // 不同工具各占一行；超出上限后只剩省略说明，但条数不再增长。
+        for index in 0..20 {
+            record_failure(&mut output, &format!("tool.{index}"), "失败");
+        }
+        assert_eq!(output.failures.len(), FAILURES_MAX);
+        assert!(
+            output.failures.last().unwrap().contains("未展开"),
+            "超限后要给出省略数量：{:?}",
+            output.failures.last()
         );
     }
 }

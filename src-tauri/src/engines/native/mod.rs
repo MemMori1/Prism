@@ -23,6 +23,7 @@
 
 pub mod agent;
 pub mod analysis;
+pub mod apksig;
 pub mod approval;
 pub mod artifact_tools;
 pub mod backends;

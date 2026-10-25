@@ -15,6 +15,7 @@ use tauri::Manager;
 
 use super::store::StoredTokens;
 use super::{approval, guard, runtime};
+use crate::agents::ToolSelection;
 use crate::tasks::{SpawnRequest, TaskInfo, TasksState};
 
 /// 单次工具输出的字符上限——**所有工具的统一出口闸**（见 `run_with_args`）。
@@ -162,6 +163,15 @@ impl Permission {
         match max {
             Permission::ReadOnly => self == Permission::ReadOnly,
             Permission::WriteWorkspace => true,
+        }
+    }
+
+    /// 取更严的一档（父级权限传给子代理时用：子代理不能比父级更宽）。
+    pub fn at_most(self, max: Permission) -> Permission {
+        if self.within(max) {
+            self
+        } else {
+            max
         }
     }
 
@@ -354,16 +364,35 @@ pub struct ToolContext<'a> {
     /// 当前模型服务（只有子代理用得上，普通工具不碰）。
     pub provider: Option<&'a super::config::ProviderConfig>,
     pub model: Option<&'a str>,
-    /// 权限档的原始值（read-only / ask / full），子代理据此构造
-    /// `approval::Mode`——这里刻意存字符串而不是 `Mode`，免得工具层反过来
-    /// 依赖审批层（审批层要查这张表，方向不能反）。
+    /// 权限档的原始值（`read-only` / `ask` / `workspace-write` /
+    /// `danger-full-access`），既用于构造 `approval::Mode`，也用于推导工具层
+    /// 的权限上限（见 [`ToolContext::cap`]）。这里刻意存字符串而不是 `Mode`，
+    /// 免得工具层反过来依赖审批层（审批层要查这张表，方向不能反）。
     pub permission: Option<&'a str>,
+    /// 本轮的工具白名单。`None` = 不裁剪（聊天；子代理按权限档推导）。
+    /// DAG 节点由执行器注入，`run_with_args` 按它做调用级校验。
+    pub selection: Option<&'a ToolSelection>,
     /// 当前生效的工具开关：执行前兜底校验，不依赖模型"听话"。
     pub enabled: &'a EnabledTools,
     /// DAG 作用域：由执行器为每个节点注入，模型改不了 `dag_id`。
     /// 聊天与子代理为 `None`，此时 [`ToolScope::Dag`] 的工具根本不在 schema 里。
     pub dag: Option<&'a crate::dag::artifact::DagScope>,
     pub should_stop: &'a dyn Fn() -> bool,
+}
+
+impl ToolContext<'_> {
+    /// 工具层的权限上限。
+    ///
+    /// 只有「只读」会挡住写类工具；`ask` / `workspace-write` /
+    /// `danger-full-access` 在工具注册表里都是同一个上限——越界写入与危险
+    /// 命令由审批闸门（`approval::action_of`）按动作升级，不在这张表里
+    /// 重复编码。审批档的解析复用 `approval::parse`，两处不能各认一套写法。
+    fn cap(&self) -> Permission {
+        match approval::parse(self.permission) {
+            approval::Mode::ReadOnly => Permission::ReadOnly,
+            _ => Permission::WriteWorkspace,
+        }
+    }
 }
 
 /// 工具执行结果。
@@ -558,13 +587,14 @@ fn grep_schema() -> Value {
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "在文件内容里搜子串，返回 文件:行号:内容。",
+            "description": "在文件内容里搜子串，返回 文件:行号:内容。默认按字面量匹配；0 命中时会报扫描范围（扫了多少文件、跳过了什么），别把「没扫到」当成「不存在」。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "要搜的文本" },
+                    "pattern": { "type": "string", "description": "要搜的文本；regex=true 时按正则解释" },
                     "path": { "type": "string", "description": "搜索起点，默认工作目录根" },
-                    "ignore_case": { "type": "boolean", "description": "忽略大小写" }
+                    "ignore_case": { "type": "boolean", "description": "忽略大小写" },
+                    "regex": { "type": "boolean", "description": "把 pattern 当正则（默认按字面量，元字符原样匹配）" }
                 },
                 "required": ["pattern"]
             }
@@ -696,7 +726,7 @@ fn tools_list_schema() -> Value {
         "type": "function",
         "function": {
             "name": "tools_list",
-            "description": "列出此刻真正能调用的工具（已按权限档、工作区作用域和设置里的开关过滤），以及被挡住的原因。不确定自己有什么能力、或想找某个专用工具时先调它，不要凭印象猜工具名。",
+            "description": "列出此刻真正能调用的工具（已按权限档、工具白名单、工作区作用域和设置里的开关过滤），以及被挡住的原因。不确定自己有什么能力、或想找某个专用工具时先调它，不要凭印象猜工具名。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -864,11 +894,15 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
             ),
             // 子代理：声明与执行都在 subagent 模块，这里只做登记。
             // `delegable: false` 是扁平编排的保证——子代理开不出孙代理。
+            //
+            // 权限记只读：`task` 自己不写盘，能写多少取决于子代理的工具清单，
+            // 而那份清单和调用闸门都沿用父级权限档。记成可写会让只读会话
+            // 直接失去「派个探索者去翻代码」这个正当用法。
             builtin(
                 "task",
                 "委派给子代理",
                 super::subagent::spec,
-                Permission::WriteWorkspace,
+                Permission::ReadOnly,
                 None,
                 None,
                 "",
@@ -881,6 +915,7 @@ pub fn builtin_tools() -> &'static [Arc<ToolDef>] {
         list.extend(super::web::tools());
         list.extend(super::browser_tools::tools());
         list.extend(super::forensics::tools());
+        list.extend(super::apksig::tools());
         list.extend(super::analysis::tools());
         list.extend(super::dex::tools());
         list.extend(super::dag_tools::tools());
@@ -1083,6 +1118,37 @@ pub fn visible(
     tools
 }
 
+/// 自省工具：回答「我现在有什么能力」，因此**不参与白名单裁剪**。
+///
+/// 白名单是给具体工种配能力的；自省工具被裁掉，模型就失去在被裁剪之后自查
+/// 的手段——恰好是最需要它的时候用不上。`deny` 仍然优先（显式禁就是禁）。
+const META_TOOLS: &[&str] = &["tools_list"];
+
+/// 工具名是否放行于这份白名单。
+///
+/// schema 过滤器（DAG runner 里的 `filter_specs`）和执行闸（[`run_with_args`]）
+/// 共用这一份判定：两边各写一遍，模型看到的清单和真能跑的东西就会漂——
+/// 这正是「白名单里的 Agent 照样调 `run_command`」的成因。
+pub fn selection_allows(selection: &ToolSelection, name: &str) -> bool {
+    // schema 里是 wire 名（`bin_meta_identify`），白名单里是内部名
+    // （`bin.meta.identify`）——两边都压平再比，否则带点号的工具会被白名单
+    // 整个筛掉。
+    let wanted = wire_name(name);
+    let listed = |item: &String| wire_name(item) == wanted;
+    if selection.deny.iter().any(listed) {
+        return false;
+    }
+    if META_TOOLS.contains(&wanted.as_str()) {
+        return true;
+    }
+    // `shared: None` = 该档权限下的全部公用工具，不是「一个都没有」。
+    let shared = match &selection.shared {
+        None => true,
+        Some(list) => list.iter().any(listed),
+    };
+    shared || selection.private.iter().any(listed)
+}
+
 /// 发给模型的工具声明（受当前开关与作用域约束）。
 ///
 /// 关掉的工具不进 schema：模型看不到就不会调，也省一份 schema 的 token。
@@ -1134,6 +1200,25 @@ pub fn run_with_args(ctx: &ToolContext<'_>, name: &str, args: &Value) -> ToolRes
     // 作用域的第三道防线：schema 里没发，但历史里可能留着旧调用。
     if tool.meta.scope == ToolScope::Dag && ctx.dag.is_none() {
         return ToolResult::fail(format!("{name} 只在 DAG 节点里可用（需要节点作用域）"));
+    }
+    // 权限档的第三道防线：schema 按上限裁过，但历史里可能留着旧调用。
+    let cap = ctx.cap();
+    if !tool.permission.within(cap) {
+        return ToolResult::fail(format!(
+            "工具 {name} 需要 {} 档权限，当前上限是 {}：权限档不允许。\
+             换个不越界的做法，或改节点 / Agent 的权限档。",
+            tool.permission.as_str(),
+            cap.as_str()
+        ));
+    }
+    // 白名单的第三道防线：schema 裁剪只管「看不看得见」，历史里的旧调用和
+    // 模型幻觉的名字仍会走到这里——必须按同一个判定再拒一次。
+    if let Some(selection) = ctx.selection {
+        if !selection_allows(selection, &tool.name) {
+            return ToolResult::fail(format!(
+                "工具 {name} 不在这个节点的工具白名单里（可用 tools_list 查当前能力）"
+            ));
+        }
     }
     let mut result = tool.call(ctx, args);
     // 统一出口闸。工具自己记不记得 clamp 是它的事，这里必须兜住——
@@ -1190,6 +1275,15 @@ fn confirm(
             "{message}：这一步需要人工确认，但当前没有可用的审批通道（DAG / 子代理里请换个做法）"
         ));
     };
+    // 无人值守：DAG 节点线程没人看屏幕，弹了卡也没人点。以前这里会一路
+    // 等到节点硬超时（30 分钟），节点看起来像"卡死"；现在直接拒绝，让模型
+    // 换一个不越界的做法——自动放行则是更坏的答案。
+    if ctx.dag.is_some() {
+        return Err(format!(
+            "{message}：这个动作需要人工确认，DAG 节点无人值守，已拒绝。\
+             请改用工作目录内的做法；确实需要这一步就由人在交互式会话里跑。"
+        ));
+    }
     let mode = approval::parse(ctx.permission);
     let verdict = approval::gate(
         app,
@@ -1331,12 +1425,8 @@ fn tools_list(ctx: &ToolContext<'_>, args: &Value) -> ToolOutcome {
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
-    // 上下文里存的是审批档字符串（read-only / ask / full）。映射回工具权限上限，
-    // 与 DAG runner 的 cap 保持一致：只有 read-only 会挡住写类工具。
-    let cap = match ctx.permission {
-        Some("read-only") => Permission::ReadOnly,
-        _ => Permission::WriteWorkspace,
-    };
+    // 与 `run_with_args` 同一个口径：只有只读档会挡住写类工具。
+    let cap = ctx.cap();
     let dag = ctx.dag.is_some();
 
     let mut lines: Vec<String> = Vec::new();
@@ -1356,6 +1446,11 @@ fn tools_list(ctx: &ToolContext<'_>, args: &Value) -> ToolOutcome {
             Some("已在设置里关闭".to_string())
         } else if tool.meta.scope == ToolScope::Dag && !dag {
             Some("只在 DAG 节点里可用".to_string())
+        } else if ctx
+            .selection
+            .is_some_and(|selection| !selection_allows(selection, &tool.name))
+        {
+            Some("不在这个节点的工具白名单里".to_string())
         } else if !tool.permission.within(cap) {
             Some(format!(
                 "需要 {} 档权限（当前 {}）",
@@ -1374,18 +1469,23 @@ fn tools_list(ctx: &ToolContext<'_>, args: &Value) -> ToolOutcome {
     }
 
     let filter = tag.map(|tag| format!("，标签={tag}")).unwrap_or_default();
+    // 白名单裁剪过就说清楚，否则模型会把「不在清单里」误读成「本机没这个能力」。
+    let limited = if ctx.selection.is_some() {
+        "，已按节点工具白名单裁剪"
+    } else {
+        ""
+    };
+    let scope = if dag { "DAG 节点" } else { "普通会话" };
     let mut text = if lines.is_empty() {
         format!(
-            "当前没有可用工具（权限档 {}，作用域 {}{filter}）。",
-            cap.as_str(),
-            if dag { "DAG 节点" } else { "普通会话" }
+            "当前没有可用工具（权限档 {}，作用域 {scope}{limited}{filter}）。",
+            cap.as_str()
         )
     } else {
         format!(
-            "当前可用 {} 个工具（权限档 {}，作用域 {}{filter}）：\n{}",
+            "当前可用 {} 个工具（权限档 {}，作用域 {scope}{limited}{filter}）：\n{}",
             lines.len(),
             cap.as_str(),
-            if dag { "DAG 节点" } else { "普通会话" },
             lines.join("\n")
         )
     };
@@ -1493,6 +1593,7 @@ pub fn execute_with_stop(
         provider: None,
         model: None,
         permission: None,
+        selection: None,
         enabled: &enabled,
         dag: None,
         should_stop,
@@ -1629,6 +1730,23 @@ fn grep(root: &Path, args: &Value) -> ToolOutcome {
         None => root.to_path_buf(),
     };
     let ignore_case = bool_arg(args, "ignore_case");
+    // 默认按字面量：绝大多数调用搜的是 `NanoHTTPD` 这种原文，不是正则。
+    // 要正则得显式开——不开却把 `.` `*` 当通配，是最常见的假阴性来源。
+    let regex = if bool_arg(args, "regex") {
+        match regex::RegexBuilder::new(pattern)
+            .case_insensitive(ignore_case)
+            .build()
+        {
+            Ok(regex) => Some(regex),
+            Err(error) => {
+                return ToolOutcome::fail(format!(
+                    "正则不合法：{error}（要按字面量搜就去掉 regex 参数）"
+                ))
+            }
+        }
+    } else {
+        None
+    };
     let needle = if ignore_case {
         pattern.to_lowercase()
     } else {
@@ -1643,26 +1761,43 @@ fn grep(root: &Path, args: &Value) -> ToolOutcome {
         .unwrap_or_default();
     let mut out = String::new();
     let mut hits = 0;
+    // 0 命中时要把「扫了什么」交代清楚：跳过的大文件 / 二进制正是假阴性的
+    // 常见来源，只回一句「没有命中」等于让人相信一个没做过的结论。
+    let mut scanned = 0usize;
+    let mut skipped_large = 0usize;
+    let mut skipped_binary = 0usize;
+    let mut skipped_unreadable = 0usize;
     for file in files {
         let Ok(meta) = std::fs::metadata(&file) else {
+            skipped_unreadable += 1;
             continue;
         };
         if meta.len() > GREP_MAX_BYTES {
+            skipped_large += 1;
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&file) else {
+            skipped_unreadable += 1;
             continue;
         };
         if text.contains('\u{0}') {
+            skipped_binary += 1;
             continue;
         }
+        scanned += 1;
         for (index, line) in text.lines().enumerate() {
-            let haystack = if ignore_case {
-                line.to_lowercase()
-            } else {
-                line.to_string()
+            let hit = match &regex {
+                Some(regex) => regex.is_match(line),
+                None => {
+                    let haystack = if ignore_case {
+                        line.to_lowercase()
+                    } else {
+                        line.to_string()
+                    };
+                    haystack.contains(&needle)
+                }
             };
-            if !haystack.contains(&needle) {
+            if !hit {
                 continue;
             }
             out.push_str(&format!(
@@ -1679,10 +1814,29 @@ fn grep(root: &Path, args: &Value) -> ToolOutcome {
         }
     }
     if out.is_empty() {
-        // 扫不全的时候「没有命中」是错误结论：必须把话说明白。
-        return ToolOutcome::ok(format!("{note}（没有命中）"));
+        let mut text = format!(
+            "{note}（没有命中：起点 {}，扫了 {scanned} 个文本文件，\
+             跳过 {skipped_large} 个大文件（>{GREP_MAX_BYTES} 字节）、\
+             {skipped_binary} 个二进制文件、{skipped_unreadable} 个读不了的文件）",
+            start.display()
+        );
+        // 字面量模式里带元字符：模型多半是想要正则，却按字面量搜了个空。
+        if regex.is_none() && looks_like_regex(pattern) {
+            text.push_str(
+                "\n模式里有正则元字符（. * [ ] ( ) | ^ $ 等），这次是按字面量匹配的；\
+                 要按正则搜请在参数里加 \"regex\": true。",
+            );
+        }
+        return ToolOutcome::ok(text);
     }
     ToolOutcome::ok(clamp(&format!("{note}{out}")))
+}
+
+/// 模式里有没有正则元字符（只用来提示，不改变匹配方式）。
+fn looks_like_regex(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .any(|ch| matches!(ch, '.' | '*' | '+' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '^' | '$' | '\\'))
 }
 
 fn write_file(root: &Path, args: &Value) -> ToolOutcome {
@@ -2344,6 +2498,63 @@ mod tests {
         assert!(names.contains(&"fetch".to_string()), "{names:?}");
     }
 
+    /// 调用层校验用的上下文（权限档 + 白名单可单独指定）。
+    fn guard_ctx<'a>(
+        enabled: &'a EnabledTools,
+        permission: Option<&'a str>,
+        selection: Option<&'a ToolSelection>,
+    ) -> ToolContext<'a> {
+        fn never() -> bool {
+            false
+        }
+        ToolContext {
+            app: None,
+            session_id: "test",
+            directory: ".",
+            call_id: "c1",
+            provider: None,
+            model: None,
+            permission,
+            selection,
+            enabled,
+            dag: None,
+            should_stop: &never,
+        }
+    }
+
+    /// 权限档与白名单必须在**调用层**生效，而不是只裁 schema。
+    ///
+    /// 真实事故：`sample-prep` 的白名单里没有 `run_command`，节点却实调了
+    /// 12 次——schema 裁掉了，`run_with_args` 没拦。模型从历史里翻出旧调用、
+    /// 或者干脆幻觉一个名字，都必须在这里被挡住。
+    #[test]
+    fn run_with_args_enforces_permission_and_allow_list() {
+        let enabled = EnabledTools::all();
+
+        let read_only = guard_ctx(&enabled, Some("read-only"), None);
+        let blocked = run_with_args(&read_only, "run_command", &json!({ "command": "true" }));
+        assert!(blocked.outcome.error.is_some(), "只读档不该跑命令");
+        assert!(blocked.outcome.text.contains("read-only"), "{}", blocked.outcome.text);
+
+        // 权限够，但不在白名单里：同样拒绝。
+        let selection = ToolSelection {
+            shared: Some(vec!["read_file".to_string()]),
+            private: Vec::new(),
+            deny: Vec::new(),
+        };
+        let scoped = guard_ctx(&enabled, Some("workspace-write"), Some(&selection));
+        let denied = run_with_args(&scoped, "run_command", &json!({ "command": "true" }));
+        assert!(denied.outcome.error.is_some(), "白名单外不该执行");
+        assert!(denied.outcome.text.contains("白名单"), "{}", denied.outcome.text);
+
+        // 白名单内的工具照常跑；自省工具不参与裁剪。
+        let allowed = run_with_args(&scoped, "read_file", &json!({ "path": "definitely-missing" }));
+        assert!(!allowed.outcome.text.contains("白名单"), "{}", allowed.outcome.text);
+        let inspect = run_with_args(&scoped, "tools_list", &json!({}));
+        assert!(inspect.outcome.error.is_none(), "{:?}", inspect.outcome.error);
+        assert!(inspect.outcome.text.contains("已按节点工具白名单裁剪"), "{}", inspect.outcome.text);
+    }
+
     /// 自省工具要说真话：报出来的清单必须和 `specs` 的口径一致。
     fn list_with(permission: Option<&str>, arguments: &str) -> String {
         let enabled = EnabledTools::all();
@@ -2356,6 +2567,7 @@ mod tests {
             provider: None,
             model: None,
             permission,
+            selection: None,
             enabled: &enabled,
             dag: None,
             should_stop: &never,
@@ -2475,6 +2687,7 @@ mod tests {
             provider: None,
             model: None,
             permission: None,
+            selection: None,
             enabled: &enabled,
             dag: None,
             should_stop: &|| false,
@@ -2829,6 +3042,54 @@ mod tests {
         assert!(listed.text.contains("文件数到顶"), "{}", listed.text);
     }
 
+    /// 0 命中必须带扫描回执：跳过大文件 / 二进制正是假阴性的来源。
+    ///
+    /// 真实事故：一份 2 MB 的 JSON 里有 22 处 `8790`，grep 因为体积跳过它，
+    /// 只回「没有命中」，报告据此写成了「不存在」。
+    #[test]
+    fn grep_zero_hits_reports_what_it_scanned() {
+        let dir = temp_dir("grepreceipt");
+        let root = dir.to_string_lossy().to_string();
+        fs::write(dir.join("a.txt"), "hello\n").unwrap();
+        fs::write(
+            dir.join("big.json"),
+            "x".repeat(GREP_MAX_BYTES as usize + 1),
+        )
+        .unwrap();
+        fs::write(dir.join("bin.dat"), b"\x00\x01\x02").unwrap();
+
+        let outcome = execute(&root, "grep", r#"{"pattern":"needle-nowhere"}"#);
+        assert!(outcome.text.contains("没有命中"), "{}", outcome.text);
+        assert!(outcome.text.contains("扫了 1 个文本文件"), "{}", outcome.text);
+        assert!(outcome.text.contains("1 个大文件"), "{}", outcome.text);
+        assert!(outcome.text.contains("1 个二进制文件"), "{}", outcome.text);
+    }
+
+    /// 默认按字面量搜；要正则得显式开。
+    ///
+    /// 不开却把 `879[0-9]` 当通配，是最常见的假阴性；开了还得拒绝写坏的正则。
+    #[test]
+    fn grep_supports_optional_regex() {
+        let dir = temp_dir("grepregex");
+        let root = dir.to_string_lossy().to_string();
+        fs::write(dir.join("a.log"), "port=8790\n").unwrap();
+
+        let literal = execute(&root, "grep", r#"{"pattern":"879[0-9]"}"#);
+        assert!(literal.text.contains("没有命中"), "{}", literal.text);
+        assert!(
+            literal.text.contains("regex") && literal.text.contains("元字符"),
+            "字面量搜到元字符要提示怎么改正则：{}",
+            literal.text
+        );
+
+        let regex = execute(&root, "grep", r#"{"pattern":"879[0-9]","regex":true}"#);
+        assert!(regex.text.contains("a.log:1:port=8790"), "{}", regex.text);
+
+        let broken = execute(&root, "grep", r#"{"pattern":"([","regex":true}"#);
+        assert!(broken.error.is_some(), "{:?}", broken.error);
+        assert!(broken.text.contains("正则不合法"), "{}", broken.text);
+    }
+
     #[test]
     fn wildcard_matches_simple_patterns() {
         assert!(wildcard_match("*.rs", "main.rs"));
@@ -2890,6 +3151,7 @@ mod tests {
             provider: None,
             model: None,
             permission: None,
+            selection: None,
             enabled: &enabled,
             dag: None,
             should_stop: &|| false,
@@ -2968,6 +3230,7 @@ mod tests {
             provider: None,
             model: None,
             permission: None,
+            selection: None,
             enabled: &enabled,
             dag: None,
             should_stop: &|| false,

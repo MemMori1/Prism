@@ -40,6 +40,9 @@ chrono = "0.4.45"
 # DeepSeek Harness 的会话日志是 append-only 的多帧 zstd。必须用 `stream::read::Decoder`
 # 这类"连续解多帧"的接口：只解第一帧的话，读到的是 header 那一行，看起来像空日志。
 zstd = "0.13"
+# grep 的 `regex: true` 模式：默认按字面量搜，显式开才当正则。
+# 同版本已作为 tauri-utils 的传递依赖在锁文件里，不新增下载。
+regex = "1"
 sha2 = "0.10.9"
 sha1 = "0.10.7"
 md-5 = "0.10.6"

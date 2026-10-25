@@ -905,6 +905,8 @@ export interface DagNodeRun {
   tokensCached: number
   /** 工具调用摘要（`read_file src/x.rs`），给过程感。 */
   steps: string[]
+  /** 本节点失败过的工具调用（工具名 + 原因）。成功节点也可能有。 */
+  failures?: string[]
   /** 已经完成的模型轮次（快照也带，刷新后不会退回 0）。 */
   turns: number
   /** 这一节点允许的最大轮次；0 表示执行器没报（外部引擎）。 */

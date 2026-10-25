@@ -345,6 +345,9 @@ pub struct ToolPolicy {
 5. 同名的 private 覆盖 shared（内置名永远不可覆盖）。
 
 执行时 `run_with_args` 用同一份解析结果再查一次，不信任模型「只调清单里的」。
+判定只有一处：`tools::selection_allows`（`deny` 优先、元工具例外、内部名与
+wire 名归一）。schema 过滤器与调用闸门共用它，两边各写一份就会漂——
+实测过白名单里没有 `run_command` 的节点照样调了 12 次命令。
 
 native 侧的落点：`agent::send` 目前只接收 `approval_mode`，工具清单从全局
 `config::load().tools` 读。要支持节点级策略，需要把这一轮的执行参数收成一个
@@ -377,8 +380,9 @@ maxTurns, tokenBudget }`，由 `send` 一路传到 `run_turns`；不传时保持
 硬把 Prism 的档位翻译过去等于假装控制住了。要收紧就去改对应引擎自己的配置。
 
 **无人值守的审批**：节点线程没人看屏幕，引擎弹 `permission.asked` 就没人点。
-执行器不自动放行，只把它记进节点步骤（运行面板上能看见"卡在等授权"），
-到硬上限（30 分钟）后打断并报超时。
+原生执行器遇到需要人工确认的动作（提权、联网、读凭据、关沙箱）**直接拒绝**
+并说明原因，不让节点空等；外部引擎的审批由它们自己弹，Prism 拦不住，最多
+等到硬上限（30 分钟）后打断并报超时。两端都不自动放行。
 
 **模型覆盖**：节点按 Agent 的 `model` 传下去，三家写法不同——`dsh` 是会话级
 config option、`codex` 是 thread 参数、`opencode` 是 `provider/model` 两级引用
@@ -386,10 +390,31 @@ config option、`codex` 是 thread 参数、`opencode` 是 `provider/model` 两�
 
 ### 5.5 权限上限
 
-- `effective = min(node.permission, run.permissionCeiling)`；
+- `effective = min(node.permission ?? defaults.permission, agent.permission,
+  run.permissionCeiling)`；
+- **节点只能收紧 Agent 的权限，不能提权**：只读 Agent 被派进默认
+  `workspace-write` 的节点，仍然只读（`Permission::at_most`）；
+- 原生执行器按 effective 档 + 工具白名单做调用级校验（`run_with_args`），
+  不依赖 schema 裁剪；`workspace-write` 绝不能当作 `full` 传给审批层——
+  那会让无人值守的 DAG 自动放行危险命令；
 - 无人值守的 run 必须显式勾选，且 ceiling ≤ `workspace-write`；
 - `danger-full-access` 只允许交互式 run，且每个节点首次危险动作仍弹一次确认；
 - 权限请求事件带 `dagId / runId / nodeId`，通知中心点进去直接定位节点。
+
+### 5.6 上游工具失败清单
+
+工具调用失败不等于节点失败：模型常会换个路径继续查，最后交出一份"看起来完整"的
+报告。下游只读正文，就会把"没查成"当成"查过且没有问题"——这是审计环最需要防的
+一种错误。
+
+- 执行器在每次工具调用后检查 `ToolOutcome.error`，成功节点也记录 `failures`；
+- `NodeOutput.failures` → `NodeRun.failures` 落运行快照（旧快照缺字段按空处理）；
+- 组装下游提示词时，沿 `depends_on` 收集**直接与间接**上游的失败清单，只传给
+  真正依赖它的节点；无关分支不注入；
+- 注入块以「执行器补充 · 上游工具失败清单」开头，明确写着"不是模型写的、不在
+  上游报告正文里"，并提醒错误文本可能夹带样本内容，只能当事实读；
+- 预算：每节点最多 12 条、单条 240 字、整块 4000 字；重复失败合并计数，超限只留
+  "另有 N 条未展开"，不让失败清单把上游报告挤出上下文。
 
 ## 6. 插件化装配
 
@@ -480,6 +505,8 @@ pub trait Planner: Send + Sync {
 - 调研节点只读、可并行；写节点必须声明 worktree；
 - 下游只依赖它真正需要的上游，不要串成一条链；
 - 最后一个节点是验证 / 汇总，依赖所有写节点；
+- 安全分析类目标（分析节点 ≥2 个）在汇总前插一个 `sec-audit`：复核「0 命中 /
+  未定位 / 仅… / 数字」四类主张，汇总节点依赖它；
 - 不生成「安装依赖」这种环境节点，除非项目摘要显示缺少依赖；
 - 节点 task 必须自足：子 Agent 看不到别的节点上下文，只能看到显式注入的产物。
 

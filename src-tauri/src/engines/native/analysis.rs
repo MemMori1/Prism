@@ -1951,7 +1951,7 @@ fn describe_pkcs7(explicit: &Tlv<'_>) -> Result<Value, String> {
 }
 
 /// 按最外层 SEQUENCE 的结构判别类型。判不出来就 `unknown`，不编名字。
-fn describe_der(der: &[u8]) -> Result<Value, String> {
+pub(crate) fn describe_der(der: &[u8]) -> Result<Value, String> {
     let (top, top_end) = read_tlv(der, 0)?;
     if !top.is_universal(0x10) {
         return Err(format!("顶层不是 SEQUENCE（tag=0x{:x}）", top.tag));
@@ -2575,6 +2575,7 @@ mod tests {
             provider: None,
             model: None,
             permission: None,
+            selection: None,
             enabled: ENABLED.get_or_init(super::super::tools::EnabledTools::all),
             dag: None,
             should_stop: &|| false,

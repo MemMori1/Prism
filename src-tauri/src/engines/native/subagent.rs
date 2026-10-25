@@ -357,7 +357,13 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
     };
 
     let enabled = tools::EnabledTools::from_config();
-    let specs = tools::specs_for(&enabled, agent.max_permission(), false);
+    // 父级权限是上限：只读会话里派 `general` 子代理，也不能先把写工具
+    // 摆到它面前再由调用层一个个拒——那只会烧光轮次。
+    let parent_cap = match req.permission {
+        approval::Mode::ReadOnly => tools::Permission::ReadOnly,
+        _ => tools::Permission::WriteWorkspace,
+    };
+    let specs = tools::specs_for(&enabled, agent.max_permission().at_most(parent_cap), false);
     let mut messages = vec![
         json!({ "role": "system", "content": agent.system_prompt(ctx.directory) }),
         json!({ "role": "user", "content": prompt }),
@@ -537,6 +543,7 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
                             provider: Some(req.provider),
                             model: Some(req.model),
                             permission: Some(req.permission.as_str()),
+                            selection: None,
                             enabled: &enabled,
                             dag: None,
                             should_stop: stop,

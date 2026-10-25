@@ -145,6 +145,10 @@ pub struct NodeRun {
     pub tokens_cached: i64,
     /// 工具调用摘要（`read_file src/x.rs` 这种），给运行面板做过程感。
     pub steps: Vec<String>,
+    /// 本节点失败过的工具调用（工具名 + 原因）。成功节点也可能有：模型换了
+    /// 方法绕过去，但下游需要知道哪条证据链断过。旧快照没有这个字段，补空。
+    #[serde(default)]
+    pub failures: Vec<String>,
     /// 当前（或最后）一轮模型调用，1 起。和 `NodeLive.turn` 同一个数字：
     /// 事件断了靠轮询读快照，两边不能各说一套。
     #[serde(default)]
@@ -201,6 +205,7 @@ impl DagRun {
                     tokens_out: 0,
                     tokens_cached: 0,
                     steps: Vec::new(),
+                    failures: Vec::new(),
                     turns: 0,
                     max_turns: 0,
                     artifact: None,
@@ -344,6 +349,15 @@ impl RunHandle {
             .and_then(|run| run.node(node_id).map(|node| node.output.clone()))
     }
 
+    /// 某节点成功时记录的工具失败清单（下游拼提示词时用）。
+    pub fn failures_of(&self, node_id: &str) -> Vec<String> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|run| run.node(node_id).map(|node| node.failures.clone()))
+            .unwrap_or_default()
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
@@ -412,6 +426,7 @@ impl RunHandle {
                 node.error = None;
                 node.output.clear();
                 node.steps.clear();
+                node.failures.clear();
                 node.artifact = None;
             },
             true,
@@ -462,6 +477,7 @@ impl RunHandle {
                 node.tokens_in += extra_in;
                 node.tokens_out += extra_out;
                 node.steps = output.steps;
+                node.failures = output.failures;
                 if output.turns > 0 {
                     node.turns = output.turns;
                 }
@@ -1013,6 +1029,7 @@ mod tests {
                 tokens_out: 0,
                 tokens_cached: 0,
                 steps: Vec::new(),
+                failures: Vec::new(),
                 turns: 0,
                 max_turns: 0,
                 artifact: None,
@@ -1148,5 +1165,20 @@ mod tests {
         let node = node_of(&handle);
         assert!(node.output.is_empty(), "重试要从空白开始");
         assert!(node.steps.is_empty());
+    }
+
+    /// 旧运行快照没有 `failures` 字段：反序列化要补空，不能整份运行记录读不出来。
+    #[test]
+    fn old_snapshots_without_failures_still_load() {
+        let (handle, _) = handle("n1");
+        let node = node_of(&handle);
+        let mut value = serde_json::to_value(&node).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("failures")
+            .expect("新记录里应当有这个字段");
+        let restored: NodeRun = serde_json::from_value(value).expect("旧快照必须能读");
+        assert!(restored.failures.is_empty());
     }
 }

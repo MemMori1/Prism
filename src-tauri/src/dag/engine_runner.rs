@@ -196,6 +196,8 @@ impl NodeRunner for EngineRunner {
             tokens_cached: 0,
             turns: 1,
             steps,
+            // 外部引擎的事件流没有统一的"工具失败"语义：这里不猜，留空。
+            failures: Vec::new(),
         })
     }
 }

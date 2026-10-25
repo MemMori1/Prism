@@ -1947,6 +1947,7 @@ mod tests {
             provider: None,
             model: None,
             permission: None,
+            selection: None,
             enabled: ENABLED.get_or_init(super::super::tools::EnabledTools::all),
             dag: None,
             should_stop: &|| false,

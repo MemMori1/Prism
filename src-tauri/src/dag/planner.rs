@@ -59,7 +59,10 @@ fn system_prompt(max_nodes: usize) -> String {
    会直接失败**。分析样本、脱壳、写报告、产出制品（走 prism.artifact.put）
    都算 shared，不要因为"会产出文件"就选 worktree。
 3. 下游只依赖它真正需要的上游，不要串成一条长链；能并行的就并行。
-4. 最后一个节点是验证/汇总，依赖前面所有产出结论的节点，gate 设为 true。
+4. 安全分析类目标（分析节点 ≥2 个）在汇总前必须插一个 sec-audit 节点：它依赖
+   全部分析节点，task 里点名要复核的四类主张（「0 命中」/「未定位」/「仅…」/ 数字），
+   并要求换方法重跑；汇总节点依赖审计节点，gate 设为 true。只有 1 个分析节点或
+   非分析类目标可以省掉审计。其余目标仍然最后一个节点是验证/汇总，gate=true。
 5. task 必须自足：子 Agent 看不到别的节点上下文。需要上游结论时用占位符
    {{{{nodes.<id>.output}}}}，且只能引用自己的上游（祖先）。
 6. 不要生成"安装依赖"这类环境节点，除非目标里明确提到。
@@ -507,6 +510,20 @@ mod tests {
                 text.contains("bin_jadx_decompile"),
                 "jadx 已就绪却没进规划器的工具清单：{text}"
             );
+        }
+    }
+
+    /// 安全分析类目标必须先过审计。
+    ///
+    /// 这条规则没法靠校验器兜底（图长什么样都合法），只能靠提示词。规则一旦
+    /// 被删掉，退回的就是 aerial-guard 那种「4 个节点全跑满、0 命中当否定证据、
+    /// 报告照抄」——审计工种装了等于没装。
+    #[test]
+    fn planner_asks_for_an_audit_node() {
+        let text = system_prompt(8);
+        assert!(text.contains("sec-audit"), "规则里没提审计工种：{text}");
+        for claim in ["0 命中", "未定位", "数字"] {
+            assert!(text.contains(claim), "没点名要复核「{claim}」：{text}");
         }
     }
 
