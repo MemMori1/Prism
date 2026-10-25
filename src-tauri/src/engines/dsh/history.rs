@@ -286,6 +286,7 @@ fn summary_of(meta: &SessionMeta) -> SessionSummary {
         cost: 0.0,
         tokens_input: 0,
         tokens_output: 0,
+        tokens_cached: 0,
         tokens_reasoning: 0,
         time_created: meta.created_at,
         time_updated: meta.updated_at,

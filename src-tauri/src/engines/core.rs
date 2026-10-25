@@ -46,6 +46,9 @@ pub struct SessionSummary {
     pub cost: f64,
     pub tokens_input: i64,
     pub tokens_output: i64,
+    /// 其中命中前缀缓存的输入（只有原生引擎拿得到这个数；其余记 0）。
+    /// 与 tokens_input 相除就是缓存命中率。
+    pub tokens_cached: i64,
     pub tokens_reasoning: i64,
     pub time_created: i64,
     pub time_updated: i64,

@@ -45,6 +45,8 @@ export interface SessionSummary {
   cost: number
   tokensInput: number
   tokensOutput: number
+  /** tokensInput 里命中前缀缓存的部分；0 = 引擎没报（非原生引擎恒 0）。 */
+  tokensCached: number
   tokensReasoning: number
   timeCreated: number
   timeUpdated: number
@@ -899,6 +901,8 @@ export interface DagNodeRun {
   error: string | null
   tokensIn: number
   tokensOut: number
+  /** tokensIn 里命中前缀缓存的部分（0 = 引擎没报 / 旧快照）。 */
+  tokensCached: number
   /** 工具调用摘要（`read_file src/x.rs`），给过程感。 */
   steps: string[]
   /** 已经完成的模型轮次（快照也带，刷新后不会退回 0）。 */

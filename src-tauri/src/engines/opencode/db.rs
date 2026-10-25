@@ -130,6 +130,7 @@ fn map_session_row(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         cost: row.get(5)?,
         tokens_input: row.get(6)?,
         tokens_output: row.get(7)?,
+        tokens_cached: 0,
         tokens_reasoning: row.get(8)?,
         time_created: row.get(9)?,
         time_updated: row.get(10)?,

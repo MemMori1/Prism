@@ -315,9 +315,10 @@ const selectedTokens = computed(() => {
     return {
       tin: Math.max(item.tokensIn, live.tokensIn),
       tout: Math.max(item.tokensOut, live.tokensOut),
+      cached: item.tokensCached ?? 0,
     }
   }
-  return { tin: item?.tokensIn ?? 0, tout: item?.tokensOut ?? 0 }
+  return { tin: item?.tokensIn ?? 0, tout: item?.tokensOut ?? 0, cached: item?.tokensCached ?? 0 }
 })
 
 /** 当前正在跑的节点（运行条上显示"现在谁在干什么"）。 */
@@ -335,16 +336,25 @@ const activeStep = computed(() => {
   return live?.text ? '正在输出…' : '正在思考…'
 })
 
+/** 缓存命中率（整数 %）。没报缓存或算不出时返回空串，界面就不显示这一格。 */
+function cachePercent(cached: number, input: number): string {
+  if (!input || !cached) return ''
+  return Math.round((cached / input) * 100).toString()
+}
+
 /** 运行条上的 token 总数：把正在跑那一段实时的也算进去。 */
 const totalTokens = computed(() => {
   let tin = 0
   let tout = 0
+  let cached = 0
   for (const node of run.value?.nodes ?? []) {
     const live = liveByNode.value[node.id]
     tin += Math.max(node.tokensIn, live?.tokensIn ?? 0)
     tout += Math.max(node.tokensOut, live?.tokensOut ?? 0)
+    // 缓存命中只在快照里（live 增量不报）：节点没落定前总数偏低一点，可接受。
+    cached += node.tokensCached ?? 0
   }
-  return { tin, tout }
+  return { tin, tout, cached }
 })
 
 /**
@@ -1154,6 +1164,9 @@ defineExpose({ reload: () => loadPlans(true) })
           <span class="run-count mono">{{ runSummary(run) }}</span>
           <span v-if="totalTokens.tin || totalTokens.tout" class="run-tokens mono">
             ↑{{ formatTokens(totalTokens.tin) }} ↓{{ formatTokens(totalTokens.tout) }}
+            <span v-if="cachePercent(totalTokens.cached, totalTokens.tin)" class="run-cache"
+              :title="`缓存命中 ${formatTokens(totalTokens.cached)} / ${formatTokens(totalTokens.tin)} 输入`"
+              >⚡{{ cachePercent(totalTokens.cached, totalTokens.tin) }}%</span>
           </span>
           <span v-if="elapsed" class="run-clock mono">{{ formatDuration(elapsed) }}</span>
           <span class="spacer" />
@@ -1488,6 +1501,9 @@ defineExpose({ reload: () => loadPlans(true) })
                 <span class="kv"><span>工具</span><b>{{ selectedSteps.length }} 次</b></span>
                 <span class="kv"><span>耗时</span><b>{{ formatDuration(selectedElapsed) || '—' }}</b></span>
                 <span class="kv"><span>Token</span><b>↑{{ formatTokens(selectedTokens.tin) }} ↓{{ formatTokens(selectedTokens.tout) }}</b></span>
+                <span v-if="cachePercent(selectedTokens.cached, selectedTokens.tin)" class="kv">
+                  <span>缓存</span><b>⚡{{ cachePercent(selectedTokens.cached, selectedTokens.tin) }}%</b>
+                </span>
                 <span v-if="selectedRun.status === 'running'" class="kv">
                   <span>静默</span>
                   <b :class="{ 'kv-warn': selectedIdle > 45_000 }">{{ formatDuration(selectedIdle) || '刚刚' }}</b>

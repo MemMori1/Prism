@@ -563,6 +563,12 @@ watch(
   { immediate: true },
 )
 
+/** 缓存命中率（整数 %）。引擎没报缓存或算不出时返回空串，芯片上就不显示。 */
+function cachePercent(cached: number, input: number): string {
+  if (!input || !cached) return ''
+  return Math.round((cached / input) * 100).toString()
+}
+
 /** 四个分项的字符数：有引擎统计就用它，否则按时间线文字估。 */
 const ctxChars = computed<ContextChars>(() => {
   const stats = ctxStats.value
@@ -1895,6 +1901,10 @@ watch(
           <span class="meta-chip meta-tokens">
             ↓{{ formatTokens(session.tokensInput + session.tokensReasoning) }}
             ↑{{ formatTokens(session.tokensOutput) }}
+            <span
+              v-if="cachePercent(session.tokensCached, session.tokensInput)"
+              :title="`缓存命中 ${formatTokens(session.tokensCached)} / ${formatTokens(session.tokensInput)} 输入`"
+            >⚡{{ cachePercent(session.tokensCached, session.tokensInput) }}%</span>
           </span>
           <span v-if="session.cost" class="meta-chip meta-cost">{{ formatCost(session.cost) }}</span>
           <span class="meta-time">{{ fullTime(session.timeCreated) }}</span>

@@ -31,6 +31,9 @@ pub struct SessionMeta {
     pub tokens_input: i64,
     #[serde(default)]
     pub tokens_output: i64,
+    /// 累计命中缓存的输入 token；与 tokens_input 相除就是命中率。
+    #[serde(default)]
+    pub tokens_cached: i64,
     #[serde(default)]
     pub cost: f64,
 }
@@ -120,6 +123,10 @@ pub struct StoredTokens {
     pub input: i64,
     #[serde(default)]
     pub output: i64,
+    /// 其中命中前缀缓存的输入（`input` 含这一部分）。旧会话文件没有这个
+    /// 字段，反序列化补 0，不影响别的账。
+    #[serde(default)]
+    pub cached: i64,
 }
 
 /// 一行 = 一条消息。
@@ -195,6 +202,7 @@ pub fn create(directory: &str) -> Result<SessionMeta, String> {
         time_updated: now_ms(),
         tokens_input: 0,
         tokens_output: 0,
+        tokens_cached: 0,
         cost: 0.0,
     };
     write_meta(&meta)?;
@@ -274,6 +282,7 @@ pub fn append(raw_id: &str, message: &StoredMessage) -> Result<(), String> {
     if let Some(tokens) = message.tokens {
         meta.tokens_input += tokens.input;
         meta.tokens_output += tokens.output;
+        meta.tokens_cached += tokens.cached;
     }
     write_meta(&meta)
 }
@@ -284,12 +293,14 @@ pub fn append(raw_id: &str, message: &StoredMessage) -> Result<(), String> {
 /// 摘要写歪了至少还能手工把这一个文件换回去。写入走 tmp + rename，
 /// 半路断电也不会留下半份会话。
 ///
-/// `input` / `output` 是摘要那次调用的用量：它也是真金白银，记进会话累计。
+/// `input` / `output` / `cached` 是摘要那次调用的用量：它也是真金白银，记进
+/// 会话累计（`cached` 是那次调用自己命中的缓存输入）。
 pub fn replace_messages(
     raw_id: &str,
     messages: &[StoredMessage],
     input: i64,
     output: i64,
+    cached: i64,
 ) -> Result<(), String> {
     let path = messages_path(raw_id)?;
     if path.exists() {
@@ -311,6 +322,7 @@ pub fn replace_messages(
     };
     meta.tokens_input += input;
     meta.tokens_output += output;
+    meta.tokens_cached += cached;
     meta.time_updated = now_ms();
     write_meta(&meta)
 }
@@ -389,6 +401,7 @@ fn summary_of(meta: &SessionMeta) -> crate::engines::core::SessionSummary {
         cost: meta.cost,
         tokens_input: meta.tokens_input,
         tokens_output: meta.tokens_output,
+        tokens_cached: meta.tokens_cached,
         tokens_reasoning: 0,
         time_created: meta.time_created,
         time_updated: meta.time_updated,

@@ -265,6 +265,7 @@ fn summarize_file(path: &Path, dir_name: &str) -> Option<SessionSummary> {
         cost: 0.0,
         tokens_input: scan.tokens_input,
         tokens_output: scan.tokens_output,
+        tokens_cached: 0,
         tokens_reasoning: 0,
         time_created: scan.first_ts.unwrap_or(0),
         time_updated: scan.last_ts.unwrap_or_else(|| file_modified_ms(path)),

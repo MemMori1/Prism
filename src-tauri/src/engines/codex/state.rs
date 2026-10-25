@@ -188,6 +188,7 @@ fn map_thread_row(row: &Row<'_>) -> rusqlite::Result<(SessionSummary, String)> {
         // 兜底：threads 只有总量；真实四类拆分在 apply_token_split 里补。
         tokens_input: tokens_used,
         tokens_output: 0,
+        tokens_cached: 0,
         tokens_reasoning: 0,
         time_created: created_at_ms.unwrap_or(0),
         time_updated: updated_at_ms.unwrap_or(0),
