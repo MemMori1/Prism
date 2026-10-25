@@ -2255,6 +2255,46 @@ mod tests {
         assert_eq!(clamp("ok"), "ok");
     }
 
+    /// jadx 的可见性必须跟着探测状态走，且 dex 工具要指路过去。
+    ///
+    /// 模型选工具**只看 description**。`bin.dex.disasm` 不写明「要语义就换 jadx」，
+    /// 它就会一直拿指令流硬读——实测有一次 DAG 运行，模型自己 `run_command` 去
+    /// 找 jadx 可执行文件，没找到就退回自建 python 解析器，报告因此只能标
+    /// 「指令级不可用」。工具在不在 schema 里、描述指不指路，决定了这一轮能
+    /// 拿到什么证据。
+    #[test]
+    fn jadx_visibility_follows_the_backend_probe() {
+        let ready = crate::engines::native::backends::require("jadx").is_ok();
+        let specs = specs(&EnabledTools::from_config());
+        // 模型看到的是 wire 名（点换成下划线）；断言必须用它，否则测的是内部名，
+        // 而真实请求里根本不存在这个字符串。
+        let wire = "bin_jadx_decompile";
+        let has = specs
+            .iter()
+            .any(|spec| spec["function"]["name"] == wire);
+        assert_eq!(
+            has, ready,
+            "jadx 在 schema 里的可见性必须与探测状态一致（ready={ready}）"
+        );
+
+        // 声明得通还得调得通：模型回传的是 wire 名。
+        assert_eq!(
+            find(wire).map(|tool| tool.name.to_string()).as_deref(),
+            Some("bin.jadx.decompile"),
+            "wire 名必须能路由回内部名，否则声明了也调不动"
+        );
+
+        let disasm = specs
+            .iter()
+            .find(|spec| spec["function"]["name"] == "bin_dex_disasm")
+            .expect("bin_dex_disasm 应该在 schema 里");
+        let desc = disasm["function"]["description"].as_str().unwrap_or("");
+        assert!(
+            desc.contains("bin.jadx.decompile"),
+            "disasm 的描述没有指路到 jadx，模型只会继续拿指令流硬读"
+        );
+    }
+
     #[test]
     fn specs_cover_builtin_tools() {
         // 注册表现在连 `task`（子代理）一起给出——原来它是 agent 层单独 push 的，

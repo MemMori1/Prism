@@ -83,7 +83,7 @@ fn disasm_schema() -> Value {
         "type": "function",
         "function": {
             "name": "bin.dex.disasm",
-            "description": "反汇编一个 DEX 类的指定方法：解析 class_data_item 与 code_item，输出指令流（invoke/const-string/switch 等），带调用目标与字符串引用。这是拿到「哪个方法调用了什么」代码级证据的唯一入口。",
+            "description": "反汇编一个 DEX 类的指定方法：解析 class_data_item 与 code_item，输出指令流（invoke/const-string/switch 等），带调用目标与字符串引用。这是拿到「哪个方法调用了什么」代码级证据的唯一入口。**只想搞清这段代码想干什么（行为、条件、意图）就别用它，改用 bin.jadx.decompile 拿可读 Java**——指令流能说明调了谁，说不清为什么。",
             "parameters": {
                 "type": "object",
                 "properties": {
