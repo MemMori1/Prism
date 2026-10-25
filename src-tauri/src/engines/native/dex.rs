@@ -29,6 +29,15 @@ const MAX_CLASSES: u32 = 5000;
 /// 单方法反汇编输出条数上限：巨型方法（R8 混淆产物里常见）撑爆上下文。
 const INSN_DEFAULT: usize = 200;
 const INSN_MAX: usize = 4000;
+/// 列类时默认 / 最多回多少条类名。
+///
+/// 一个 3 MB 的 dex 有三千多个类，全塞进结果会超过单条输出上限被截断，变成
+/// 非法 JSON（模型既看不全也解析不了）。200 条约 9 千字符，留得下上下文。
+const CLASS_LIST_DEFAULT: usize = 200;
+const CLASS_LIST_MAX: usize = 2000;
+/// 单次反汇编结果的字符预算：要比工具出口闸的 4 万小一截，留出 JSON 外壳与
+/// 顶层缩进的余量（按 pretty 大小累计，见收集处的注释）。
+const DISASM_BUDGET: usize = 25_000;
 /// xref 每类条目默认 / 上限。
 const XREF_DEFAULT: usize = 128;
 const XREF_MAX: usize = 2000;
@@ -305,7 +314,17 @@ impl<'a> Dex<'a> {
 
         // 现在才是 method 条目。direct 与 virtual 各自从 0 起累计 method_idx_diff。
         let mut method_idx = 0u32;
-        for _ in 0..dm + vm {
+        for step in 0..dm + vm {
+            // 进入 virtual 段，累计值必须重新归零。
+            //
+            // DEX 规范里 direct_methods 与 virtual_methods 是两个**独立序列**，
+            // 各自的 method_idx_diff 都从 0 起算。不重置就会把 virtual 的 diff
+            // 叠到 direct 末尾上，method_idx 直接越过 method_ids_size，
+            // `method_ref` 报 BadOffset——真实症状是"类能列出来、一按名字反汇编
+            // 就报偏移越界"（HomeGuardService：dm=2、vm=18）。
+            if step == dm {
+                method_idx = 0;
+            }
             let (diff, after_idx) = uleb(d, cursor)?;
             let (access, after_acc) = uleb(d, after_idx)?;
             let (code_off, after_code) = uleb(d, after_acc)?;
@@ -707,11 +726,17 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
 
     let class_count = dex.sections.class_defs.0;
 
-    // 先收集全部类名，供过滤与「不填 class 时列清单」。
-    let mut class_names: Vec<String> = Vec::with_capacity(class_count.min(5000) as usize);
+    // 收集类名，**带上 class_def 下标**。
+    //
+    // 不能只 push 名字：个别类的描述符解析失败时，push 后的下标就和 class_def
+    // 下标错位了，按类名查到的 index 会指向另一个类，`each_method` 读到垃圾
+    // class_data_off，报"偏移越界"。真实踩过：HomeGuardService 列得出来、
+    // 一按名字反汇编就越界。
+    let mut class_names: Vec<(u32, String)> =
+        Vec::with_capacity(class_count.min(5000) as usize);
     for i in 0..class_count.min(5000) {
         if let Ok(name) = dex.class_name(i) {
-            class_names.push(name);
+            class_names.push((i, name));
         }
     }
     // 解不出来就别假装成功：空清单会被下游当成"样本没有类"，然后照跑完整张图。
@@ -719,9 +744,23 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
         return ToolResult::fail(why);
     }
 
-    // 没有指定 class：只回清单，不逐个反汇编（几千个类全展开会把上下文撑爆）。
+    // 没有指定 class：只回清单，不逐个反汇编。
+    //
+    // 清单**只给前若干条**：一个 3 MB 的 dex 有三千多个类，全塞进结果会超过
+    // 单条输出上限（4 万字符），被出口闸截成非法 JSON——模型既看不全，也没法
+    // 当 JSON 读。给个窗口 + 总数，它自己会收窄（指定 class、或调小范围）。
     if class_filter.is_none() {
-        let shown = class_names.len();
+        let take = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|value| (value as usize).clamp(1, CLASS_LIST_MAX))
+            .unwrap_or(CLASS_LIST_DEFAULT);
+        let shown: Vec<String> = class_names
+            .iter()
+            .take(take)
+            .map(|(_, name)| name.clone())
+            .collect();
+        let listed = shown.len();
         return respond(
             ctx,
             "dex_disasm",
@@ -729,18 +768,23 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
                 "path": path.display().to_string(),
                 "size": size,
                 "classCount": class_count,
-                "listed": shown,
-                "classes": class_names,
-                "note": "指定 class 参数反汇编具体类；不填只列类名。",
+                "listed": listed,
+                "truncated": class_names.len() > listed,
+                "classes": shown,
+                "note": format!(
+                    "共 {} 个类，这里列前 {listed} 个；要更多调 limit，或直接填 class 反汇编指定类。",
+                    class_names.len()
+                ),
             }),
         );
     }
 
-    // 找到目标类的 class_def 下标。
-    let target = class_names
+    // 找到目标类的 class_def 下标（用收集时记下的真实下标，不是列表位置）。
+    let target_index = class_names
         .iter()
-        .position(|name| name == class_filter.unwrap());
-    let Some(target_index) = target else {
+        .find(|(_, name)| name == class_filter.unwrap())
+        .map(|(index, _)| *index);
+    let Some(target_index) = target_index else {
         return ToolResult::fail(format!(
             "找不到类 {}；用不填 class 的方式列全部类名",
             class_filter.unwrap()
@@ -751,6 +795,10 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
     let mut methods: Vec<Value> = Vec::new();
     let mut total = 0usize;
     let mut decode_fail = 0usize;
+    // 反汇编结果的字符预算。必须比出口闸（4 万）小一截，否则被出口闸砍成
+    // 半截 JSON——那是模型解析不了的（实测一个类 20 个方法就撞上了）。
+    let mut used = 0usize;
+    let mut trimmed = false;
     let mut collect = |dex: &Dex, class_def_index: u32| -> Result<(), DexError> {
         dex.each_method(class_def_index, |method_idx, access, code_off| {
             total += 1;
@@ -766,7 +814,7 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
                         .iter()
                         .map(|insn| json!({ "insn": insn.mnemonic }))
                         .collect();
-                    methods.push(json!({
+                    let item = json!({
                         "method": name,
                         "access": format!("0x{access:x}"),
                         "code_off": format!("0x{code_off:x}"),
@@ -775,7 +823,21 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
                         "insns": instructions.len(),
                         "instructions": instructions,
                         "decode_ok": true,
-                    }));
+                    });
+                    // 按字符预算收口，而不是靠出口闸砍。出口闸砍的是**已经序列化
+                    // 好的 JSON**，砍完就是半截非法 JSON，模型解析不了。
+                    //
+                    // 大小按 pretty 算：最终输出走 to_string_pretty，缩进和换行能
+                    // 让体积翻倍，按紧凑格式估会低估一大截。
+                    let size = serde_json::to_string_pretty(&item)
+                        .map(|text| text.chars().count())
+                        .unwrap_or(0);
+                    if !methods.is_empty() && used + size > DISASM_BUDGET {
+                        trimmed = true;
+                        return Ok(());
+                    }
+                    used += size;
+                    methods.push(item);
                 }
                 Err(_) => {
                     decode_fail += 1;
@@ -800,10 +862,17 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
             "path": path.display().to_string(),
             "size": size,
             "class": class_filter,
-            "methods": methods.len(),
+            // 原来这里写的是 "methods"，和下面的数组同名，数量被数组覆盖了。
+            "methodCount": methods.len(),
             "methodTotal": total,
             "decodeFail": decode_fail,
+            "truncated": trimmed,
             "methods": methods,
+            "note": if trimmed {
+                "方法太多，只给了装得下的前几个；用 method 参数过滤具体方法。"
+            } else {
+                ""
+            },
         }),
     )
 }
@@ -1201,6 +1270,103 @@ mod tests {
             rate * 100.0,
             with_code,
             decoded
+        );
+    }
+
+    /// 端到端自测：从真实 APK 解出的 classes.dex 走**工具入口**（不是内部函数），
+    /// 验证 `bin.dex.disasm` 能列类、能反汇编指定类，`bin.dex.xref` 能出调用。
+    ///
+    /// 手动跑（**纯本地，不联网、不花 API 钱**）：
+    /// `cargo test --lib -- --ignored apk_end_to_end --nocapture`
+    #[test]
+    #[ignore]
+    fn apk_end_to_end_disasm_and_xref() {
+        use crate::engines::native::tools::{run_with_args, EnabledTools, ToolContext};
+
+        let dir = "/Users/edwa2d4th/Desktop/未命名文件夹 7";
+        let dex_rel = "work/apk/x/classes.dex";
+        let dex_abs = format!("{dir}/{dex_rel}");
+        assert!(
+            std::path::Path::new(&dex_abs).exists(),
+            "样本不在 {dex_abs}：换样本后请同步改这里"
+        );
+        let enabled = EnabledTools::all();
+        let stop = || false;
+        let ctx = ToolContext {
+            app: None,
+            session_id: "selftest",
+            directory: dir,
+            call_id: "c1",
+            provider: None,
+            model: None,
+            permission: Some("read-only"),
+            enabled: &enabled,
+            dag: None,
+            should_stop: &stop,
+        };
+
+        // 1) 列类：header 里 3300 个，必须真列得出来。
+        let listed = run_with_args(&ctx, "bin.dex.disasm", &serde_json::json!({ "path": dex_rel }));
+        assert!(
+            listed.outcome.error.is_none(),
+            "列类失败：{:?}",
+            listed.outcome.error
+        );
+        let payload: Value = serde_json::from_str(&listed.outcome.text).expect("列类结果应是 JSON");
+        assert_eq!(
+            payload["classCount"].as_u64(),
+            Some(3300),
+            "classCount 应当是 header 里的 3300：{payload}"
+        );
+        // 清单必须有界：三千多个类全塞进来会超出口闸上限，被截成非法 JSON。
+        let shown = payload["listed"].as_u64().unwrap_or(0);
+        assert_eq!(shown, CLASS_LIST_DEFAULT as u64, "默认只列前 200 个类");
+        assert_eq!(
+            payload["truncated"].as_bool(),
+            Some(true),
+            "还有更多类时必须标 truncated"
+        );
+
+        // 2) 反汇编一个已知类：方法体与指令都要出来。
+        let target = "Lapp/orchard/tv/guard/HomeGuardService;";
+        let dis = run_with_args(
+            &ctx,
+            "bin.dex.disasm",
+            &serde_json::json!({ "path": dex_rel, "class": target, "limit": 40 }),
+        );
+        assert!(
+            dis.outcome.error.is_none(),
+            "反汇编失败：{:?}",
+            dis.outcome.error
+        );
+        let body: Value = serde_json::from_str(&dis.outcome.text).expect("反汇编结果应是 JSON");
+        let methods = body["methods"].as_array().expect("应当有 methods 数组");
+        assert!(!methods.is_empty(), "HomeGuardService 应当有方法体：{body}");
+        assert!(
+            methods.iter().any(|item| item["decode_ok"] == true),
+            "至少要有方法能成功解码指令：{body}"
+        );
+
+        // 3) 调用图：这个类至少要解出几条调用。
+        let xref = run_with_args(
+            &ctx,
+            "bin.dex.xref",
+            &serde_json::json!({ "path": dex_rel, "class": target, "limit": 20 }),
+        );
+        assert!(
+            xref.outcome.error.is_none(),
+            "xref 失败：{:?}",
+            xref.outcome.error
+        );
+        let graph: Value = serde_json::from_str(&xref.outcome.text).expect("xref 结果应是 JSON");
+        let calls = graph["calls"].as_array().map(Vec::len).unwrap_or(0);
+        assert!(calls > 0, "HomeGuardService 应当有调用边：{graph}");
+
+        println!(
+            "端到端自测通过：类 {} 个、HomeGuardService 方法 {} 个、调用边 {} 条",
+            shown,
+            methods.len(),
+            calls
         );
     }
 
