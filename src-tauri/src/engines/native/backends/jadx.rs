@@ -223,6 +223,12 @@ mod tests {
             Path::new(&apk).exists(),
             "样本不在 {apk}：换样本后请同步改这里"
         );
+        // 探测结果是排障的第一手信息：路径来自工具链目录 / PATH / 环境变量，
+        // 决定了"下次装不起来该看哪儿"。`--nocapture` 就能看到这行。
+        if let Ok(status) = crate::engines::native::backends::require("jadx") {
+            println!("jadx 探测：{:?}  路径={:?}", status.state, status.path);
+        }
+
         let enabled = EnabledTools::all();
         let stop = || false;
         let ctx = ToolContext {

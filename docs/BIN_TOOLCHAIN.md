@@ -247,6 +247,7 @@ pub struct Job {
 | ghidra | `<home>/support/analyzeHeadless` 存在且可执行 | `<home>/Ghidra/application.properties` 的 `application.version=` | 11.0 | `java -version`（stderr）主版本 ≥ 17；11.2 起要 21，版本不足给提示不拦 |
 | radare2 | `r2 -v` | 输出第二列 `radare2 5.9.8 ...` | 5.5 | 无（`aflj` 字段在 5.x 稳定） |
 | upx | `upx --version` | `upx 4.2.4` 第二列 | 3.9 | 无 |
+| jadx | `jadx --version` | 输出即版本号（`1.5.6`） | 1.4 | 无（1.4 起 `--single-class` 稳定） |
 | dotnet | `ilspycmd --version`（dotnet tool） | 整行即版本号 | 8.0 | `dotnet --list-sdks` 非空；`de4dot` 可选，探测到才启用 T2 |
 
 版本比较只做"主.次"数值比较，不做 semver 全序——我们只需要拦"太老"，不需要精确排序。
@@ -324,7 +325,7 @@ pub struct ExecSpec {
 
 ## 6. 逐工具对接
 
-### 6.1 A 桶：外部程序（5 个）
+### 6.1 A 桶：外部程序（6 个；jadx 为后补，不在最初 16 项里）
 
 #### `bin.unpack.upx`
 
@@ -397,6 +398,26 @@ r2 -q -e scr.color=0 -e bin.cache=true -c 'aaa; aflj' <sample>
   `dnlib` 只在"以后要写自己的静态改写器"时才进来；
 - T2 是**静态改写**（dnlib 读模块不执行代码），但仍然标 `Risk::Write`、`Network::None`；
 - 只支持 PE/.NET 程序集；不是 .NET 就报"这不是 .NET 程序集（没有 CLR 头）"。
+
+#### `bin.jadx.decompile`
+
+```text
+jadx -d <workdir>/_out/jadx --no-res [--single-class <完全限定类名>] <sample>
+```
+
+- **解决的是"读不出语义"这一层**：DEX 指令级（`bin.dex.disasm`）能说明"调了谁"，
+  读不出"想干什么"；R8 混淆后类名是 `LA;` / `LW/a;`，控制流看懂了也没法给行为命名。
+  jadx 出的是可读 Java，功能还原度由此上一档；
+- `--single-class` **只认完全限定类名**（`app.orchard.tv.guard.HomeGuardService`），
+  短名会报 `Input class not found` 退出 1。schema 里写死这条，失败文案翻译成中文并指路
+  `bin.dex.disasm`（只填 path 就能列类名）；
+- 默认 `--no-res`：资源反编译对代码理解没帮助，却会把产物目录塞满 XML 噪音；
+- 重跑先清 `_out/jadx/`：新旧混在一起会让模型读到过期类；
+- 只读样本（`Permission::ReadOnly`、`Risk::Read`、`Network::None`），样本原件不动；
+- 安装：`brew install jadx` 会拖一个 300 MB+ 的 openjdk 依赖（实测卡在下载），
+  第二条路是把 release 解压到 `~/.prism/toolchains/jadx/`，入口包一层壳脚本指定
+  `JAVA_HOME`——macOS 的 `/usr/bin/java` 是 stub，直接跑 `bin/jadx` 会报
+  "Unable to locate a Java Runtime"。
 
 ### 6.2 B 桶：IR 下游（4 个）
 

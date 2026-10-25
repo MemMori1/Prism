@@ -62,7 +62,9 @@ pub const BACKENDS: &[Backend] = &[
         name: "jadx",
         // 1.4 起 `--single-class` 才稳定；更老的版本按类过滤会漏。
         min_version: Some("1.4"),
-        install: "brew install jadx",
+        // brew 会拖一个 300MB+ 的 openjdk 依赖（实测会卡在下载上），所以给出
+        // 第二条路：直接解压 release 到工具链目录，复用本机已有的 JDK。
+        install: "brew install jadx；或解压 release 到 ~/.prism/toolchains/jadx（入口 bin/jadx）",
         tools: &["bin.jadx.decompile"],
         env: &["PRISM_JADX"],
     },
