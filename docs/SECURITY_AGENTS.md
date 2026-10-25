@@ -23,7 +23,7 @@ Prism 现在是一套能跑起来的**软工编排底座**（Planner 拆图 → 
 | 项 | 落点 | 状态 |
 |---|---|---|
 | 制品仓库 | `src-tauri/src/dag/artifact.rs`：`~/.prism/artifacts/<dag_id>/`，索引 + 内容分离，单件 256 MiB / 单 DAG 2 GiB 配额，跨 DAG 读取拒绝 | ✅ |
-| 节点数据流 | `dag/model.rs` 的 `input_artifacts` / `output_artifact_key`；`dag/runner.rs::resolve_task` 支持 `{{nodes.x.output}}`（超 8 KB 截断并附 `art-` 引用）与 `{{artifacts.<别名>.id|summary|meta}}` | ✅ |
+| 节点数据流 | `dag/model.rs` 的 `input_artifacts` / `output_artifact_key`；`dag/runner.rs::resolve_task` 支持 `{{nodes.x.output}}`（单槽上限 8 KB、整份提示词总预算 24 KB，按槽位均分，截断时附 `art-` 引用）与 `{{artifacts.<别名>.id|summary|meta}}` | ✅ |
 | 隐式别名 | 未声明 `input_artifacts` 时，上游主产出自动以上游节点 id 为别名，老计划零改动 | ✅ |
 | 工具标签 | `engines/native/tools.rs` 的 `ToolMeta`（`tags` / `risk` / `network` / `sandbox` / `scope`）；`scope=dag` 的工具在聊天里不进 schema | ✅ |
 | 制品工具 | `engines/native/artifact_tools.rs`：`prism.artifact.put` / `prism.artifact.get`，`dag_id` 由执行器注入 | ✅ |

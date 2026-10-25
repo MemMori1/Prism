@@ -168,13 +168,43 @@ pub struct ArtifactView {
 
 | 写法 | 注入 |
 |---|---|
-| `{{nodes.<id>.output}}` `.report` `.files` | 上游正文；超 8 KB 截断，并追加「完整内容见制品 art-xxx」 |
+| `{{nodes.<id>.output}}` `.report` `.files` | 上游正文；超**单槽上限**截断，并追加「完整内容见制品 art-xxx」 |
 | `{{artifacts.<名>.id}}` | 制品 id；没有则 `（制品不可用）` |
-| `{{artifacts.<名>.summary}}` | 正文前 2 KB；被截断时补一句 |
+| `{{artifacts.<名>.summary}}` | 正文前 2 KB（扇入时按预算再削）；被截断时补一句 |
 | `{{artifacts.<名>.meta}}` | `{"id":...,"key":...,"kind":...,"size":...,"sha256":...}` 一行 JSON |
 | `{{artifacts.<名>}}` | 等价 `.summary` |
 
 未知别名 → `（未声明的制品 x）`；未闭合的 `{{` 原样保留（和现有行为一致）。
+
+#### 内联预算：单槽 8 KB，总量 24 KB
+
+单槽上限拦不住**扇入**：一个「汇总」节点引用 8 份上游报告就是 8 × 8 KB = 64 KB，
+128k 窗口的模型光提示词吃掉两万多 token，第一轮直接 400——而这类节点没人看着，
+救不回来就是整条链断在这里。
+
+所以预算按**槽位数均分**（`dag::runner::resolve_task`）：
+
+| 常量 | 值 | 作用 |
+|---|---|---|
+| `PROMPT_INLINE_LIMIT` | 8 000 | 单个占位符的**上限**（1 个上游时拿满） |
+| `PROMPT_BUDGET` | 24 000 | 一次提示词里所有占位符的**总量** |
+| `PROMPT_FLOOR` | 1 200 | 单个占位符的**下限**（20 个上游时顶住） |
+| `PROMPT_NOTICE` | 12 000 | 超过就在运行面板报一行「提示词 N 字」 |
+
+`per = clamp(PROMPT_BUDGET / 槽位数, PROMPT_FLOOR, PROMPT_INLINE_LIMIT)`：
+
+| 上游份数 | 每份 |
+|---|---|
+| 1–3 | 8 000（单槽上限） |
+| 8 | 3 000 |
+| ≥ 20 | 1 200（下限） |
+
+槽位按**出现次数**算，不按节点去重：同一个节点被引用三次，提示词里就是三份
+正文，token 真的重复三遍。
+
+**校验期提示**：一个节点内联超过 3 份上游正文时，`validate` 给一条 warning
+（`内联了 N 份上游正文，每份会被压到约 X 字`）——图能跑，但产出会变薄，
+提前说一声让人有机会拆成两级汇总。
 
 ### 5.4 校验（`dag::validate`）
 
@@ -189,6 +219,7 @@ pub struct ArtifactView {
 | `key` 与上游主产出 key 不一致 | warning | `要「x」的 strings 制品，但它的主产出是 report：这个 key 得由工具写入，运行时才确认` |
 | `{{artifacts.a.field}}` 的 `a` 未声明且不是祖先 | error | `占位符引用了未声明的制品「a」` |
 | `field` 不在 id/summary/meta | error | `制品占位符不支持 .xxx（只有 id / summary / meta）` |
+| 内联上游超过 3 份 | warning | `这个节点内联了 N 份上游正文，每份会被压到约 X 字…要保留细节就拆成两级汇总` |
 
 ## 6. 工具标签与 P0.5 三个工具
 

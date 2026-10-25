@@ -139,6 +139,10 @@ pub struct NodeRun {
     pub error: Option<String>,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// tokens_in 里命中前缀缓存的部分（serde default：旧运行快照没有这个
+    /// 字段，补 0，命中率显示"—"而不是编一个数）。
+    #[serde(default)]
+    pub tokens_cached: i64,
     /// 工具调用摘要（`read_file src/x.rs` 这种），给运行面板做过程感。
     pub steps: Vec<String>,
     /// 当前（或最后）一轮模型调用，1 起。和 `NodeLive.turn` 同一个数字：
@@ -195,6 +199,7 @@ impl DagRun {
                     error: None,
                     tokens_in: 0,
                     tokens_out: 0,
+                    tokens_cached: 0,
                     steps: Vec::new(),
                     turns: 0,
                     max_turns: 0,
@@ -574,7 +579,10 @@ impl RunHandle {
     }
 
     /// 一轮的 token 用量。写进内存里的节点（中途快照也能看到）并发一条增量。
-    pub fn push_usage(&self, node_id: &str, tokens_in: i64, tokens_out: i64) {
+    ///
+    /// `tokens_cached` 只进节点状态（快照 / 结束后可见），不进 live 增量——
+    /// 命中率是"看完一段才知道"的数字，跟着轮次跳来跳去只会添乱。
+    pub fn push_usage(&self, node_id: &str, tokens_in: i64, tokens_out: i64, tokens_cached: i64) {
         if let Ok(mut buffers) = self.live_buf.lock() {
             let entry = buffers.entry(node_id.to_string()).or_default();
             entry.tokens_in += tokens_in;
@@ -584,10 +592,28 @@ impl RunHandle {
             if let Some(node) = run.nodes.iter_mut().find(|node| node.id == node_id) {
                 node.tokens_in += tokens_in;
                 node.tokens_out += tokens_out;
+                node.tokens_cached += tokens_cached;
             }
         }
         let chunk = self.take_text(node_id);
         self.emit_live(node_id, chunk, None);
+    }
+
+    /// 到目前为止这场运行烧掉的 token 合计（所有节点的输入 + 输出）。
+    ///
+    /// 预算闸门用它。编排一次能花掉一块钱，没有上限就等于让模型自己决定账单：
+    /// 一次五次工具全失效的运行，照样每个节点跑满轮次，钱花完才知道。
+    ///
+    /// 只算已经落账的：正在跑的那一轮还没 push 进来，所以闸门是"超一点才停"，
+    /// 不会卡在半轮中间。
+    pub fn used_tokens(&self) -> i64 {
+        let Ok(run) = self.state.lock() else {
+            return 0;
+        };
+        run.nodes
+            .iter()
+            .map(|node| node.tokens_in + node.tokens_out)
+            .sum()
     }
 
     /// 进入新的一轮模型调用。
@@ -985,6 +1011,7 @@ mod tests {
                 error: None,
                 tokens_in: 0,
                 tokens_out: 0,
+                tokens_cached: 0,
                 steps: Vec::new(),
                 turns: 0,
                 max_turns: 0,
@@ -1038,19 +1065,22 @@ mod tests {
     #[test]
     fn usage_reported_twice_is_not_double_counted() {
         let (handle, _) = handle("n1");
-        handle.push_usage("n1", 100, 10);
-        handle.push_usage("n1", 50, 5);
+        handle.push_usage("n1", 100, 10, 80);
+        handle.push_usage("n1", 50, 5, 40);
         assert_eq!(node_of(&handle).tokens_in, 150, "逐轮上报要实时累加");
+        assert_eq!(node_of(&handle).tokens_cached, 120, "缓存命中同步累加");
 
         // 执行器最后的总额与逐轮之和一致：收尾只补差额，不能再来一遍。
         let mut output = NodeOutput::default();
         output.text = "报告".to_string();
         output.tokens_in = 150;
         output.tokens_out = 15;
+        output.tokens_cached = 120;
         handle.mark_succeeded("n1", output, None);
         let node = node_of(&handle);
         assert_eq!(node.tokens_in, 150);
         assert_eq!(node.tokens_out, 15);
+        assert_eq!(node.tokens_cached, 120);
         assert_eq!(node.output, "报告");
     }
 

@@ -8,8 +8,15 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::model::DagPlan;
+use super::runner::{count_slots, PROMPT_BUDGET};
 /// 单张图最多多少个节点：再多人也看不完，模型也规划不准。
 pub const MAX_NODES: usize = 24;
+
+/// 一个节点内联多少份上游正文就该提醒了。
+///
+/// 3 份以内每份还能拿到单词上限 8 KB；再多就要按总预算均分，单份开始变薄。
+/// 这不是错误——很多「汇总」节点本来就会扇入——所以只给告警。
+const MAX_INLINE_REFS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -259,6 +266,21 @@ pub fn validate(plan: &DagPlan, known_agents: &[String]) -> Vec<Issue> {
                     format!("占位符引用了「{reference}」，但它不是上游（占位符只能取祖先的产物）"),
                 ));
             }
+        }
+
+        // 扇入告警：一个节点内联太多份上游正文，提示词预算会被均分压得很薄。
+        // 图不会跑不起来，但每份只剩几百字，产出质量会掉——提前说一声，
+        // 让人有机会拆成两级汇总，而不是等下游写出空洞的结论再回头查。
+        let (inline_nodes, _) = count_slots(&node.task);
+        if inline_nodes > MAX_INLINE_REFS {
+            issues.push(warning(
+                Some(&node.id),
+                format!(
+                    "这个节点内联了 {inline_nodes} 份上游正文，每份会被压到约 {} 字\
+                     （提示词总预算 {PROMPT_BUDGET} 字）；要保留细节就拆成两级汇总",
+                    PROMPT_BUDGET / inline_nodes
+                ),
+            ));
         }
     }
 
@@ -564,6 +586,52 @@ mod tests {
         assert!(messages(&validate(&target, &["general".to_string()]))
             .iter()
             .any(|message| message.contains("不在注册表里")));
+    }
+
+    /// 扇入告警：一个节点内联 5 份上游正文，每份只能分到 4.8 KB。
+    /// 图能跑，但产出会变薄——要在运行前说出来，而不是等结论空洞再回头查。
+    #[test]
+    fn heavy_fan_in_warns_about_prompt_budget() {
+        let mut nodes = vec![
+            node("a", &[], "x"),
+            node("b", &[], "x"),
+            node("c", &[], "x"),
+            node("d", &[], "x"),
+            node("e", &[], "x"),
+        ];
+        let mut merge = node("merge", &["a", "b", "c", "d", "e"], "汇总");
+        merge.task = "{{nodes.a.output}}{{nodes.b.output}}{{nodes.c.output}}\
+                      {{nodes.d.output}}{{nodes.e.output}}"
+            .to_string();
+        nodes.push(merge);
+
+        let issues = validate(&plan(nodes), &[]);
+        let said = messages(&issues);
+        assert!(
+            issues.iter().all(|issue| issue.level != Level::Error),
+            "扇入不是错误：{said:?}"
+        );
+        assert!(
+            said.iter().any(|message| message.contains("内联了 5 份")),
+            "应当提醒提示词预算：{said:?}"
+        );
+    }
+
+    /// 正常的 2 个上游不打扰。
+    #[test]
+    fn a_small_fan_in_stays_quiet() {
+        let nodes = vec![
+            node("a", &[], "x"),
+            node("b", &[], "x"),
+            node("merge", &["a", "b"], "汇总 {{nodes.a.output}}{{nodes.b.output}}"),
+        ];
+        let issues = validate(&plan(nodes), &[]);
+        assert!(
+            !messages(&issues)
+                .iter()
+                .any(|message| message.contains("内联了")),
+            "2 份不该告警"
+        );
     }
 
     #[test]

@@ -67,6 +67,13 @@ pub fn preflight(plan: &DagPlan, profiles: &[AgentProfile]) -> Result<(), String
 }
 
 /// 跑一张图。返回时所有节点的状态都已经落定（除了一直没人确认的闸门）。
+/// 没写 `token_budget` 时的兜底上限（token）。
+///
+/// 这是**灾难上限**，不是建议预算：正常一张图几万到几十万 token，碰不到；
+/// 只有"工具全坏、每个节点还跑满轮次"那种才会撞上——那种一次能烧掉几块钱，
+/// 产出还全是空气。要放宽就在计划里设 `defaults.tokenBudget`。
+const TOKEN_CEILING: i64 = 4_000_000;
+
 pub fn execute(
     plan: DagPlan,
     profiles: Vec<AgentProfile>,
@@ -76,6 +83,16 @@ pub fn execute(
 ) {
     let policy = plan.defaults.failure_policy;
     let max_parallel = plan.defaults.max_parallel.max(1) as usize;
+    // 预算闸门。
+    //
+    // 计划里写了就用写的；没写也不能裸奔——一次 $1 的运行里五个节点的工具
+    // 全是坏的，它们照样各自跑满轮次，钱花在空气上，而没有任何地方会拦。
+    // 兜底值定在"灾难级"：正常一张图几万到几十万 token，碰不到它。
+    let budget = plan
+        .defaults
+        .token_budget
+        .filter(|value| *value > 0)
+        .unwrap_or(TOKEN_CEILING);
     let (tx, rx) = mpsc::channel::<Completion>();
     // 重试退避：node_id -> 最早可以再开始的时刻。
     let mut retry_at: HashMap<String, Instant> = HashMap::new();
@@ -85,6 +102,24 @@ pub fn execute(
         if handle.is_cancelled() {
             cancel_pending(&plan, &handle, "运行被取消");
             break;
+        }
+        // 预算用尽：不再开新节点，把剩下的标成取消。
+        //
+        // 正在跑的节点不打断——它可能马上就有结论，半路砍掉更浪费；
+        // 但不会再放新的进来。对一张 8 节点的图，能省下后面所有节点的钱。
+        {
+            let used = handle.used_tokens();
+            if used >= budget {
+                cancel_pending(
+                    &plan,
+                    &handle,
+                    &format!(
+                        "token 预算用尽（已用 {used} / 上限 {budget}），剩余节点未执行。\
+                         要放宽就在计划里设 defaults.tokenBudget。"
+                    ),
+                );
+                break;
+            }
         }
 
         let statuses = handle.statuses();
@@ -436,8 +471,8 @@ fn build_request(
         on_usage: {
             let handle = Arc::clone(handle);
             let node_id = node.id.clone();
-            Arc::new(move |tokens_in: i64, tokens_out: i64| {
-                handle.push_usage(&node_id, tokens_in, tokens_out)
+            Arc::new(move |tokens_in: i64, tokens_out: i64, tokens_cached: i64| {
+                handle.push_usage(&node_id, tokens_in, tokens_out, tokens_cached)
             })
         },
         on_turn: {
@@ -545,6 +580,8 @@ mod tests {
         delay: Duration,
         /// 每个节点的入参提示词：用来断言"下游拿到的是摘要不是全文"。
         seen: Option<Arc<std::sync::Mutex<Vec<(String, String)>>>>,
+        /// 每个节点报多少输入 token：预算闸门的测试用它造用量。
+        tokens_in: i64,
     }
 
     impl NodeRunner for ScriptedRunner {
@@ -559,6 +596,9 @@ mod tests {
                 }
             }
             std::thread::sleep(self.delay);
+            if self.tokens_in > 0 {
+                (request.on_usage)(self.tokens_in, 0, 0);
+            }
             match self.script.get(&request.node_id) {
                 Some(Ok(text)) => Ok(NodeOutput {
                     text: text.clone(),
@@ -682,6 +722,51 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("运行没有在 5 秒内结束：{:?}", handle.statuses());
+    }
+
+    /// 预算用尽后不再开新节点。
+    ///
+    /// 没有这条闸门时，一次"工具全坏"的运行会安静地烧完所有节点：每个节点
+    /// 照样跑满 24 轮，账单一块钱，产出全是空气——而这正是发生过的。
+    #[test]
+    fn token_budget_stops_launching_new_nodes() {
+        let mut dag = plan(
+            vec![node("a", &[]), node("b", &["a"]), node("c", &["b"])],
+            1,
+            FailurePolicy::FailFast,
+        );
+        dag.defaults.token_budget = Some(100);
+        let hub = crate::dag::run::DagHub::ephemeral();
+        let runner = Arc::new(ScriptedRunner {
+            tokens_in: 120,
+            ..Default::default()
+        });
+        let started = hub
+            .start(
+                dag,
+                &[profile("general")],
+                Some(runner),
+                Arc::new(|_: &crate::dag::run::DagRun| {}),
+            )
+            .expect("应当能起跑");
+        let handle = hub.get(&started.id).expect("运行表里应当有它");
+        for _ in 0..100 {
+            if handle.status() != crate::dag::run::RunStatus::Running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let statuses = handle.statuses();
+        assert_eq!(
+            statuses.get("a").copied(),
+            Some(NodeStatus::Succeeded),
+            "第一个节点应当正常跑完：{statuses:?}"
+        );
+        assert_ne!(
+            statuses.get("b").copied(),
+            Some(NodeStatus::Succeeded),
+            "预算用尽后 b 不该再执行：{statuses:?}"
+        );
     }
 
     #[test]
@@ -858,6 +943,7 @@ mod tests {
             script: HashMap::from([("a".to_string(), Ok(big.clone()))]),
             delay: Duration::from_millis(5),
             seen: Some(seen.clone()),
+            tokens_in: 0,
         });
         let hub = crate::dag::run::DagHub::ephemeral();
         let started = hub
