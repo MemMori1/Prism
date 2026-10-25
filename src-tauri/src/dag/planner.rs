@@ -337,6 +337,13 @@ pub fn blank(project: &str) -> DagPlan {
 }
 
 /// 调一次模型（阻塞）。
+/// Planner 一次拆图的等待上限。
+///
+/// 正常十几秒就回来。超过这个数基本只有三种情况：地址填错、模型名在服务端
+/// 不存在、上游挂着不回包。`provider::chat` 的流式总超时是 1 小时（那是给
+/// 长回答留的），套在拆图上就是前端转一个小时的圈。
+const PLAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 fn ask(system: &str, prompt: &str) -> Result<String, String> {
     let config = crate::engines::native::config::load();
     let (provider, model) = config.selection().ok_or_else(|| {
@@ -347,6 +354,9 @@ fn ask(system: &str, prompt: &str) -> Result<String, String> {
         json!({ "role": "system", "content": system }),
         json!({ "role": "user", "content": prompt }),
     ];
+    // 时间闸：超时就让流式读循环自己停，别把整轮等满一小时。
+    let started = std::time::Instant::now();
+    let stop = move || started.elapsed() > PLAN_TIMEOUT;
     let outcome = crate::engines::native::provider::chat(
         provider,
         &model.id,
@@ -354,9 +364,19 @@ fn ask(system: &str, prompt: &str) -> Result<String, String> {
         &[],
         &mut |_delta| {},
         &mut |_delta| {},
-        &|| false,
+        &stop,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        if started.elapsed() > PLAN_TIMEOUT {
+            format!(
+                "规划超时（{} 秒没返回）：模型服务可能不可达，或模型名「{}」在服务端不存在",
+                PLAN_TIMEOUT.as_secs(),
+                model.id
+            )
+        } else {
+            error.to_string()
+        }
+    })?;
     Ok(outcome.text)
 }
 

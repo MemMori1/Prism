@@ -756,6 +756,10 @@ async function runPlanner(): Promise<void> {
     await nextTick()
     fitView()
   } catch (cause) {
+    // 除了弹一下提示，还把原因留在界面那一行：toast 六秒就没了，回来想再看
+    // 一眼失败原因就找不到了，只剩"刚才好像没反应"。
+    const message = cause instanceof Error ? cause.message : String(cause)
+    notice.value = `生成失败：${message}`
     report(cause)
   } finally {
     planning.value = false

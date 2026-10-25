@@ -1981,11 +1981,16 @@ pub async fn dag_plan(
 ) -> Result<DagPlan, String> {
     let agents = agents::list();
     let max = max_nodes.unwrap_or(dag::planner::DEFAULT_MAX_NODES);
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         dag::planner::draft(&goal, &project, &agents, max)
     })
     .await
-    .map_err(|error| format!("规划线程异常退出：{error}"))?
+    .map_err(|error| format!("规划线程异常退出：{error}"))?;
+    // 失败要留痕：界面上的提示几秒就没了，日志才是事后能查的那一份。
+    if let Err(error) = &result {
+        eprintln!("[prism] dag_plan 失败：{error}");
+    }
+    result
 }
 
 // ---------------------------------------------------------------- 执行引擎
