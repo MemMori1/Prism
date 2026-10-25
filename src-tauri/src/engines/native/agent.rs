@@ -642,6 +642,14 @@ fn run_turns(
     permission: approval::Mode,
     slot: &RunSlot,
 ) -> Result<Stop, String> {
+    /// 一轮 run_turns 里最多自动压缩几次。压完历史只剩摘要（几千 token），
+    /// 正常一次就够；跑满三次说明有什么在造巨量输出，别再挖了——交给
+    /// 用户看见的真实错误。
+    ///
+    /// 编排里的 `dag::runner::NativeRunner` 用的是另一套救援（机械裁剪，上限 2），
+    /// 因为它不能为一次超限再叫一次模型。改这里的语义时那边不会自动跟上，
+    /// 见 `overflow.rs` 文件头的「两套循环，一处定义」。
+    const RESCUE_LIMIT: u32 = 3;
     // 开关本轮只读一次：工具清单与执行校验用同一份，不会出现
     // "schema 里有、执行时又说被关了"的错位。
     let enabled = tools::EnabledTools::from_config();
@@ -650,8 +658,15 @@ fn run_turns(
     // 走一个工具循环就是平方级开销。本轮自己写进去的消息同步补进来，
     // 下一轮看到的历史与磁盘一致。
     let mut history = store::messages(raw);
-
-    for ordinal in 0..max_turns {
+    let mut rescues = 0u32;
+    // 轮次计数自己管：救援重试不该烧掉一轮（超限发生在最后一轮时，
+    // for 循环的 continue 会静默结束、连个回答都不剩）。
+    let mut ordinal = -1i32;
+    loop {
+        ordinal += 1;
+        if ordinal as u32 >= max_turns {
+            break;
+        }
         if slot.stopped() {
             return Ok(Stop::Cancelled);
         }
@@ -718,6 +733,32 @@ fn run_turns(
         ) {
             Ok(outcome) => outcome,
             Err(provider::ChatError::Cancelled) => return Ok(Stop::Cancelled),
+            // 模型把请求整个拒了（上下文超限）：这是会话太大，不是请求错。
+            // 压一次历史再重发，会话自己救活，不让用户去背「/compact 是什么」。
+            //
+            // 只有聊天这条路能"叫模型做摘要"：编排节点无人值守、也没有会话
+            // 文件，那边是机械裁剪（`dag::runner::NativeRunner` 的 `trim_messages`）。
+            // 两条路都要能自愈，别只修一边。
+            Err(provider::ChatError::Failed(error))
+                if provider::is_context_overflow(&error) && rescues < RESCUE_LIMIT =>
+            {
+                rescues += 1;
+                match super::compact::rescue(app, session_id, raw, provider, model, slot) {
+                    // 重写后的磁盘才是下一轮要发的东西，内存里这份历史已作废；
+                    // 轮次不前进——救援消耗的是被拒的那次请求，不是用户的一轮。
+                    Ok(super::compact::Rescue::Done) => {
+                        history = store::messages(raw);
+                        ordinal -= 1;
+                        continue;
+                    }
+                    Ok(super::compact::Rescue::Cancelled) => return Ok(Stop::Cancelled),
+                    Err(why) => {
+                        return Err(format!(
+                            "上下文超限，自动压缩也没救回来：{why}\n原始错误：{error}"
+                        ))
+                    }
+                }
+            }
             Err(error) => return Err(error.to_string()),
         };
         // 第一轮就记下模型：即使后面撞上轮次上限，回显也是对的。
@@ -750,6 +791,7 @@ fn run_turns(
             let tokens = outcome.usage.map(|usage| store::StoredTokens {
                 input: usage.input,
                 output: usage.output,
+                cached: usage.cached,
             });
             store::append(
                 raw,
@@ -905,6 +947,7 @@ fn run_turns(
         let tokens = outcome.usage.map(|usage| store::StoredTokens {
             input: usage.input,
             output: usage.output,
+            cached: usage.cached,
         });
         // 顺序要紧：OpenAI 兼容协议要求带 tool_calls 的 assistant 排在它的
         // tool 结果之前，否则下一轮请求会被判成孤立 tool 消息（400）。
@@ -1031,6 +1074,42 @@ mod tests {
         assert_eq!(list[0]["role"], "system");
         assert!(list[0]["content"].as_str().unwrap().contains("/tmp/demo"));
         assert_eq!(list[1]["role"], "user");
+    }
+
+    /// 前缀缓存的命中条件是「两次请求的前部逐字节一致」。这条用**真实构造链**
+    /// （`provider_messages` 逐条拼）走两轮，确认第二轮只是第一轮的纯追加。
+    ///
+    /// 为什么不靠 `provider.rs` 里那条 `consecutive_turns_are_append_only_...`：
+    /// 那条喂的是手工写死的最小 messages，测的是"HTTP 层没乱动数组"；真实路径
+    /// 还要过 `provider_messages` 的重排、`system_prompt` 的目录拼接、`user_content`
+    /// 的 parts 转换——任何一处抖动都会让前缀 miss，而手工数据看不见。
+    #[test]
+    fn provider_messages_are_append_only_across_turns() {
+        let dir = "/tmp/prism-cache";
+        let mut history = vec![message("user", "你好")];
+        let first = provider_messages(dir, &history);
+        history.push(message("assistant", "你好，有什么可以帮你的"));
+        history.push(message("user", "看看这个目录"));
+        let second = provider_messages(dir, &history);
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second[..first.len()]).unwrap(),
+            "第二轮必须以上一轮为逐字节前缀，否则前缀缓存全 miss"
+        );
+    }
+
+    /// 工具数组也在缓存前缀里：同一份开关配置下必须逐字节稳定。
+    ///
+    /// `specs()` 每次都会过一遍 `visible()`（排序 + `needs_met` 探测）。排序是
+    /// 显式的；探测如果对同一个后端一会儿有一会儿没有，工具清单就会时多时少，
+    /// 整个请求前缀跟着全 miss。
+    #[test]
+    fn tool_specs_are_byte_stable_between_calls() {
+        let first = serde_json::to_string(&tools::specs(&tools::EnabledTools::from_config()))
+            .expect("序列化工具清单");
+        let again = serde_json::to_string(&tools::specs(&tools::EnabledTools::from_config()))
+            .expect("序列化工具清单");
+        assert_eq!(first, again, "重建工具清单必须逐字节一致，否则前缀缓存全 miss");
     }
 
     /// 压缩摘要要变成「背景 user 消息」，且前后不能被工具结果串味：
@@ -1221,6 +1300,7 @@ mod tests {
             },
             tokens_input: 1200,
             tokens_output: 300,
+            tokens_cached: 1100,
         };
         let folded = subagent::fold(outcome);
         assert!(folded.outcome.error.is_none(), "{:?}", folded.outcome.error);
@@ -1232,6 +1312,7 @@ mod tests {
         let tokens = folded.tokens.expect("有 token 就该折进去");
         assert_eq!(tokens.input, 1200);
         assert_eq!(tokens.output, 300);
+        assert_eq!(tokens.cached, 1100, "缓存命中要一路折进会话账目");
     }
 
     /// 子代理失败时：错误转红，但已产出的部分报告也一并带出来（不白跑）。
@@ -1243,6 +1324,7 @@ mod tests {
             trace: subagent::SubagentTrace::default(),
             tokens_input: 0,
             tokens_output: 0,
+            tokens_cached: 0,
         };
         let folded = subagent::fold(outcome);
         assert!(folded.outcome.error.is_some());

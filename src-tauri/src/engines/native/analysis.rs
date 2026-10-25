@@ -36,6 +36,9 @@ const HITS_MAX: usize = 2000;
 /// JSON 查询结果默认 / 上限条数。
 const VALUES_DEFAULT: usize = 200;
 const VALUES_MAX: usize = 5000;
+/// JSON 查询输出的字符预算（比 `tools::MAX_OUTPUT_CHARS` 留一点余量，
+/// 让外层统一闸不必再动它，也免得把 JSON 结构从中间切断）。
+const JSON_OUTPUT_CHARS: usize = 30_000;
 /// 差异比较的分块大小。
 const DIFF_CHUNK: usize = 4096;
 
@@ -397,8 +400,27 @@ fn run_json(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
     };
 
     let matched = hits.len();
-    let shown: Vec<Value> = hits.into_iter().take(limit).collect();
-    let value = if shown.len() == 1 {
+    // 按**字符预算**取，不是按个数。按个数管不住：一个值可能就是十万字符的
+    // 字符串（反汇编、strings 结果都是这样），5000 个这种值加起来是上百万
+    // token——实测过一次 191 万 token 的请求，1M 窗口的模型当场 400。
+    let mut shown: Vec<Value> = Vec::new();
+    let mut used = 0usize;
+    for hit in &hits {
+        let size = serde_json::to_string(hit)
+            .map(|text| text.chars().count())
+            .unwrap_or(0);
+        // 至少给一个：空结果比"一个超大值"更难用。
+        if !shown.is_empty() && used + size > JSON_OUTPUT_CHARS {
+            break;
+        }
+        shown.push(hit.clone());
+        used += size;
+        if shown.len() >= limit {
+            break;
+        }
+    }
+    let returned = shown.len();
+    let value = if returned == 1 {
         shown[0].clone()
     } else {
         json!(shown)
@@ -410,8 +432,9 @@ fn run_json(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
             "source": source,
             "query": query,
             "matched": matched,
-            "returned": shown.len(),
-            "truncated": matched > limit,
+            "returned": returned,
+            "chars": used,
+            "truncated": matched > returned,
             "value": value,
         }),
     )

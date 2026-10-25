@@ -42,7 +42,7 @@ const SUMMARY_SYSTEM: &str = "\
 /// 压缩结果里前端要用的事实（同时用于 `session.compact.done` 事件）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Done {
+pub(crate) struct Done {
     /// 压缩前有几条消息。
     messages: usize,
     /// 压缩前的字符数。
@@ -224,7 +224,7 @@ fn summarize(
     model: &str,
     prompt: &str,
     stop: &dyn Fn() -> bool,
-) -> Result<(String, i64, i64), Failure> {
+) -> Result<(String, i64, i64, i64), Failure> {
     let messages = vec![
         json!({ "role": "system", "content": SUMMARY_SYSTEM }),
         json!({ "role": "user", "content": prompt }),
@@ -243,11 +243,53 @@ fn summarize(
             "模型没给出摘要（返回为空）：换一个模型或再试一次".to_string(),
         ));
     }
-    let (input, output) = outcome
+    let usage = outcome
         .usage
-        .map(|usage| (usage.input, usage.output))
-        .unwrap_or((0, 0));
-    Ok((text, input, output))
+        .unwrap_or(provider::Usage::default());
+    Ok((text, usage.input, usage.output, usage.cached))
+}
+
+/// 把一串已渲染的文本行压成摘要，**不落盘**。
+///
+/// 聊天路径走 [`run`]：它有会话文件，压完要写回一条 `compact` 消息。编排节点
+/// 没有会话文件，消息只是一个 `Vec<Value>`，所以只借这一步。分块、链式合并、
+/// 字符上限全沿用 [`chunks_of`] 与 [`prompt_body`]——两条路压出来的摘要口径一致，
+/// 换模型或调分块大小时不会出现「聊天压得动、编排压不动」。
+///
+/// 返回 `(摘要正文, 参与压缩的条数)`。
+pub(crate) fn summarize_lines(
+    lines: &[String],
+    provider_cfg: &config::ProviderConfig,
+    model: &str,
+    stop: &dyn Fn() -> bool,
+) -> Result<(String, usize), String> {
+    if lines.is_empty() {
+        return Err("没有可压缩的内容".to_string());
+    }
+    let (chunks, dropped) = chunks_of(lines);
+    let mut summary: Option<String> = None;
+    for chunk in &chunks {
+        // 摘要自己也是一次模型调用：用户点了停止就别再烧钱。
+        if stop() {
+            return Err("压缩被中断".to_string());
+        }
+        let prompt = prompt_body(summary.as_deref(), &body_of(lines, chunk), "");
+        let (text, ..) = summarize(provider_cfg, model, &prompt, stop).map_err(|failure| {
+            match failure {
+                Failure::Cancelled => "压缩被中断".to_string(),
+                Failure::Failed(why) => why,
+            }
+        })?;
+        summary = Some(text);
+    }
+    let summary = summary.ok_or_else(|| "没有可压缩的内容".to_string())?;
+    // 不静默：太老的消息没进摘要时写明白，模型才知道自己没看到全貌。
+    let header = if dropped > 0 {
+        format!("（更早的 {dropped} 条消息超出压缩上限，未纳入摘要）\n\n")
+    } else {
+        String::new()
+    };
+    Ok((format!("{header}{summary}"), lines.len()))
 }
 
 /// 真正干活的那一段（在后台线程里跑）。
@@ -274,6 +316,7 @@ fn run(
     let mut summary: Option<String> = None;
     let mut tokens_in = 0i64;
     let mut tokens_out = 0i64;
+    let mut tokens_cached = 0i64;
     for (index, chunk) in chunks.iter().enumerate() {
         if slot.stopped() {
             return Err(Failure::Cancelled);
@@ -288,10 +331,11 @@ fn run(
             }),
         );
         let prompt = prompt_body(summary.as_deref(), &body_of(&lines, chunk), instruction);
-        let (text, used_in, used_out) = summarize(provider_cfg, model, &prompt, &stop)?;
+        let (text, used_in, used_out, used_cached) = summarize(provider_cfg, model, &prompt, &stop)?;
         summary = Some(text);
         tokens_in += used_in;
         tokens_out += used_out;
+        tokens_cached += used_cached;
     }
     let summary = summary.ok_or_else(|| Failure::Failed("没有可压缩的内容".to_string()))?;
     if slot.stopped() {
@@ -316,6 +360,7 @@ fn run(
         tokens: Some(store::StoredTokens {
             input: tokens_in,
             output: tokens_out,
+            cached: tokens_cached,
         }),
     };
     let keep = pending_user(&history);
@@ -333,7 +378,7 @@ fn run(
     if let Some(message) = keep {
         kept.push(message);
     }
-    store::replace_messages(raw, &kept, tokens_in, tokens_out)?;
+    store::replace_messages(raw, &kept, tokens_in, tokens_out, tokens_cached)?;
 
     Ok(Done {
         messages: history.len(),
@@ -341,6 +386,68 @@ fn run(
         after,
         tokens: tokens_in + tokens_out,
     })
+}
+
+/// 自动压缩的结果：压成了 / 被叫停。
+///
+/// 压缩的具体数字（前后字符数、token）由 rescue 自己发 `session.compact.done`
+/// 事件，调用方只需要知道「成了没」。
+pub(crate) enum Rescue {
+    Done,
+    Cancelled,
+}
+
+/// 自动压缩：上下文超限时由回合循环同步调用，压完由调用方重载历史重试。
+///
+/// 与手动 `/compact` 用同一台机器（分段摘要 + 备份 + 重写），差别只在这
+/// 两条：它跑在回合线程里，槽位已被这一轮占着——不 take、不发
+/// execution 事件，「停止」打断压缩就是打断这一轮，语义一致；起始标记
+/// 写明是自动的，时间线上能看出这条摘要不是用户敲出来的。
+pub(crate) fn rescue(
+    app: &AppHandle,
+    session_id: &str,
+    raw: &str,
+    provider_cfg: &config::ProviderConfig,
+    model: &str,
+    slot: &agent::RunSlot,
+) -> Result<Rescue, String> {
+    let history = store::messages(raw);
+    let before: usize = history.iter().map(size_of).sum();
+    let count = history.len();
+    let start = marker(&format!(
+        "上下文超限，自动压缩开始 · {count} 条消息 · {before} 字符"
+    ));
+    store::append(raw, &start)?;
+    super::emit_event(
+        app,
+        "session.compact.started",
+        json!({ "sessionID": session_id, "messages": count, "before": before, "auto": true }),
+    );
+    match run(app, session_id, raw, provider_cfg, model, "", start, slot) {
+        Ok(done) => {
+            super::emit_event(
+                app,
+                "session.compact.done",
+                json!({
+                    "sessionID": session_id,
+                    "messages": done.messages,
+                    "before": done.before,
+                    "after": done.after,
+                    "tokens": done.tokens,
+                    "auto": true,
+                }),
+            );
+            Ok(Rescue::Done)
+        }
+        Err(Failure::Cancelled) => {
+            let _ = store::append(raw, &marker("自动压缩已取消 · 历史原样保留"));
+            Ok(Rescue::Cancelled)
+        }
+        Err(Failure::Failed(error)) => {
+            let _ = store::append(raw, &marker(&format!("自动压缩失败：{error}")));
+            Err(error)
+        }
+    }
 }
 
 /// 入口：`/compact [额外要求]`。

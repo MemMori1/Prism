@@ -24,6 +24,7 @@ use serde_json::Value;
 
 use crate::agents::{AgentProfile, Permission, ToolSelection};
 use crate::engines::native::tools::Permission as ToolPermission;
+use crate::engines::native::overflow::{clip_tool_result, compress_messages, trim_messages};
 use crate::engines::native::{config, provider, tools};
 
 /// 单次执行的停止信号：全局取消 + 本节点超时。
@@ -97,7 +98,7 @@ pub struct NodeRequest {
     /// 新落的一步工具调用（`read_file src/x.rs`）：面板上"现在在干什么"。
     pub on_step: Arc<dyn Fn(&str) + Send + Sync>,
     /// 本轮 token 用量：跑长节点时数字要动，否则看起来像卡住了。
-    pub on_usage: Arc<dyn Fn(i64, i64) + Send + Sync>,
+    pub on_usage: Arc<dyn Fn(i64, i64, i64) + Send + Sync>,
     /// 进入第几轮（1 起）+ 轮次上限。模型久不吐字时，面板靠它说明"还在第几轮"。
     pub on_turn: Arc<dyn Fn(u32, u32) + Send + Sync>,
 }
@@ -108,6 +109,8 @@ pub struct NodeOutput {
     pub text: String,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// tokens_in 里命中前缀缓存的部分（报给运行面板算命中率）。
+    pub tokens_cached: i64,
     pub turns: u32,
     pub steps: Vec<String>,
 }
@@ -176,6 +179,82 @@ pub fn installed() -> Vec<&'static str> {
 /// 的调研结论砍掉六成，模型就开始猜了。这个阈值的职责是拦住百 KB 级倾倒。
 pub const PROMPT_INLINE_LIMIT: usize = 8_000;
 
+/// 一次提示词里**所有**占位符内联的总预算。
+///
+/// 单槽上限拦不住扇入：一个「汇总」节点引用 8 份上游报告，8 × 8 KB = 64 KB，
+/// 128k 窗口的模型光提示词就吃掉两万多 token，再加上系统提示与工具 schema，
+/// 第一轮请求直接 400。而这个节点没人看着，救不回来就是整条链断在这里。
+///
+/// 所以预算按**槽位数**均分：上游越多，每份分到的越少，总量恒定。
+/// 24 KB ≈ 8k token，留给模型自己的历史与输出足够。
+pub const PROMPT_BUDGET: usize = 24_000;
+
+/// 单个占位符的下限。
+///
+/// 均分不能无下限：20 个上游时 24000/20 = 1200，再砍就是标题加一句"略"，
+/// 下游只能靠猜。宁可总量略超预算，也要保证每份有一点可用的信息。
+const PROMPT_FLOOR: usize = 1_200;
+
+/// 提示词超过这个长度就在运行面板上报一行。
+///
+/// 上下文超限现在完全不可见——节点跑挂了只看到一句 400。让人先看见
+/// "这一轮的提示词有多大"，才知道该往哪儿调。
+pub const PROMPT_NOTICE: usize = 12_000;
+
+/// 数一遍任务里有多少个占位符槽位。
+///
+/// 为什么按**出现次数**而不是按节点去重：同一个节点被引用三次，提示词里就是
+/// 三份正文——token 会真的重复三遍。去重计数会让总预算凭空失效。
+///
+/// 没闭合的占位符不计：它会被原样输出，不产生内容。
+pub(crate) fn count_slots(task: &str) -> (usize, usize) {
+    const NODES: &str = "{{nodes.";
+    const ARTIFACTS: &str = "{{artifacts.";
+    let mut nodes = 0usize;
+    let mut artifacts = 0usize;
+    let mut rest = task;
+    loop {
+        let nodes_at = rest.find(NODES);
+        let artifacts_at = rest.find(ARTIFACTS);
+        let (start, is_node) = match (nodes_at, artifacts_at) {
+            (None, None) => break,
+            (Some(at), None) => (at, true),
+            (None, Some(at)) => (at, false),
+            (Some(a), Some(b)) => {
+                if a <= b {
+                    (a, true)
+                } else {
+                    (b, false)
+                }
+            }
+        };
+        let prefix = if is_node { NODES } else { ARTIFACTS };
+        let after = &rest[start + prefix.len()..];
+        let Some(close) = after.find("}}") else { break };
+        if is_node {
+            nodes += 1;
+        } else {
+            artifacts += 1;
+        }
+        rest = &after[close + 2..];
+    }
+    (nodes, artifacts)
+}
+
+/// 每个槽位能分到的内联字数。
+///
+/// 固定总预算均分，夹在「下限」与「单词上限」之间：
+/// - 1 个上游 → 8000（拿满单槽上限，行为与加预算前一致）；
+/// - 3 个 → 8000；(24000/3)
+/// - 8 个 → 3000；
+/// - 20 个 → 命中下限 1200（总量 24k 出头，可以接受）。
+fn slot_budget(slots: usize) -> usize {
+    if slots == 0 {
+        return PROMPT_INLINE_LIMIT;
+    }
+    (PROMPT_BUDGET / slots).clamp(PROMPT_FLOOR, PROMPT_INLINE_LIMIT)
+}
+
 /// 把 `{{nodes.<id>.output}}` / `{{artifacts.<别名>.<字段>}}` 换成实际内容。
 ///
 /// `outputs` 是上游正文（键为节点 id），`artifacts` 是本次可用的制品视图
@@ -187,6 +266,13 @@ pub fn resolve_task(
 ) -> String {
     const NODES: &str = "{{nodes.";
     const ARTIFACTS: &str = "{{artifacts.";
+
+    // 先数一遍槽位再动手：预算要均分，一边替换一边算就只能"先到先得"，
+    // 排在后面的上游被饿死。
+    let (node_slots, artifact_slots) = count_slots(task);
+    let per_node = slot_budget(node_slots + artifact_slots);
+    // 制品本来给的就是摘要，不该比一个正文槽位还大。
+    let per_artifact = per_node.min(super::artifact::SUMMARY_LIMIT);
 
     let mut out = String::with_capacity(task.len());
     let mut rest = task;
@@ -215,12 +301,17 @@ pub fn resolve_task(
         let inner = &after[..close];
         if prefix == NODES {
             let id = inner.split('.').next().unwrap_or("").trim();
-            out.push_str(&node_text(id, outputs, artifacts));
+            out.push_str(&node_text(id, outputs, artifacts, per_node));
         } else {
             let mut parts = inner.split('.');
             let alias = parts.next().unwrap_or("").trim();
             let field = parts.next().map(str::trim).unwrap_or("summary");
-            out.push_str(&artifact_text(alias, if field.is_empty() { "summary" } else { field }, artifacts));
+            out.push_str(&artifact_text(
+                alias,
+                if field.is_empty() { "summary" } else { field },
+                artifacts,
+                per_artifact,
+            ));
         }
         rest = &after[close + 2..];
     }
@@ -233,6 +324,7 @@ fn node_text(
     id: &str,
     outputs: &std::collections::HashMap<String, String>,
     artifacts: &std::collections::HashMap<String, super::artifact::ArtifactView>,
+    limit: usize,
 ) -> String {
     let Some(text) = outputs.get(id) else {
         return format!("（节点 {id} 没有产出）");
@@ -241,13 +333,13 @@ fn node_text(
         return format!("（节点 {id} 没有留下正文）");
     }
     let artifact = artifacts.get(id).filter(|view| !view.id.is_empty());
-    if text.chars().count() <= PROMPT_INLINE_LIMIT {
+    if text.chars().count() <= limit {
         return text.clone();
     }
-    let mut out: String = text.chars().take(PROMPT_INLINE_LIMIT).collect();
+    let mut out: String = text.chars().take(limit).collect();
     match artifact {
         Some(view) => out.push_str(&format!(
-            "\n\n（上游报告过长，以上为前 {PROMPT_INLINE_LIMIT} 字。完整内容见制品 {}，\
+            "\n\n（上游报告过长，以上为前 {limit} 字。完整内容见制品 {}，\
              需要细节就调用 prism.artifact.get 取）",
             view.id
         )),
@@ -261,6 +353,7 @@ fn artifact_text(
     alias: &str,
     field: &str,
     artifacts: &std::collections::HashMap<String, super::artifact::ArtifactView>,
+    summary_limit: usize,
 ) -> String {
     let Some(view) = artifacts.get(alias) else {
         return format!("（未声明的制品 {alias}）");
@@ -278,14 +371,25 @@ fn artifact_text(
             if view.summary.trim().is_empty() {
                 return "（制品没有正文）".to_string();
             }
-            let mut out = view.summary.clone();
-            if view.truncated {
-                out.push_str(&format!(
-                    "\n\n（摘要截到 {} 字；全文见制品 {}）",
-                    super::artifact::SUMMARY_LIMIT,
-                    if view.id.is_empty() { "（不可用）" } else { &view.id }
-                ));
+            // 摘要本身已经在 2048 上下，但扇入时会叠。按预算再削一道，
+            // 削了就说清楚，别让模型以为那就是全文。
+            let total = view.summary.chars().count();
+            if total <= summary_limit {
+                let mut out = view.summary.clone();
+                if view.truncated {
+                    out.push_str(&format!(
+                        "\n\n（摘要截到 {} 字；全文见制品 {}）",
+                        super::artifact::SUMMARY_LIMIT,
+                        if view.id.is_empty() { "（不可用）" } else { &view.id }
+                    ));
+                }
+                return out;
             }
+            let mut out: String = view.summary.chars().take(summary_limit).collect();
+            out.push_str(&format!(
+                "\n\n（摘要过长，以上为前 {summary_limit} 字；全文见制品 {}）",
+                if view.id.is_empty() { "（不可用）" } else { &view.id }
+            ));
             out
         }
         other => format!("（制品占位符不支持 .{other}）"),
@@ -295,6 +399,14 @@ fn artifact_text(
 // ---------------------------------------------------------------- 原生执行器
 
 /// 用 Prism 原生引擎（provider + 内置工具）跑一个节点。
+///
+/// 这是编排的**默认**执行器（插件 `dag.executor.native` 注册的），不是外部引擎
+/// ——只有 Agent profile 的 `executor` 被改成 codex / dsh / opencode，节点才走
+/// [`super::engine_runner::EngineRunner`]。
+///
+/// 下面的回合循环是 `engines::native::agent` 主循环的手写复刻：节点不需要会话
+/// 持久化、审批槽位和事件流，所以没去复用那一个。代价是**上下文治理是两份**，
+/// 见 `engines::native::overflow` 文件头的「两套循环，一处定义」。
 pub struct NativeRunner {
     /// 单测里没有 Tauri 上下文，工具层的 `app` 允许为空。
     app: Option<tauri::AppHandle>,
@@ -332,11 +444,28 @@ impl NodeRunner for NativeRunner {
             serde_json::json!({ "role": "user", "content": request.prompt }),
         ];
         let mut output = NodeOutput::default();
+        // 上游报告多的时候提示词会很大：先让面板上看得见这个数字。
+        // 上下文超限现在只表现为一句 400，没人知道起因是"这一轮光提示词就很大"。
+        let prompt_chars = request.prompt.chars().count();
+        if prompt_chars > PROMPT_NOTICE {
+            let step = format!("提示词 {prompt_chars} 字（上游报告已按预算均分截断）");
+            (request.on_step)(&step);
+            output.steps.push(step);
+        }
         let max_turns = cfg.max_turns();
         let stop = request.stop.clone();
         let should_stop = move || stop.hit();
-
-        for turn in 0..max_turns {
+        /// 上下文超限的救援上限：瘦身是机械的，两次还装不下就是真装不下。
+        ///
+        /// 比聊天路径的 `agent::RESCUE_LIMIT`（3）少一次，因为救援手段不同：
+        /// 聊天可以叫模型做摘要（`compact::rescue`），裁剪有信息损失但至少能
+        /// 收敛到窗口内；这里纯机械裁剪，头一次救不回来，第二次多半也一样。
+        /// 宁可直接失败让用户看见原因，也不要把同一个大提示词重发三遍再烧钱。
+        const RESCUE_LIMIT: u32 = 2;
+        // 轮次自己数：救援重试不烧轮次——它消耗的是被拒的那次请求。
+        let mut turn = 0u32;
+        let mut rescues = 0u32;
+        while turn < max_turns {
             if should_stop() {
                 return Err(stop_error(&request.stop, output));
             }
@@ -346,7 +475,7 @@ impl NodeRunner for NativeRunner {
             // 先报轮次再发请求：请求要等几秒到几分钟，这段时间面板至少要有个
             // "第 N/M 轮"在走，而不是干等一句"运行中"。
             (request.on_turn)(turn + 1, max_turns);
-            let turn_specs: &[Value] = if final_turn { &[] } else { &specs };
+            let turn_specs: &[Value] = &specs;
             if final_turn {
                 messages.push(serde_json::json!({
                     "role": "user",
@@ -355,27 +484,100 @@ impl NodeRunner for NativeRunner {
             }
             let mut on_text = |delta: &str| (request.on_text)(delta);
             let mut on_reasoning = |_delta: &str| {};
-            let chat = provider::chat(
-                &provider_cfg,
-                &model,
-                &messages,
-                turn_specs,
-                &mut on_text,
-                &mut on_reasoning,
-                &should_stop,
-            )
-            .map_err(|error| {
-                if request.stop.hit() {
-                    stop_error(&request.stop, output.clone())
-                } else {
-                    error.to_string()
+            // 强收轮不再把 tools 清空——tools 数组在前缀缓存里，删掉它等于
+            // 让整个会话最大的一次请求全量重算。掩码：tools 照发，锁死
+            // tool_choice = none，前缀逐字节不变。
+            let chat_result = if final_turn {
+                provider::chat_text_only(
+                    &provider_cfg,
+                    &model,
+                    &messages,
+                    turn_specs,
+                    &mut on_text,
+                    &mut on_reasoning,
+                    &should_stop,
+                )
+            } else {
+                provider::chat(
+                    &provider_cfg,
+                    &model,
+                    &messages,
+                    turn_specs,
+                    &mut on_text,
+                    &mut on_reasoning,
+                    &should_stop,
+                )
+            };
+            let chat = match chat_result {
+                Ok(chat) => chat,
+                Err(error) => {
+                    if request.stop.hit() {
+                        return Err(stop_error(&request.stop, output));
+                    }
+                    let text = error.to_string();
+                    // 模型拒收（上下文超限）：先压缩，压不动再机械裁剪。
+                    // 节点没人看着，不能等人敲 /compact，得自己救活自己。
+                    if rescues < RESCUE_LIMIT && provider::is_context_overflow(&text) {
+                        // 第一次优先压缩：多花一次模型调用，保住前面十几轮工具
+                        // 调用攒出来的结论——节点重跑一遍要十几分钟。压不动
+                        // （没有中段、摘要调用也失败）才退回裁剪，那是纯丢。
+                        let recovered = if rescues == 0 {
+                            match compress_messages(
+                                &mut messages,
+                                &provider_cfg,
+                                &model,
+                                &should_stop,
+                            ) {
+                                Ok(compressed) => {
+                                    let step =
+                                        format!("上下文超限：{compressed} 条历史已压成摘要，继续干");
+                                    (request.on_step)(&step);
+                                    if output.steps.len() < 24 {
+                                        output.steps.push(step);
+                                    }
+                                    true
+                                }
+                                Err(_) => trim_messages(&mut messages),
+                            }
+                        } else {
+                            trim_messages(&mut messages)
+                        };
+                        if recovered {
+                            rescues += 1;
+                            continue;
+                        }
+                    }
+                    if provider::is_context_overflow(&text) {
+                        // 压缩和裁剪都用尽还是装不下。错误里要交代"已经试过什么"
+                        // 和"它到底干到哪一步"——否则用户只看到一句 maximum
+                        // context length，会以为节点整个白跑了。
+                        let trail = output
+                            .steps
+                            .iter()
+                            .rev()
+                            .take(5)
+                            .rev()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" → ");
+                        let mut message = format!(
+                            "{text}\n（已自动压缩与裁剪仍装不下：这个节点的提示词或工具输出超出\
+                             模型窗口。把扇入拆成两级汇总、让上游结论更短，或换上下文更大的模型。）"
+                        );
+                        if !trail.is_empty() {
+                            message.push_str(&format!("\n失败前最后几步：{trail}"));
+                        }
+                        return Err(message);
+                    }
+                    return Err(text);
                 }
-            })?;
+            };
             if let Some(usage) = chat.usage {
                 output.tokens_in += usage.input;
                 output.tokens_out += usage.output;
+                output.tokens_cached += usage.cached;
                 // 逐轮报出去：一个节点可能要跑十轮，等结束才显示数字就是十分钟空白。
-                (request.on_usage)(usage.input, usage.output);
+                (request.on_usage)(usage.input, usage.output, usage.cached);
             }
             output.turns = turn + 1;
 
@@ -452,18 +654,33 @@ impl NodeRunner for NativeRunner {
                 messages.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": result.text,
+                    // 每一轮都重发整份历史，一个不设限的大输出乘以轮数就能把
+                    // 节点拖爆——进历史前限流，头尾各留一段。
+                    "content": clip_tool_result(&result.text),
                 }));
             }
+            turn += 1;
         }
 
         // 跑到这里说明轮次用尽仍没收敛。有正文就当归档交出去（比整场失败有用），
         // 但标清"是截断的"。
         if output.text.trim().is_empty() {
-            return Err(format!(
-                "跑满 {} 轮仍没有给出结论",
-                max_turns
-            ));
+            // 没正文等于下游什么都拿不到。把最后几步带上：用户能看出是卡在
+            // 哪一类操作上，而不是笼统地"跑满轮次"，下次知道该改哪。
+            let trail = output
+                .steps
+                .iter()
+                .rev()
+                .take(5)
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" → ");
+            return Err(if trail.is_empty() {
+                format!("跑满 {max_turns} 轮仍没有给出结论")
+            } else {
+                format!("跑满 {max_turns} 轮仍没有给出结论；最后几步：{trail}")
+            });
         }
         Ok(output)
     }
@@ -652,6 +869,102 @@ mod tests {
         assert!(text.contains("上游报告过长"));
         assert!(text.contains("art-1"), "截断时必须给出制品引用：{text}");
         assert!(text.chars().count() < PROMPT_INLINE_LIMIT + 300);
+    }
+
+    /// 扇入：一个「汇总」节点引用 10 份上游报告。
+    ///
+    /// 加总预算之前这里是 10 × 8 KB = 80 KB 的提示词，128k 窗口的模型
+    /// 光提示词就吃两万多 token，第一轮直接 400——而且节点没人看着，救不回来。
+    #[test]
+    fn fan_in_stays_within_the_total_prompt_budget() {
+        let long = "哈".repeat(PROMPT_INLINE_LIMIT * 2);
+        let pairs: Vec<(String, String)> = (0..10)
+            .map(|index| (format!("n{index}"), long.clone()))
+            .collect();
+        let task = (0..10)
+            .map(|index| format!("第 {index} 份：{{{{nodes.n{index}.output}}}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let outputs: HashMap<String, String> = pairs.into_iter().collect();
+
+        let text = resolve_task(&task, &outputs, &HashMap::new());
+        // 每份分到 2400（24000/10），加说明文字与模板骨架，留一点余量。
+        assert!(
+            text.chars().count() < PROMPT_BUDGET + 2_000,
+            "扇入提示词必须落回总预算：{} 字",
+            text.chars().count()
+        );
+        // 每份都还在（不是「前面的吃光、后面的饿死」）。
+        for index in 0..10 {
+            assert!(text.contains(&format!("第 {index} 份：")), "第 {index} 份被丢了");
+        }
+        assert_eq!(text.matches("上游报告过长").count(), 10, "每份都该标注被截断");
+    }
+
+    /// 一个上游时行为不变：拿满 8 KB 单槽上限。
+    #[test]
+    fn a_single_upstream_keeps_the_full_slot_limit() {
+        let long = "嗯".repeat(PROMPT_INLINE_LIMIT * 3);
+        let text = resolve_task(
+            "{{nodes.only.output}}",
+            &outputs(&[("only", &long)]),
+            &HashMap::new(),
+        );
+        let body = text.split("\n\n（上游报告过长").next().unwrap();
+        assert_eq!(body.chars().count(), PROMPT_INLINE_LIMIT);
+    }
+
+    /// 同一节点被引用两次就是两份正文（token 真的重复两遍），预算得按出现次数算。
+    #[test]
+    fn repeated_references_are_counted_per_occurrence() {
+        assert_eq!(count_slots("{{nodes.a.output}}"), (1, 0));
+        assert_eq!(
+            count_slots("{{nodes.a.output}} + {{nodes.a.output}}"),
+            (2, 0)
+        );
+        assert_eq!(count_slots("{{artifacts.x.summary}}"), (0, 1));
+        assert_eq!(
+            count_slots("{{nodes.a.output}}{{artifacts.b.id}}"),
+            (1, 1)
+        );
+        // 没闭合的不算槽位：它原样输出，不产生内容。
+        assert_eq!(count_slots("{{nodes.a.output"), (0, 0));
+    }
+
+    /// 槽位越多单个越小，但绝不低于下限，也不超过单槽上限。
+    #[test]
+    fn slot_budget_favours_fairness_with_a_floor() {
+        assert_eq!(slot_budget(0), PROMPT_INLINE_LIMIT);
+        assert_eq!(slot_budget(1), PROMPT_INLINE_LIMIT);
+        assert_eq!(slot_budget(3), PROMPT_INLINE_LIMIT);
+        assert_eq!(slot_budget(8), 3_000);
+        assert_eq!(slot_budget(20), PROMPT_FLOOR, "低于下限就该顶住");
+    }
+
+    /// 制品摘要也参与预算：扇入时不能每个都按 2048 叠上去。
+    #[test]
+    fn artifact_summaries_also_follow_the_budget() {
+        let long = "字".repeat(2_048);
+        let mut pairs: Vec<(String, String, String)> = Vec::new();
+        for index in 0..12 {
+            pairs.push((format!("a{index}"), format!("art-{index}"), long.clone()));
+        }
+        let refs: Vec<(&str, &str, &str)> = pairs
+            .iter()
+            .map(|(alias, id, text)| (alias.as_str(), id.as_str(), text.as_str()))
+            .collect();
+        let artifacts = views(&refs);
+        let task = (0..12)
+            .map(|index| format!("{{{{artifacts.a{index}.summary}}}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = resolve_task(&task, &HashMap::new(), &artifacts);
+        assert!(
+            text.chars().count() < PROMPT_BUDGET + 2_000,
+            "12 份摘要不能各自 2048 地叠：{} 字",
+            text.chars().count()
+        );
+        assert!(text.contains("摘要过长"), "削了就要说清楚：{text}");
     }
 
     #[test]

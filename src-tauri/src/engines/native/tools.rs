@@ -17,8 +17,15 @@ use super::store::StoredTokens;
 use super::{approval, guard, runtime};
 use crate::tasks::{SpawnRequest, TaskInfo, TasksState};
 
-/// 单次工具输出的字符上限（超出截断，避免一轮就把上下文撑爆）。
-const MAX_OUTPUT_CHARS: usize = 20_000;
+/// 单次工具输出的字符上限——**所有工具的统一出口闸**（见 `run_with_args`）。
+///
+/// 为什么必须有这一道：工具各自 `clamp` 是"自觉"，`bin.*` 那批（jq、反汇编、
+/// strings）输出量取决于样本，一漏就是上百万字符一次进历史。实测过一次
+/// 191 万 token 的请求——1M 窗口的模型当场 400，节点直接废。
+///
+/// 4 万这个值对齐 `artifact_tools::GET_LIMIT`：制品读取本来就要给到这个量，
+/// 出口再压会让"读得出来"变成假话。
+const MAX_OUTPUT_CHARS: usize = 40_000;
 /// 读文件默认行数。
 const READ_LINES: usize = 2000;
 /// 列目录的最大条目数。
@@ -1060,7 +1067,7 @@ pub fn visible(
     dag: bool,
     delegable_only: bool,
 ) -> Vec<Arc<ToolDef>> {
-    all_tools()
+    let mut tools: Vec<Arc<ToolDef>> = all_tools()
         .into_iter()
         .filter(|tool| {
             (!delegable_only || tool.delegable)
@@ -1069,7 +1076,11 @@ pub fn visible(
                 && (dag || tool.meta.scope == ToolScope::Any)
                 && super::backends::needs_met(tool.meta.needs).is_ok()
         })
-        .collect()
+        .collect();
+    // 工具数组在前缀缓存里，顺序必须逐字节稳定——「内置表 + 插件注册表」
+    // 拼出来的顺序依赖加载时机，按名排一次，重启、装插件都不再抖。
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    tools
 }
 
 /// 发给模型的工具声明（受当前开关与作用域约束）。
@@ -1124,7 +1135,14 @@ pub fn run_with_args(ctx: &ToolContext<'_>, name: &str, args: &Value) -> ToolRes
     if tool.meta.scope == ToolScope::Dag && ctx.dag.is_none() {
         return ToolResult::fail(format!("{name} 只在 DAG 节点里可用（需要节点作用域）"));
     }
-    tool.call(ctx, args)
+    let mut result = tool.call(ctx, args);
+    // 统一出口闸。工具自己记不记得 clamp 是它的事，这里必须兜住——
+    // 聊天、编排、子代理三条路都从这里过，收口一处才不会漏。
+    result.outcome.text = clamp(&result.outcome.text);
+    if let Some(error) = result.outcome.error.as_mut() {
+        *error = clamp(error);
+    }
+    result
 }
 
 // ---------------------------------------------------------------- 执行体适配
@@ -2185,11 +2203,20 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 }
 
 fn clamp(text: &str) -> String {
-    if text.chars().count() <= MAX_OUTPUT_CHARS {
+    let count = text.chars().count();
+    if count <= MAX_OUTPUT_CHARS {
         return text.to_string();
     }
-    let head: String = text.chars().take(MAX_OUTPUT_CHARS).collect();
-    format!("{head}\n…（输出过长，已截断）")
+    // 头尾都留：编译错误和 panic 在尾部，JSON 开头和命令回显在头部。
+    // 只留头会让"到底哪一步失败"整段消失，模型只能猜。
+    let head_len = MAX_OUTPUT_CHARS * 3 / 4;
+    let tail_len = MAX_OUTPUT_CHARS - head_len;
+    let head: String = text.chars().take(head_len).collect();
+    let tail: String = text.chars().skip(count - tail_len).collect();
+    format!(
+        "{head}\n…（输出过长已截断，中略 {} 字符；要中间这段就缩小范围重取）…\n{tail}",
+        count - head_len - tail_len
+    )
 }
 
 #[cfg(test)]
@@ -2211,34 +2238,53 @@ mod tests {
         path
     }
 
+    /// 出口闸截断必须留尾部：编译错误、panic、JSON 的收尾都在后面。
+    /// 只留头会让"到底哪一步失败"整段消失，模型只能猜。
+    #[test]
+    fn clamp_keeps_both_ends() {
+        let body = format!("{}{}", "头".repeat(MAX_OUTPUT_CHARS), "尾".repeat(2_000));
+        let text = clamp(&body);
+        assert!(text.starts_with("头头"));
+        assert!(text.ends_with("尾尾"));
+        assert!(text.contains("中略"));
+        assert!(text.chars().count() < MAX_OUTPUT_CHARS + 200);
+    }
+
+    #[test]
+    fn clamp_leaves_short_output_alone() {
+        assert_eq!(clamp("ok"), "ok");
+    }
+
     #[test]
     fn specs_cover_builtin_tools() {
         // 注册表现在连 `task`（子代理）一起给出——原来它是 agent 层单独 push 的，
         // 模型看到的清单没变，但"事实来源"只有一个。
         //
-        // 只比前 11 项：内置工具永远排在前面，后面可能跟着插件在别的用例里
-        // 注册进来的外部工具（注册表是进程级的，测试并行跑）。
+        // 清单按名排序（前缀缓存要求工具数组逐字节稳定），内置工具一个不少；
+        // 后面可能跟着插件在别的用例里注册进来的外部工具（注册表是进程级的，
+        // 测试并行跑），所以先取前若干再核对内容。
         let names: Vec<String> = specs(&EnabledTools::all())
             .iter()
             .filter_map(|spec| spec["function"]["name"].as_str().map(str::to_string))
-            .take(11)
             .collect();
-        assert_eq!(
-            names,
-            vec![
-                "read_file",
-                "list_files",
-                "grep",
-                "write_file",
-                "edit_file",
-                "run_command",
-                "run_script",
-                "trash",
-                "task_status",
-                "tools_list",
-                "task"
-            ]
-        );
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "工具清单必须按名排序");
+        for expected in [
+            "read_file",
+            "list_files",
+            "grep",
+            "write_file",
+            "edit_file",
+            "run_command",
+            "run_script",
+            "trash",
+            "task_status",
+            "tools_list",
+            "task",
+        ] {
+            assert!(names.iter().any(|name| name == expected), "{expected} 缺席");
+        }
     }
 
     /// `fetch` 是唯一出站的只读工具：名字得能发给 provider，权限与网络档不能

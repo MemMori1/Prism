@@ -165,6 +165,7 @@ pub fn fold(outcome: SubagentOutcome) -> tools::ToolResult {
         Some(crate::engines::native::store::StoredTokens {
             input: outcome.tokens_input,
             output: outcome.tokens_output,
+            cached: outcome.tokens_cached,
         })
     };
     let result = match &outcome.error {
@@ -189,15 +190,6 @@ pub fn final_turn_is(ordinal: u32) -> bool {
     ordinal + 1 == MAX_TURNS
 }
 
-/// 某一轮要发给模型的工具清单（最后一轮为空）。
-pub fn turn_specs_for<'a>(full: &'a [Value], final_turn: bool) -> &'a [Value] {
-    if final_turn {
-        &[]
-    } else {
-        full
-    }
-}
-
 /// 最后一轮追加的那句「别再调工具、直接交报告」。
 pub fn final_turn_prompt() -> &'static str {
     "轮次用尽。现在不要再调用任何工具，直接基于已经拿到的信息输出最终报告；\
@@ -216,6 +208,8 @@ pub struct SubagentOutcome {
     /// (input, output)：子代理自己烧掉的 token，计入会话总量。
     pub tokens_input: i64,
     pub tokens_output: i64,
+    /// tokens_input 里命中前缀缓存的部分（报给父级，一路入账）。
+    pub tokens_cached: i64,
 }
 
 impl SubagentOutcome {
@@ -392,7 +386,12 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
     };
 
     let stop = req.should_stop;
-    for turn in 0..MAX_TURNS {
+    /// 上下文超限的救援上限：机械瘦身两次还装不下就是真装不下。
+    const RESCUE_LIMIT: u32 = 2;
+    // 轮次自己数：救援重试不烧轮次，也不烧 token 预算的判断。
+    let mut turn = 0u32;
+    let mut rescues = 0u32;
+    while turn < MAX_TURNS {
         if stop() {
             outcome.error = Some("已被用户停止，子代理没有跑完".to_string());
             break;
@@ -409,31 +408,54 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
                 "content": final_turn_prompt(),
             }));
         }
-        let turn_specs: &[Value] = turn_specs_for(&specs, force_report);
         let mut on_text = |_delta: &str| {};
         let mut on_reasoning = |_delta: &str| {};
-        let chat = match provider::chat(
-            req.provider,
-            req.model,
-            &messages,
-            turn_specs,
-            &mut on_text,
-            &mut on_reasoning,
-            stop,
-        ) {
+        // 强收轮掩码而非清空 tools：tools 数组在前缀缓存里，删掉它 = 全量重算。
+        let chat_result = if force_report {
+            provider::chat_text_only(
+                req.provider,
+                req.model,
+                &messages,
+                &specs,
+                &mut on_text,
+                &mut on_reasoning,
+                stop,
+            )
+        } else {
+            provider::chat(
+                req.provider,
+                req.model,
+                &messages,
+                &specs,
+                &mut on_text,
+                &mut on_reasoning,
+                stop,
+            )
+        };
+        let chat = match chat_result {
             Ok(chat) => chat,
             Err(provider::ChatError::Cancelled) => {
                 outcome.error = Some("已被用户停止，子代理没有跑完".to_string());
                 break;
             }
             Err(error) => {
-                outcome.error = Some(error.to_string());
+                let text = error.to_string();
+                // 模型拒收（上下文超限）：机械瘦身一轮再试，轮次不前进。
+                if rescues < RESCUE_LIMIT
+                    && provider::is_context_overflow(&text)
+                    && super::overflow::trim_messages(&mut messages)
+                {
+                    rescues += 1;
+                    continue;
+                }
+                outcome.error = Some(text);
                 break;
             }
         };
         if let Some(usage) = chat.usage {
             outcome.tokens_input += usage.input;
             outcome.tokens_output += usage.output;
+            outcome.tokens_cached += usage.cached;
         }
         turns_used = turn + 1;
 
@@ -539,13 +561,15 @@ pub fn run(ctx: SubagentContext, req: SubagentRequest) -> SubagentOutcome {
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call.id,
-                "content": result.text,
+                // 与 DAG 节点同一道闸：每轮重发整份历史，大输出不设限就是滚雪球。
+                "content": super::overflow::clip_tool_result(&result.text),
             }));
         }
         push_progress(&steps, turn + 1, false);
         if outcome.error.is_some() {
             break;
         }
+        turn += 1;
     }
 
     outcome.trace = SubagentTrace {
@@ -677,6 +701,7 @@ mod tests {
             trace,
             tokens_input: 0,
             tokens_output: 0,
+            tokens_cached: 0,
         };
         let meta = outcome.metadata();
         let sub = &meta["subagent"];
@@ -726,18 +751,13 @@ mod tests {
     }
 
     #[test]
-    fn final_turn_strips_tools_and_appends_a_wrap_up_prompt() {
+    fn final_turn_keeps_tools_and_appends_a_wrap_up_prompt() {
         let specs = specs_for_with(&tools::EnabledTools::all(), AgentType::Explore);
         assert!(!specs.is_empty(), "探索子代理至少该有读类工具");
 
-        // 非末轮：工具原样发。
-        let before = turn_specs_for(&specs, false);
-        assert_eq!(before.len(), specs.len());
-
-        // 末轮：工具清空，逼模型交报告。
-        let after = turn_specs_for(&specs, true);
-        assert!(after.is_empty(), "末轮不能再发工具声明");
-
+        // 强收轮不再清空工具：tools 数组在前缀缓存里，删掉它等于整段历史
+        // 全量重算。掩码交给了 chat_text_only（tool_choice = none），这里
+        // 只验证提示词照旧。
         let prompt = final_turn_prompt();
         assert!(prompt.contains("不要再调用任何工具"), "{prompt}");
         assert!(prompt.contains("未覆盖"), "{prompt}");

@@ -15,6 +15,7 @@
 //! - `artifact_tools` 制品读写（只在 DAG 节点作用域里出现）
 //! - `forensics` 安全研究线的本机工具（`bin.meta.identify` 等）
 //! - `backends` 外部程序后端：探测 / 统一执行 / 作业目录（upx、r2、Ghidra）
+//! - `overflow` 上下文超限的两道闸：工具结果限流 + 拒收后的机械瘦身
 //! - `analysis`  安全研究线的分析工具（xref / 导入导出 / 密码特征 / 差异）
 //! - `dag_tools` Planner 的七工具（改图），只在 DAG 作用域里出现
 //! - `compact`  `/compact`：把历史压成摘要再重写会话（省上下文）
@@ -34,6 +35,7 @@ pub mod dex;
 pub mod engine;
 pub mod forensics;
 pub mod guard;
+pub mod overflow;
 pub mod provider;
 pub mod runtime;
 pub mod store;

@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 pub struct Usage {
     pub input: i64,
     pub output: i64,
+    /// 命中前缀缓存的输入 token（0 = 服务端没报）。DeepSeek 叫
+    /// `prompt_cache_hit_tokens`，OpenAI 系把它塞在
+    /// `prompt_tokens_details.cached_tokens`，两种形状都认。
+    pub cached: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -62,8 +66,22 @@ impl StreamAcc {
                 .get("completion_tokens")
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
+            let cached = usage
+                .get("prompt_cache_hit_tokens")
+                .and_then(Value::as_i64)
+                .or_else(|| {
+                    usage
+                        .get("prompt_tokens_details")
+                        .and_then(|detail| detail.get("cached_tokens"))
+                        .and_then(Value::as_i64)
+                })
+                .unwrap_or(0);
             if input > 0 || output > 0 {
-                self.usage = Some(Usage { input, output });
+                self.usage = Some(Usage {
+                    input,
+                    output,
+                    cached,
+                });
             }
         }
 
@@ -272,6 +290,17 @@ impl From<String> for ChatError {
     }
 }
 
+/// 这条失败是不是「上下文超限」：模型把请求整个拒了，再重试几次都一样。
+///
+/// 各家的说法不同，认关键词而不是解析 JSON——detail 最多只留 400 字符，
+/// 解析不出结构，但关键词都在开头。OpenAI 系："maximum context length"；
+/// 它的错误码形式是 context_length_exceeded；Anthropic 系："prompt is too long"。
+pub fn is_context_overflow(error: &str) -> bool {
+    error.contains("maximum context length")
+        || error.contains("context_length_exceeded")
+        || error.contains("prompt is too long")
+}
+
 fn failed(message: impl Into<String>) -> ChatError {
     ChatError::Failed(message.into())
 }
@@ -321,6 +350,50 @@ pub fn chat(
     on_reasoning: &mut dyn FnMut(&str),
     should_stop: &dyn Fn() -> bool,
 ) -> Result<Outcome, ChatError> {
+    chat_request(
+        provider, model, messages, tools, None, on_text, on_reasoning, should_stop,
+    )
+}
+
+/// 与 [`chat`] 相同，但 tools 照发、`tool_choice` 锁成 `"none"`。
+///
+/// 这是 DeepSeek harness 的「掩码而不是移除」：自动前缀缓存要求请求前部
+/// **逐字节一致**，而 tools 数组就在前缀里——把 tools 从请求里删掉，
+/// 缓存从那个字节起全部失效，而强收轮（最终轮 / 预算到顶）恰恰是整个
+/// 会话最大的一次请求。保留 tools 数组不动、只在 tool_choice 上收紧，
+/// 前缀不变，整段历史照常命中缓存。
+pub fn chat_text_only(
+    provider: &ProviderConfig,
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    on_text: &mut dyn FnMut(&str),
+    on_reasoning: &mut dyn FnMut(&str),
+    should_stop: &dyn Fn() -> bool,
+) -> Result<Outcome, ChatError> {
+    chat_request(
+        provider,
+        model,
+        messages,
+        tools,
+        Some("none"),
+        on_text,
+        on_reasoning,
+        should_stop,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chat_request(
+    provider: &ProviderConfig,
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    tool_choice: Option<&str>,
+    on_text: &mut dyn FnMut(&str),
+    on_reasoning: &mut dyn FnMut(&str),
+    should_stop: &dyn Fn() -> bool,
+) -> Result<Outcome, ChatError> {
     if !provider.usable() {
         return Err(failed("这个模型服务还没填地址"));
     }
@@ -332,7 +405,7 @@ pub fn chat(
     });
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
-        body["tool_choice"] = json!("auto");
+        body["tool_choice"] = json!(tool_choice.unwrap_or("auto"));
     }
 
     // 流式请求单独给总超时：客户端那个 600s 是给普通请求的，
@@ -570,6 +643,25 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_context_overflow_from_real_providers() {
+        // 真实案例：Z.ai 返回的 400 响应体（detail 截过 400 字符后的样子）。
+        let openai_style = "模型返回 400 Bad Request：{\"error\":{\"message\":\"This model's maximum context length is 1048576 tokens. However, you requested 1966822 tokens";
+        assert!(is_context_overflow(openai_style));
+        assert!(is_context_overflow(
+            "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 210000 tokens > 200000 maximum\"}}"
+        ));
+        assert!(is_context_overflow(
+            "模型返回 400 Bad Request：{\"error\":{\"code\":\"context_length_exceeded\"}}"
+        ));
+        // 普通错误不能误伤：别的 400 不该触发自动压缩。
+        assert!(!is_context_overflow(
+            "模型返回 400 Bad Request：{\"error\":{\"message\":\"Invalid model id\"}}"
+        ));
+        assert!(!is_context_overflow("模型返回 500 Internal Server Error："));
+        assert!(!is_context_overflow("空闲超时"));
+    }
+
+    #[test]
     fn text_delta_accumulates() {
         let mut acc = StreamAcc::default();
         acc.apply(&json!({ "choices": [{ "delta": { "content": "你" } }] }));
@@ -618,7 +710,32 @@ mod tests {
         let mut acc = StreamAcc::default();
         acc.apply(&json!({ "choices": [], "usage": { "prompt_tokens": 11, "completion_tokens": 7 } }));
         let outcome = acc.into_outcome();
-        assert_eq!(outcome.usage, Some(Usage { input: 11, output: 7 }));
+        assert_eq!(
+            outcome.usage,
+            Some(Usage {
+                input: 11,
+                output: 7,
+                cached: 0
+            })
+        );
+    }
+
+    #[test]
+    fn cached_tokens_are_read_from_both_shapes() {
+        // DeepSeek：prompt_cache_hit_tokens 直接挂在 usage 上。
+        let mut acc = StreamAcc::default();
+        acc.apply(&json!({ "choices": [], "usage": {
+            "prompt_tokens": 1000, "completion_tokens": 7, "prompt_cache_hit_tokens": 960
+        }}));
+        assert_eq!(acc.into_outcome().usage.unwrap().cached, 960);
+
+        // OpenAI 系：塞在 prompt_tokens_details.cached_tokens 里。
+        let mut acc = StreamAcc::default();
+        acc.apply(&json!({ "choices": [], "usage": {
+            "prompt_tokens": 1000, "completion_tokens": 7,
+            "prompt_tokens_details": { "cached_tokens": 512 }
+        }}));
+        assert_eq!(acc.into_outcome().usage.unwrap().cached, 512);
     }
 
     #[test]
@@ -678,6 +795,167 @@ mod tests {
         .expect("流式聊天应成功");
         assert_eq!(outcome.text, "你好");
         assert_eq!(streamed, "你好", "增量回调应逐段到达");
+    }
+
+    #[test]
+    fn consecutive_turns_are_append_only_for_the_cache() {
+        // 前缀缓存的命中条件就是「两次请求的前部逐字节一致」。让本地假服务端
+        // 接住两轮请求，抓下两份请求体，断言第二轮的消息数组是第一轮的纯追加、
+        // 工具数组原样——这是命中率的生命线，断在这里比去服务商后台看便宜。
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let port = listener.local_addr().expect("取端口").port();
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buffer = [0u8; 16 * 1024];
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                let raw = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let body = raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                sink.lock().unwrap().push(body);
+                let sse = concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    sse.len(),
+                    sse
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let config = ProviderConfig {
+            id: "test".to_string(),
+            label: "test".to_string(),
+            protocol: "openai".to_string(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: "test-key".to_string(),
+            models: vec![ModelEntry::new("test-model")],
+        };
+        let tools = vec![json!({
+            "type": "function",
+            "function": { "name": "grep", "parameters": {} }
+        })];
+        let mut on_text = |_: &str| {};
+        let mut on_reasoning = |_: &str| {};
+        let stop = || false;
+        chat(
+            &config,
+            "test-model",
+            &[json!({ "role": "user", "content": "第一问" })],
+            &tools,
+            &mut on_text,
+            &mut on_reasoning,
+            &stop,
+        )
+        .expect("第一轮应成功");
+        chat(
+            &config,
+            "test-model",
+            &[
+                json!({ "role": "user", "content": "第一问" }),
+                json!({ "role": "assistant", "content": "好" }),
+                json!({ "role": "user", "content": "第二问" }),
+            ],
+            &tools,
+            &mut on_text,
+            &mut on_reasoning,
+            &stop,
+        )
+        .expect("第二轮应成功");
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2, "两轮各一次请求");
+        let first: Value = serde_json::from_str(captured[0].trim()).expect("第一份请求体是 JSON");
+        let second: Value = serde_json::from_str(captured[1].trim()).expect("第二份请求体是 JSON");
+        let messages1 = first["messages"].as_array().expect("messages 数组");
+        let messages2 = second["messages"].as_array().expect("messages 数组");
+        assert_eq!(
+            &messages2[..messages1.len()],
+            &messages1[..],
+            "第二轮的消息必须是第一轮的纯追加，改前文 = 缓存全失效"
+        );
+        assert_eq!(
+            first["tools"], second["tools"],
+            "工具数组必须逐字节一致——它也在前缀里"
+        );
+    }
+
+    #[test]
+    fn text_only_masks_tools_instead_of_removing_them() {
+        // 掩码而不是移除：tools 数组照发（前缀不变），只有 tool_choice 锁成
+        // none。删掉 tools 字段会让缓存从那个字节起全部失效。
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let port = listener.local_addr().expect("取端口").port();
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buffer = [0u8; 16 * 1024];
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let raw = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let body = raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            sink.lock().unwrap().push(body);
+            let sse = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"收工\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                sse.len(),
+                sse
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+
+        let config = ProviderConfig {
+            id: "test".to_string(),
+            label: "test".to_string(),
+            protocol: "openai".to_string(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: "test-key".to_string(),
+            models: vec![ModelEntry::new("test-model")],
+        };
+        let tools = vec![json!({
+            "type": "function",
+            "function": { "name": "grep", "parameters": {} }
+        })];
+        let mut on_text = |_: &str| {};
+        let mut on_reasoning = |_: &str| {};
+        chat_text_only(
+            &config,
+            "test-model",
+            &[json!({ "role": "user", "content": "收尾" })],
+            &tools,
+            &mut on_text,
+            &mut on_reasoning,
+            &|| false,
+        )
+        .expect("强收轮应成功");
+
+        let captured = captured.lock().unwrap();
+        let body: Value = serde_json::from_str(captured[0].trim()).expect("请求体是 JSON");
+        assert_eq!(
+            body["tools"].as_array().map(Vec::len),
+            Some(1),
+            "tools 必须照发"
+        );
+        assert_eq!(body["tool_choice"], "none", "只锁 tool_choice");
     }
 
     #[test]

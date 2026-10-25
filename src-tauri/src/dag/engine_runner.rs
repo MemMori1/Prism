@@ -26,8 +26,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::runner::{NodeOutput, NodeRequest, NodeRunner, StopHandle};
+use super::runner::{NodeOutput, NodeRequest, NodeRunner, StopHandle, PROMPT_NOTICE};
 use crate::engines::engine::Engine;
+use crate::engines::native::provider;
 
 /// 等终态的最长时长。
 ///
@@ -41,6 +42,18 @@ const POLL: Duration = Duration::from_millis(300);
 
 /// 单轮文本最多留多少字符（引擎跑飞了也不会把内存吃光）。
 const TEXT_CAP: usize = 400_000;
+
+/// 交给外部引擎的提示词上限。
+///
+/// 外部引擎**没有重试的机会**：一次拒收，这个节点就废了（会话已经建好、
+/// 提示词已经发出，改不了）。所以宁可在这里先截断，也不能让它带着一份
+/// 装不进窗口的提示词出门。
+///
+/// 正常情况下 `resolve_task` 已经把上游报告压到 24 KB 以内，走到这里说明
+/// 人设或任务原文本身就很长。头多留一点：任务目标与约束在最前面。
+const PROMPT_CAP: usize = 60_000;
+const PROMPT_HEAD: usize = 45_000;
+const PROMPT_TAIL: usize = 12_000;
 
 /// 一个引擎 + `NodeRunner` 的桥。
 ///
@@ -80,6 +93,14 @@ impl NodeRunner for EngineRunner {
 
         let mut tally = TextTally::default();
         let mut steps = vec![format!("{} 会话 {session}", self.id())];
+        // 扇入节点最常见：上游报告一多，提示词本身就很大。先把这个数字报出去，
+        // 否则超限时只剩一句引擎原文，看不出起因。
+        let prompt_chars = prompt.chars().count();
+        if prompt_chars > PROMPT_NOTICE {
+            let step = format!("提示词 {prompt_chars} 字（上游报告已按预算均分截断）");
+            (request.on_step)(&step);
+            steps.push(step);
+        }
         let mut last_error: Option<String> = None;
         let mut waiting_permission = false;
         let started = Instant::now();
@@ -140,9 +161,15 @@ impl NodeRunner for EngineRunner {
                                 .or_else(|| Some("某一步失败".to_string()));
                         }
                         "session.execution.failed" => {
-                            return Err(error_text(event.pointer("/data/error"))
+                            let error = error_text(event.pointer("/data/error"))
                                 .or_else(|| last_error.clone())
-                                .unwrap_or_else(|| "引擎报告执行失败".to_string()));
+                                .unwrap_or_else(|| "引擎报告执行失败".to_string());
+                            // 上下文超限必须说人话：引擎原文是一串 "maximum context
+                            // length ... tokens"，看不出是上游报告塞太多。
+                            if provider::is_context_overflow(&error) {
+                                return Err(overflow_message(&error));
+                            }
+                            return Err(error);
                         }
                         "session.execution.interrupted" => {
                             return Err("执行被引擎打断".to_string())
@@ -166,6 +193,7 @@ impl NodeRunner for EngineRunner {
             // 显示"—"，比编一个数好。
             tokens_in: 0,
             tokens_out: 0,
+            tokens_cached: 0,
             turns: 1,
             steps,
         })
@@ -208,7 +236,35 @@ fn compose_prompt(request: &NodeRequest) -> String {
         "\n\n（你正在无人值守地执行编排图里的一个节点：没有人会回答你的追问，\
          需要的信息自己用工具去查；最后一段正文就是交给下游节点的结论。）",
     );
-    text
+    cap_prompt(text)
+}
+
+/// 提示词超过 [`PROMPT_CAP`] 时截成「头 + 尾」。
+///
+/// 外部引擎一次拒收就废掉整个节点，没有像原生引擎那样"瘦身重试"的机会，
+/// 所以只能事先保证它装得下。
+fn cap_prompt(text: String) -> String {
+    let count = text.chars().count();
+    if count <= PROMPT_CAP {
+        return text;
+    }
+    let head: String = text.chars().take(PROMPT_HEAD).collect();
+    let tail: String = text.chars().skip(count - PROMPT_TAIL).collect();
+    format!(
+        "{head}\n\n…（提示词过长，中略 {} 字：上游报告的完整内容在上游制品里，\
+         需要细节时按提示里给出的制品 id 去取）…\n\n{tail}",
+        count - PROMPT_HEAD - PROMPT_TAIL
+    )
+}
+
+/// 把引擎的原始超限报错翻译成「该怎么办」。
+fn overflow_message(raw: &str) -> String {
+    format!(
+        "上下文超限：这一轮装不进模型窗口。编排里最常见的原因是上游报告/工具输出\
+         太多——可以拆细扇入节点、让上游产出更短的结论，或换一个上下文更大的模型。\
+         原始错误：{}",
+        raw.chars().take(300).collect::<String>()
+    )
 }
 
 /// 工具事件 → 节点步骤行（形如 `read_file src/main.rs`）。
@@ -371,6 +427,38 @@ mod tests {
         assert_eq!(tool_step(&event), "list_files");
     }
 
+    /// 外部引擎一次拒收就废掉节点，所以提示词必须自己先保证装得下。
+    #[test]
+    fn oversized_prompt_is_capped_head_and_tail() {
+        let text = format!("{}{}", "甲".repeat(PROMPT_CAP), "乙".repeat(5_000));
+        let capped = cap_prompt(text);
+        assert!(capped.starts_with("甲甲"));
+        assert!(capped.ends_with("乙乙"));
+        assert!(capped.contains("提示词过长"));
+        assert!(
+            capped.chars().count() <= PROMPT_HEAD + PROMPT_TAIL + 200,
+            "截完要真的落回上限：{}",
+            capped.chars().count()
+        );
+    }
+
+    #[test]
+    fn a_prompt_within_the_cap_is_untouched() {
+        let text = format!("{}{}", "甲".repeat(PROMPT_CAP - 1), "尾");
+        assert_eq!(cap_prompt(text.clone()), text);
+    }
+
+    /// 引擎原文是一串 token 数字，用户看不懂起因在编排扇入。
+    #[test]
+    fn overflow_error_is_translated_into_actionable_advice() {
+        let message = overflow_message(
+            "This model's maximum context length is 128000 tokens. However, your messages resulted in 190000 tokens.",
+        );
+        assert!(message.contains("上下文超限"));
+        assert!(message.contains("上游报告"));
+        assert!(message.contains("maximum context length"), "原始错误要留证");
+    }
+
     #[test]
     fn compose_prompt_keeps_persona_and_boundary() {
         use crate::agents::{AgentProfile, Origin, Permission, ToolSelection};
@@ -403,7 +491,7 @@ mod tests {
             stop: StopHandle::new(Arc::new(std::sync::atomic::AtomicBool::new(false)), None),
             on_text: Arc::new(|_: &str| {}),
             on_step: Arc::new(|_: &str| {}),
-            on_usage: Arc::new(|_: i64, _: i64| {}),
+            on_usage: Arc::new(|_: i64, _: i64, _: i64| {}),
             on_turn: Arc::new(|_: u32, _: u32| {}),
         };
         let text = compose_prompt(&request);
@@ -462,7 +550,7 @@ mod tests {
                 }
             }),
             on_step: Arc::new(|_: &str| {}),
-            on_usage: Arc::new(|_: i64, _: i64| {}),
+            on_usage: Arc::new(|_: i64, _: i64, _: i64| {}),
             on_turn: Arc::new(|_: u32, _: u32| {}),
         };
 
