@@ -556,9 +556,9 @@ fn signature_at(lines: &[&str], index: usize) -> Option<(String, Option<u64>)> {
         || line.starts_with('}')
         || line.starts_with('{')
         || !line.contains('(')
-        || !line.trim_end().ends_with(')')
+        || (!line.trim_end().ends_with(')')
             && !line.trim_end().ends_with(") {")
-            && !line.trim_end().ends_with("){")
+            && !line.trim_end().ends_with("){"))
     {
         return None;
     }
