@@ -374,7 +374,7 @@ pub fn builtin() -> Vec<AgentProfile> {
             Workspace::Shared,
             "你负责样本预处理，只产出事实，不做行为判断。\n\
              顺序固定：bin.meta.identify（格式/架构/入口/编译时间）→ bin.hash.compute（三哈希，作为去重与情报比对的锚点）→ bin.pack.detect（有没有壳，直接决定下游能不能静态分析）→ bin.strings.extract（带可疑标记）。\n\
-             如果样本是 APK，再用 bin.apk.sign 记录 v1 / v2 / v3 / v3.1 方案与签名证书指纹；它只解析结构，不验签——不要写「签名有效」。\n\
+             如果样本是 APK，先用 bin.apk.manifest 记包名 / 版本 / minSdk / targetSdk / 权限 / 导出组件，再用 bin.apk.sign 记录 v1 / v2 / v3 / v3.1 方案与签名证书指纹；签名工具只解析结构，不验签——不要写「签名有效」。清单里的 exported 只看显式声明，缺省值不要自己推断。\n\
              bin.pack.detect 的 packed=false 才能说「可直接静态分析」；confidence 是 low 时必须写成「疑似」，并把 evidence 的偏移抄在结论里。\n\
              每条结论都要带偏移或字段名，例如「偏移 0x1a40 有 http://…」。解析不出来的字段写「未知」，不要猜。\n\
              最后给一个 1-5 的优先级与一句理由（有网络特征/有反调试/有已知 C2 域名 → 高）。\n\
@@ -387,6 +387,7 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "bin.meta.identify",
                     "bin.hash.compute",
                     "bin.pack.detect",
+                    "bin.apk.manifest",
                     "bin.apk.sign",
                     "bin.strings.extract",
                     "bin.json.jq",
@@ -442,7 +443,7 @@ pub fn builtin() -> Vec<AgentProfile> {
              入口是 bin.importexport.list：先看 riskHints，再逐个确认高危 API 的真实用途——imported 了不等于调用了。\n\
              定位用 bin.xref.search：用字符串或字节特征反查引用点，拿到 offset 与 va。\n\
              需要函数边界时先看工具清单：装了 Ghidra 用 bin_ghidra_analyze（带基本块），只有 radare2 用 bin_radare2_scan（只有边界）。\n\
-             APK / DEX 不走这两条：bin.dex.disasm 列类并按方法反汇编（能读到 jadx 跳过的方法），bin.dex.xref 给跨类调用边。\n\
+             APK / DEX 不走这两条：先用 bin.apk.manifest 拿包名、权限与导出组件，再让 bin.dex.disasm 列类并按方法反汇编（能读到 jadx 跳过的方法），bin.dex.xref 给跨类调用边。\n\
              要伪 C 用 bin_ghidra_decompile_func，传 va 或函数名；它给的是 Ghidra 的原文，不要二次编造。两个后端都没装时它们不会出现在清单里；不要用 run_command 调 r2 / analyzeHeadless。\n\
              补充用 bin.strings.extract 找 C2、路径、注册表键、互斥体名。\n\
              每条结论写成「行为 ← 证据」：例如「写注册表自启 ← RegSetValueExA @ 0x4012a0，键名 Software\\Microsoft\\Windows\\CurrentVersion\\Run」。\n\
@@ -457,6 +458,7 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "bin.meta.identify",
                     "bin.strings.extract",
                     "bin.xref.search",
+                    "bin.apk.manifest",
                     "bin.dex.disasm",
                     "bin.dex.xref",
                     "bin.importexport.list",
@@ -552,6 +554,7 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "grep",
                     "bin.meta.identify",
                     "bin.xref.search",
+                    "bin.apk.manifest",
                     "bin.dex.disasm",
                     "bin.dex.xref",
                     "bin.importexport.list",
@@ -575,6 +578,7 @@ pub fn builtin() -> Vec<AgentProfile> {
              判定只有三档：refuted（找到反证，必须给「文件:行号」或工具原始输出，并写清影响）；confirmed（用与上游不同的方法复现）；unverified（拿不到证据，写清缺什么）。没有第四档，也不许写「疑似成立」。\n\
              必须复核四类：①「0 命中 / 未发现 / 不存在 / 无」——默认怀疑，先怀疑搜索方法再怀疑结论；②「未定位 / 在失败类 / 未确认」——用 bin.dex.disasm 先列类名再按方法反汇编；③「仅 / 只有 / 全部」这类排他性主张——专门找漏网的；④数字（大小 / 哈希 / 版本 / 条目数）——重算。\n\
              复核要换方法：拆词、加大小写、换语料根（sources / resources / 原始 dex 字符串）、换工具（grep ↔ bin.dex.xref ↔ bin.strings.extract）。复用上游同一条命令不算复核。\n\
+             APK 的包名 / 版本 / 权限 / 导出组件用 bin.apk.manifest 重读：上游说「没有某权限」「某组件不导出」时，按清单显式声明逐条对；exported 没声明就写「未声明」，不要替系统推断。\n\
              APK 的「已签名 / 签名有效 / 证书是谁」用 bin.apk.sign 复核：它能证明签名结构是否存在、证书自报字段是什么，但不能证明密码学有效；上游若写「签名有效」，只能改成「存在 v2 签名，未验签」。\n\
              每条主张最多 3 次工具调用；查不到就判 unverified 并写清缺什么，不要烧预算硬猜。\n\
              读全文，不读摘要：上游摘要是截断过的，用 prism.artifact.get 取原文再下判断。\n\
@@ -592,6 +596,7 @@ pub fn builtin() -> Vec<AgentProfile> {
                     "bin.strings.extract",
                     "bin.meta.identify",
                     "bin.hash.compute",
+                    "bin.apk.manifest",
                     "bin.apk.sign",
                     "bin.jadx.decompile",
                     "prism.artifact.get",
@@ -945,6 +950,33 @@ mod tests {
         assert!(
             prep.system_prompt.contains("不要写「签名有效」"),
             "提示词必须禁止把结构存在当成验签结论：{}",
+            prep.system_prompt
+        );
+    }
+
+    /// APK 分析的第一步是清单：预处理、静态分析、审计都必须能读，且都不能
+    /// 把 exported 的缺省值当成清单事实。
+    #[test]
+    fn apk_presets_read_manifest() {
+        let all = builtin();
+        for id in ["sample-prep", "static-analysis", "sec-audit"] {
+            let profile = all.iter().find(|item| item.id == id).expect(id);
+            let shared = profile.tools.shared.as_ref().expect("要显式列工具");
+            assert!(
+                shared.contains(&"bin.apk.manifest".to_string()),
+                "{id} 缺 bin.apk.manifest：{shared:?}"
+            );
+        }
+        let audit = all.iter().find(|item| item.id == "sec-audit").unwrap();
+        assert!(
+            audit.system_prompt.contains("exported 没声明就写「未声明」"),
+            "审计提示词必须禁止推断 exported 缺省值：{}",
+            audit.system_prompt
+        );
+        let prep = all.iter().find(|item| item.id == "sample-prep").unwrap();
+        assert!(
+            prep.system_prompt.contains("bin.apk.manifest"),
+            "预处理第一步应是清单：{}",
             prep.system_prompt
         );
     }
