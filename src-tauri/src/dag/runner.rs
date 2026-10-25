@@ -686,20 +686,22 @@ impl NodeRunner for NativeRunner {
     }
 }
 
-/// 每一轮该给模型什么提醒：倒数第二轮催落盘，最后一轮强收。
+/// 每一轮该给模型什么提醒：倒数第二轮交代"正文会被保存"，最后一轮强收。
 ///
-/// 为什么必须分成两轮：最后一轮 `tool_choice` 被锁成 `none`（强收轮，见
-/// `chat_text_only` 那段注释），那时连 `prism_artifact_put` 都调不动。
-/// 上游节点里那些「工具额度耗尽、以正文交付」正是这个机制造成的——它想在
-/// 最后存，但那时已经没有调工具的资格，结论只留在正文里，下游拿到的只是被
-/// 摘要截断的版本，连原件都回查不到。
+/// **不要催它调 `prism_artifact.put`**：执行器在节点结束时已经把 `output.text`
+/// 落成主制品（`RunHandle::save_artifact` → `put_text`），实测一个 DAG 里 53 个
+/// 制品全在，模型一次工具都没调也照样有 `report`。催它反而多烧一轮去调一个
+/// 不必要的东西，而且它可能只把摘要写进制品、把完整正文丢掉。
+///
+/// 倒数第二轮该说的是"把结论写完整"——难点从来不是没人存，是最后几轮被强收时
+/// 正文写得太潦草。
 fn turn_nudge(turn: u32, max_turns: u32) -> Option<&'static str> {
     if turn + 1 >= max_turns {
         Some("轮次要用完了：不要再调用工具，直接把结论写成报告。")
     } else if turn + 2 == max_turns {
         Some(
-            "还剩两轮：这一轮先把要留下来的结论用 prism_artifact_put 落盘，\
-             下一轮只写正文（那时工具已经调不动了）。",
+            "还剩两轮：把结论写完整——最后这段正文会被自动落盘成制品，\
+             下游节点读到的就是它。",
         )
     } else {
         None
@@ -737,6 +739,12 @@ fn system_prompt(request: &NodeRequest) -> String {
         "你正在无人值守地执行 DAG 里的一个节点：没人会回你的问题，需要的信息只能靠工具自己查。",
     );
     text.push_str("最后一条正文就是交付物（会作为上游结论传给下游节点），写结论而不是过程流水账。");
+    // 表格里的竖线必须转义：报告里写 `setServiceInfo(flags | 32)` 时没转义，
+    // 那一行被当成四列，整张证据表从中间裂开——内容是对的，渲染全废。
+    text.push_str(
+        "用 markdown 表格时，单元格里的竖线要写成 `\\|`（如 `flags \\| 32`），\
+         否则会被当成列分隔符，整行错位。",
+    );
     text
 }
 
@@ -836,21 +844,24 @@ mod tests {
     use crate::dag::artifact::ArtifactView;
     use std::collections::HashMap;
 
-    /// 落盘提醒必须落在**倒数第二轮**，不能是最后一轮。
+    /// 倒数第二轮的提醒只能是"写完整"，不能催它调工具。
     ///
-    /// 最后一轮走 `chat_text_only`，`tool_choice` 是 none；把提醒放在那儿，
-    /// 模型只能"答应落盘"却调不动工具——正是上游节点"以正文交付"的成因。
+    /// 执行器在节点结束时已经自动落盘了（实测 53 个制品全在，模型零工具调用也
+    /// 有 `report`）。催 `prism_artifact.put` 等于让它多烧一轮去做一件已经做过的
+    /// 事，还可能把完整正文换成一段摘要。
     #[test]
-    fn nudge_asks_to_save_one_turn_before_the_last() {
+    fn nudge_asks_for_complete_text_not_for_a_tool_call() {
         let max = 12;
-        // 中间轮：不打扰。
         assert!(turn_nudge(0, max).is_none());
         assert!(turn_nudge(9, max).is_none());
-        // 倒数第二轮：催落盘，且点名 wire 名（模型看到的就是这个名字）。
-        let save = turn_nudge(10, max).expect("倒数第二轮应有落盘提醒");
-        assert!(save.contains("prism_artifact_put"), "{save}");
-        assert!(!save.contains("不要再调用工具"), "这轮还要调工具：{save}");
-        // 最后一轮：强收。
+
+        let save = turn_nudge(10, max).expect("倒数第二轮应有提醒");
+        assert!(save.contains("自动落盘"), "要交代正文会被保存：{save}");
+        assert!(
+            !save.contains("prism_artifact_put"),
+            "不该催它调工具，执行器已经存过了：{save}"
+        );
+
         let close = turn_nudge(11, max).expect("最后一轮应强收");
         assert!(close.contains("不要再调用工具"), "{close}");
     }
@@ -860,8 +871,8 @@ mod tests {
     fn nudge_degrades_gracefully_on_short_budgets() {
         // 1 轮：只有强收，不提落盘（提了也没用）。
         assert!(turn_nudge(0, 1).expect("应强收").contains("不要再调用工具"));
-        // 2 轮：第一轮催落盘，第二轮强收。
-        assert!(turn_nudge(0, 2).expect("应催落盘").contains("prism_artifact_put"));
+        // 2 轮：第一轮交代"写完整"，第二轮强收。
+        assert!(turn_nudge(0, 2).expect("应有提醒").contains("自动落盘"));
         assert!(turn_nudge(1, 2).expect("应强收").contains("不要再调用工具"));
     }
 
