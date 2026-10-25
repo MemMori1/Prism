@@ -476,10 +476,10 @@ impl NodeRunner for NativeRunner {
             // "第 N/M 轮"在走，而不是干等一句"运行中"。
             (request.on_turn)(turn + 1, max_turns);
             let turn_specs: &[Value] = &specs;
-            if final_turn {
+            if let Some(hint) = turn_nudge(turn, max_turns) {
                 messages.push(serde_json::json!({
                     "role": "user",
-                    "content": "轮次要用完了：不要再调用工具，直接把结论写成报告。",
+                    "content": hint,
                 }));
             }
             let mut on_text = |delta: &str| (request.on_text)(delta);
@@ -686,6 +686,26 @@ impl NodeRunner for NativeRunner {
     }
 }
 
+/// 每一轮该给模型什么提醒：倒数第二轮催落盘，最后一轮强收。
+///
+/// 为什么必须分成两轮：最后一轮 `tool_choice` 被锁成 `none`（强收轮，见
+/// `chat_text_only` 那段注释），那时连 `prism_artifact_put` 都调不动。
+/// 上游节点里那些「工具额度耗尽、以正文交付」正是这个机制造成的——它想在
+/// 最后存，但那时已经没有调工具的资格，结论只留在正文里，下游拿到的只是被
+/// 摘要截断的版本，连原件都回查不到。
+fn turn_nudge(turn: u32, max_turns: u32) -> Option<&'static str> {
+    if turn + 1 >= max_turns {
+        Some("轮次要用完了：不要再调用工具，直接把结论写成报告。")
+    } else if turn + 2 == max_turns {
+        Some(
+            "还剩两轮：这一轮先把要留下来的结论用 prism_artifact_put 落盘，\
+             下一轮只写正文（那时工具已经调不动了）。",
+        )
+    } else {
+        None
+    }
+}
+
 fn stop_error(stop: &StopHandle, output: NodeOutput) -> String {
     let mut text = format!("{}（已跑 {} 轮）", stop.reason(), output.turns);
     if !output.text.trim().is_empty() {
@@ -815,6 +835,35 @@ mod tests {
     use super::*;
     use crate::dag::artifact::ArtifactView;
     use std::collections::HashMap;
+
+    /// 落盘提醒必须落在**倒数第二轮**，不能是最后一轮。
+    ///
+    /// 最后一轮走 `chat_text_only`，`tool_choice` 是 none；把提醒放在那儿，
+    /// 模型只能"答应落盘"却调不动工具——正是上游节点"以正文交付"的成因。
+    #[test]
+    fn nudge_asks_to_save_one_turn_before_the_last() {
+        let max = 12;
+        // 中间轮：不打扰。
+        assert!(turn_nudge(0, max).is_none());
+        assert!(turn_nudge(9, max).is_none());
+        // 倒数第二轮：催落盘，且点名 wire 名（模型看到的就是这个名字）。
+        let save = turn_nudge(10, max).expect("倒数第二轮应有落盘提醒");
+        assert!(save.contains("prism_artifact_put"), "{save}");
+        assert!(!save.contains("不要再调用工具"), "这轮还要调工具：{save}");
+        // 最后一轮：强收。
+        let close = turn_nudge(11, max).expect("最后一轮应强收");
+        assert!(close.contains("不要再调用工具"), "{close}");
+    }
+
+    /// 轮次很少时不能出现"提醒落盘的那轮同时也是强收轮"。
+    #[test]
+    fn nudge_degrades_gracefully_on_short_budgets() {
+        // 1 轮：只有强收，不提落盘（提了也没用）。
+        assert!(turn_nudge(0, 1).expect("应强收").contains("不要再调用工具"));
+        // 2 轮：第一轮催落盘，第二轮强收。
+        assert!(turn_nudge(0, 2).expect("应催落盘").contains("prism_artifact_put"));
+        assert!(turn_nudge(1, 2).expect("应强收").contains("不要再调用工具"));
+    }
 
     fn outputs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
