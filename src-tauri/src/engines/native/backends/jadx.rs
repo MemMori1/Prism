@@ -63,7 +63,7 @@ fn schema() -> Value {
                     },
                     "class": {
                         "type": "string",
-                        "description": "只反编译类名匹配这个子串的类（缩小范围、跑得更快）"
+                        "description": "只反编译一个类，**必须写完全限定类名**（带包名，如 app.orchard.tv.guard.HomeGuardService）——jadx 不认短名。不填就反编译全部（慢、产物多）。不确定全名先调 bin.dex.disasm（只填 path）列类名。"
                     },
                     "resources": {
                         "type": "boolean",
@@ -143,10 +143,26 @@ fn run(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
 
     // 一个文件都没出来才是真失败；jadx 对个别类报错但产出其余部分很常见。
     if java.is_empty() && !output.ok() {
+        let tail = output.tail_text(600);
+        // `--single-class` 只认**完全限定类名**，短名它直接报 "Input class not found"
+        // 然后退出 1。这是最容易踩的一脚：模型手里通常只有 `HomeGuardService`
+        // 这种短名，照 schema 里的“类名”字面理解就会传短名。
+        if tail.contains("class not found") {
+            let wanted = args
+                .get("class")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            return ToolResult::fail(format!(
+                "jadx 找不到类「{wanted}」：`class` 必须写完全限定类名（带包名，\
+                 如 app.orchard.tv.guard.HomeGuardService），短名它不认。\n\
+                 不确定全名就先调 bin.dex.disasm（只填 path、不填 class）拿类名清单。"
+            ));
+        }
         return ToolResult::fail(format!(
             "jadx 失败（退出码 {}）：{}\n样本没有被改动。",
             output.code.unwrap_or(-1),
-            output.tail_text(400)
+            tail
         ));
     }
 
@@ -225,7 +241,8 @@ mod tests {
         let result = run_with_args(
             &ctx,
             "bin.jadx.decompile",
-            &json!({ "path": "aerial-guard.apk", "class": "HomeGuardService" }),
+            // `--single-class` 要完全限定类名，短名 jadx 会报 "class not found"。
+            &json!({ "path": "aerial-guard.apk", "class": "app.orchard.tv.guard.HomeGuardService" }),
         );
         assert!(
             result.outcome.error.is_none(),
