@@ -763,6 +763,28 @@ mod tests {
         assert!(config.ready());
     }
 
+    /// 磁盘上的 `maxTurns` 必须真的被读进来。
+    ///
+    /// 这条覆盖一个"改了没用、也没人发现"的坑：字段在 Rust 侧叫 `max_turns`，
+    /// 在配置里叫 `maxTurns`，全靠 `StoredConfig` 上的 `rename_all` 对上。少了它
+    /// 反序列化会静默忽略这个键，一路回落到 12 —— 用户在设置页改完、保存成功、
+    /// 界面回显也对，只有真正跑图时还是 12 轮，谁都看不出来。
+    #[test]
+    fn max_turns_round_trips_through_camel_case_json() {
+        let stored: StoredConfig =
+            serde_json::from_str(r#"{"maxTurns": 20}"#).expect("应能解析 camelCase");
+        let config = from_stored(stored);
+        assert_eq!(config.max_turns(), 20);
+
+        // 没写这个键时回落默认值，而不是 0（0 会让节点一轮都跑不了）。
+        let bare: StoredConfig = serde_json::from_str("{}").expect("空配置合法");
+        assert_eq!(from_stored(bare).max_turns(), DEFAULT_MAX_TURNS);
+
+        // 越界要夹住：配置文件是手改得动的，别让 0 或 9999 传进去。
+        let huge: StoredConfig = serde_json::from_str(r#"{"maxTurns": 9999}"#).unwrap();
+        assert_eq!(from_stored(huge).max_turns(), 40);
+    }
+
     #[test]
     fn apply_provider_creates_with_unique_id() {
         let mut config = NativeConfig::default();
