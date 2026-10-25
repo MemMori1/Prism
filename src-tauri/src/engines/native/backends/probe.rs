@@ -57,6 +57,15 @@ pub const BACKENDS: &[Backend] = &[
         tools: &["bin.ghidra.analyze", "bin.ghidra.decompile_func"],
         env: &["PRISM_GHIDRA_HOME", "GHIDRA_HOME"],
     },
+    Backend {
+        id: "jadx",
+        name: "jadx",
+        // 1.4 起 `--single-class` 才稳定；更老的版本按类过滤会漏。
+        min_version: Some("1.4"),
+        install: "brew install jadx",
+        tools: &["bin.jadx.decompile"],
+        env: &["PRISM_JADX"],
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

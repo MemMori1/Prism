@@ -64,7 +64,7 @@ fn schema() -> Value {
         "type": "function",
         "function": {
             "name": "bin.radare2.scan",
-            "description": "用 radare2 自动分析并导出函数边界（aflj），生成 ProgramIndex 反汇编索引（缓存键 sha256+版本，同一份样本第二次调用直接读缓存）。只读样本、不执行样本、不产出伪 C；要伪 C 用 Ghidra。",
+            "description": "用 radare2 自动分析并导出函数边界（aflj），生成 ProgramIndex 反汇编索引（缓存键 sha256+版本，同一份样本第二次调用直接读缓存）。**只处理机器码**（ELF / PE / apk 里的 .so）；DEX 是字节码，用 bin.dex.disasm。只读样本、不执行样本、不产出伪 C；要伪 C 用 Ghidra。",
             "parameters": {
                 "type": "object",
                 "properties": {

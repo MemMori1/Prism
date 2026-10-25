@@ -18,6 +18,7 @@ pub mod ghidra;
 pub mod hash_identify;
 pub mod index;
 pub mod ir;
+pub mod jadx;
 pub mod probe;
 pub mod radare2;
 pub mod text;
@@ -165,6 +166,7 @@ pub fn tools() -> Vec<Arc<ToolDef>> {
     list.extend(hash_identify::tools());
     list.extend(vm::tools());
     list.extend(text::tools());
+    list.extend(jadx::tools());
     list
 }
 

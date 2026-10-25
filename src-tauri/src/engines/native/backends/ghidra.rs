@@ -112,7 +112,7 @@ fn schema_analyze() -> Value {
         "type": "function",
         "function": {
             "name": "bin.ghidra.analyze",
-            "description": "用 Ghidra 自动分析样本，导出函数边界、基本块与外部符号，生成 ProgramIndex（缓存键 sha256+版本；项目目录保留给反编译复用）。只读样本、不执行样本；要伪 C 用 bin.ghidra.decompile_func。",
+            "description": "用 Ghidra 自动分析样本，导出函数边界、基本块与外部符号，生成 ProgramIndex（缓存键 sha256+版本；项目目录保留给反编译复用）。**只处理机器码**（ELF / PE / apk 里的 .so）；DEX 是 Dalvik 字节码，请用 bin.dex.disasm（它带 invoke 目标名，比这里的翻译级 IR 好用）。只读样本、不执行样本；要伪 C 用 bin.ghidra.decompile_func。",
             "parameters": {
                 "type": "object",
                 "properties": {

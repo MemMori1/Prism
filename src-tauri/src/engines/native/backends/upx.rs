@@ -61,7 +61,7 @@ fn schema() -> Value {
         "type": "function",
         "function": {
             "name": "bin.unpack.upx",
-            "description": "用 UPX 解压标准 UPX 壳，产物进制品库（key=unpacked，带 parent）。先用 upx -t 校验，不认就不硬解；不支持 --force，改过头的样本请走动态 dump。只读样本，不执行样本。",
+            "description": "用 UPX 解压标准 UPX 壳，产物进制品库（key=unpacked，带 parent）。先用 upx -t 校验，不认就不硬解；不支持 --force，改过头的样本请走动态 dump。**只对 UPX 壳有效**：apk / dex 不是 UPX 能加的对象，Android 加固请走 bin.pack.detect 判壳后动态脱壳。只读样本，不执行样本。",
             "parameters": {
                 "type": "object",
                 "properties": {
