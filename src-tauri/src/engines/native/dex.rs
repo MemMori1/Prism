@@ -175,12 +175,21 @@ impl Sections {
             let off = read_u32(bytes, off_at, true).ok_or(DexError::Truncated)?;
             Ok((size, off))
         };
+        // 偏移必须逐条对齐 DEX 规范（`header_item`，112 字节）：
+        //   string_ids 0x38/0x3c · type_ids 0x40/0x44 · proto_ids 0x48/0x4c
+        //   field_ids 0x50/0x54 · method_ids 0x58/0x5c · class_defs 0x60/0x64
+        //
+        // 这里曾经整体多写了 0x18（从 0x50 起），于是每个 section 都读到了
+        // 后一个池子上，`class_defs` 更是越过 header 落进 string_ids 数组——
+        // 真实样本上表现成 `classCount: 2685886`（实际 3300 个类）、类名为空、
+        // "找不到类"，两个 dex 工具整体失效。合成样本的测试当时按同样的错位
+        // 造数据，所以自洽通过，一点没报警。
         Ok(Sections {
-            string_ids: pair(0x50, 0x54)?,
-            type_ids: pair(0x58, 0x5c)?,
-            field_ids: pair(0x68, 0x6c)?,
-            method_ids: pair(0x70, 0x74)?,
-            class_defs: pair(0x78, 0x7c)?,
+            string_ids: pair(0x38, 0x3c)?,
+            type_ids: pair(0x40, 0x44)?,
+            field_ids: pair(0x50, 0x54)?,
+            method_ids: pair(0x58, 0x5c)?,
+            class_defs: pair(0x60, 0x64)?,
         })
     }
 }
@@ -643,6 +652,37 @@ fn open_dex<'a>(bytes: &'a [u8]) -> Result<Dex<'a>, ToolResult> {
     }
 }
 
+/// 解析结果的自检：header 声称的类数，必须和实际解出来的类名对得上。
+///
+/// 为什么这条比任何功能都重要：解析器读错位置时**不会报错**，只会安静地解出
+/// 0 个类。节点拿到 `classes: []` 会当成"这个样本没有类"，然后把整张图跑完，
+/// 最后交一份基于"没有"的报告——一次运行一块钱，全花在空气上（真实踩过：
+/// header 读成 2685886 个类 / 0 条类名，五个节点照跑）。
+///
+/// 宁可让工具当场失败，让节点换方法或停下，也不要给一个"看起来成功"的空结果。
+fn check_class_harvest(class_count: u32, harvested: usize) -> Result<(), String> {
+    if class_count == 0 {
+        // header 自己说没有类（极简 dex 或非 dex）：不算异常。
+        return Ok(());
+    }
+    if harvested == 0 {
+        return Err(format!(
+            "DEX 解析异常：header 声称 {class_count} 个类，实际一条类名也没解出来。\
+             这是解析器的问题，不是样本没有类——不要据此下「无该类/无该行为」的结论。"
+        ));
+    }
+    // 解出来的数量至少得是声明量的一半：丢几条可能是签名/损坏，丢一半以上
+    // 只可能是读错了位置。
+    let expected = class_count.min(5000) as usize;
+    if expected > 0 && harvested * 2 < expected {
+        return Err(format!(
+            "DEX 解析异常：header 声称 {class_count} 个类，只解出 {harvested} 条（预期约 {expected} 条）。\
+             解析位置可能错位，本轮结论不可用。"
+        ));
+    }
+    Ok(())
+}
+
 fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
     let (path, size) = match target_of(ctx, args) {
         Ok(found) => found,
@@ -673,6 +713,10 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
         if let Ok(name) = dex.class_name(i) {
             class_names.push(name);
         }
+    }
+    // 解不出来就别假装成功：空清单会被下游当成"样本没有类"，然后照跑完整张图。
+    if let Err(why) = check_class_harvest(class_count, class_names.len()) {
+        return ToolResult::fail(why);
     }
 
     // 没有指定 class：只回清单，不逐个反汇编（几千个类全展开会把上下文撑爆）。
@@ -786,6 +830,18 @@ fn run_xref(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
     };
 
     let class_count = dex.sections.class_defs.0;
+
+    // 同一个自检：解析器读错位置时 xref 也会安静地返回空（报告里正是如此：
+    // `calls/classes/fields/strings` 全空、`classes: 2685886`）。先探一遍类名。
+    let mut harvested = 0usize;
+    for i in 0..class_count.min(5000) {
+        if dex.class_name(i).is_ok() {
+            harvested += 1;
+        }
+    }
+    if let Err(why) = check_class_harvest(class_count, harvested) {
+        return ToolResult::fail(why);
+    }
 
     // 决定扫描范围：指定 class 只扫一个，否则全量（有上限）。
     let range: Vec<u32> = if let Some(filter) = class_filter {
@@ -947,9 +1003,12 @@ mod tests {
         // 为把测试做小，本测试只验证「field 跳过」这一条关键路径：
         // 给定 sf=1、inf=0、dm=1，code_item 里只有 return-void。
 
+        // 表头偏移一律按 DEX 规范写（不是按实现里的常量写）：
+        // 实现读错位置时这里就会红，而不是跟着一起错。
+        //
         // string_ids: 1 个，off = 0x100
-        write_u32(&mut d, 0x50, 1); // string_ids_size
-        write_u32(&mut d, 0x54, 0x100); // string_ids_off
+        write_u32(&mut d, 0x38, 1); // string_ids_size
+        write_u32(&mut d, 0x3c, 0x100); // string_ids_off
         // string_data 在 0x200：len=1 'V' \0
         write_u32(&mut d, 0x100, 0x200);
         d[0x200] = 1; // uleb len 1
@@ -957,34 +1016,34 @@ mod tests {
         d[0x202] = 0;
 
         // type_ids: 1 个，off=0x104
-        write_u32(&mut d, 0x58, 1);
-        write_u32(&mut d, 0x5c, 0x104);
+        write_u32(&mut d, 0x40, 1);
+        write_u32(&mut d, 0x44, 0x104);
         write_u32(&mut d, 0x104, 0); // descriptor_idx -> string 0
 
         // proto_ids: 1 个，off=0x108（shorty_idx, return_type_idx, parameters_off）
-        write_u32(&mut d, 0x60, 1);
-        write_u32(&mut d, 0x64, 0x108);
+        write_u32(&mut d, 0x48, 1);
+        write_u32(&mut d, 0x4c, 0x108);
         write_u32(&mut d, 0x108, 0); // shorty_idx
         write_u32(&mut d, 0x10c, 0); // return_type_idx -> type 0
         write_u32(&mut d, 0x110, 0); // parameters_off = 0（无参）
 
         // field_ids: 1 个，off=0x114
-        write_u32(&mut d, 0x68, 1);
-        write_u32(&mut d, 0x6c, 0x114);
+        write_u32(&mut d, 0x50, 1);
+        write_u32(&mut d, 0x54, 0x114);
         write_u16(&mut d, 0x114, 0); // class_idx
         write_u16(&mut d, 0x116, 0); // type_idx
         write_u32(&mut d, 0x118, 0); // name_idx -> string 0
 
         // method_ids: 1 个，off=0x11c
-        write_u32(&mut d, 0x70, 1);
-        write_u32(&mut d, 0x74, 0x11c);
+        write_u32(&mut d, 0x58, 1);
+        write_u32(&mut d, 0x5c, 0x11c);
         write_u16(&mut d, 0x11c, 0); // class_idx
         write_u16(&mut d, 0x11e, 0); // proto_idx
         write_u32(&mut d, 0x120, 0); // name_idx
 
         // class_defs: 1 个，off=0x124
-        write_u32(&mut d, 0x78, 1);
-        write_u32(&mut d, 0x7c, 0x124);
+        write_u32(&mut d, 0x60, 1);
+        write_u32(&mut d, 0x64, 0x124);
         // class_def_item[0]（32 字节）：class_idx=0，class_data_off=0x300
         write_u32(&mut d, 0x124, 0); // class_idx
         write_u32(&mut d, 0x124 + 0x18, 0x300); // class_data_off
@@ -1090,16 +1149,26 @@ mod tests {
     #[test]
     #[ignore]
     fn dex_decodes_real_sample() {
-        let candidate = [
-            "/Users/edwa2d4th/Desktop/未命名文件夹 7/unpack/aerial/classes.dex",
-        ];
-        let Some(path) = candidate.iter().find(|p| std::path::Path::new(p).exists()) else {
-            return;
-        };
+        let path = "/Users/edwa2d4th/Desktop/未命名文件夹 7/work/apk/x/classes.dex";
+        // 路径不存在时必须报错，**不能再 return**。
+        //
+        // 这条测试原来写的是一个不存在的路径 + `else { return; }`，于是它
+        // 一直"通过"，而 header 偏移整体错位 0x18 的问题就这么藏了整轮：
+        // 真实样本上 `classCount` 读出 2685886（实际 3300）、两个 dex 工具
+        // 全失效。测试静默跳过比没有测试更危险。
+        assert!(
+            std::path::Path::new(path).exists(),
+            "真实样本不在 {path}：换样本后请同步改这里，不要靠跳过"
+        );
         let bytes = read_head(std::path::Path::new(path), DEX_LIMIT).unwrap();
         let dex = Dex::parse(&bytes).expect("真实样本应能解析");
         let class_count = dex.sections.class_defs.0;
-        assert!(class_count > 0, "样本里应有类定义");
+        // 这个样本的 header 写着 3300。数量级断言能立刻抓出"偏移读错"：
+        // 读成别的字段时不是 0 就是六位数以上。
+        assert!(
+            (1_000..=100_000).contains(&class_count),
+            "class_defs_size 读出 {class_count}，不像真实类数（期望量级 3300）"
+        );
 
         let mut with_code = 0usize;
         let mut decoded = 0usize;
@@ -1112,6 +1181,19 @@ mod tests {
                 Ok(())
             });
         }
+        // 类名也必须读得出来。报告里另一个症状是"按类名查永远找不到类"，
+        // 根因同样是偏移错位——class_defs 落在 string_ids 数组上，读出来是
+        // 一堆字符串偏移，自然一个类都对不上。
+        let names: Vec<String> = (0..class_count)
+            .filter_map(|i| dex.class_name(i).ok())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|name| name.contains("orchard/tv/guard/HomeGuardService")),
+            "应当能读到 HomeGuardService 的描述符（共读出 {} 个类名）",
+            names.len()
+        );
         let rate = decoded as f64 / with_code.max(1) as f64;
         assert!(
             rate > 0.99,

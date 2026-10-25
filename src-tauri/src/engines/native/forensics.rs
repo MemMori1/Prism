@@ -874,10 +874,14 @@ const PACKERS: &[Packer] = &[
         name: "MPRESS",
         strength: Strength::High,
         hint: "LZMA 压缩壳。`mpress -d` 只对自家产物有效，其余情况走 OEP dump。",
+        // 只认节名，不认裸字符串 "MPRESS"。
+        //
+        // 那个字符串短到会被 `"COMPRESS"` / `"DECOMPRESS"` 整个包含，纯子串匹配
+        // 必然误报——真正的 MPRESS 一定会把节名改成 `.MPRESS1` / `.MPRESS2`，
+        // 这是结构事实，比字符串可靠得多。
         marks: &[
             Mark::Section(".MPRESS1"),
             Mark::Section(".MPRESS2"),
-            Mark::Ascii("MPRESS"),
         ],
     },
     Packer {
@@ -1635,6 +1639,37 @@ fn entropy(bytes: &[u8]) -> f64 {
 }
 
 /// 纯函数：给一段内容判壳。`size` 是文件真实大小，只在算 overlay 时用到。
+/// 单个 dex 的加壳结论。
+///
+/// 能走到这里说明 magic `dex\n` 还在——整体加密的 dex 连这 8 个字节都保不住。
+/// 所以结论固定是"未加密"，值只在两项旁证上：类数（stub dex 通常只有个位数到
+/// 几十个类）和整体熵（加密载荷会顶到 7.9+）。真正判加壳要看 .apk。
+fn dex_pack_payload(blob: &[u8], size: u64) -> Value {
+    let class_count = read_u32(blob, 0x60, true).unwrap_or(0);
+    let file_entropy = entropy(blob);
+    let stub_like = class_count > 0 && class_count < 64;
+    json!({
+        "format": "dex",
+        "packed": false,
+        "confidence": "none",
+        "packers": [],
+        "signals": {
+            "size": size,
+            "classDefs": class_count,
+            "entropy": (file_entropy * 100.0).round() / 100.0,
+            "stubLike": stub_like,
+        },
+        "verdict": "未发现加壳特征（dex 完整可读，未被整体加密）",
+        "note": "MPRESS / UPX / PECompact 是 PE 壳，对 dex 不适用——上一版把它们套在 dex 上，\
+                 因为 \"COMPRESS\" 含 \"MPRESS\" 而误报成 MPRESS / high。dex 级加固证据在 APK 层\
+                 （壳 so / stub Application / assets 载荷），单看一个 dex 判不出来。",
+        "advice": [
+            "要对整个应用判加壳，请对 .apk 跑一次 bin.pack.detect：它按 zip 中央目录 + lib/*.so + assets 判断。",
+            "单个 dex 只剩两个旁证：整体熵接近 8（加密载荷）与类数过少（stub dex），本样本两项都不满足。",
+        ],
+    })
+}
+
 pub fn detect_pack(blob: &[u8], size: u64) -> Value {
     // APK 的壳证据全在文件名清单上（加固 so / assets 特征 / classes.dex 结构），
     // 跟 PE 的「节名 + stub 特征串 + 结构信号」是两套逻辑，先按格式分派。
@@ -1645,6 +1680,17 @@ pub fn detect_pack(blob: &[u8], size: u64) -> Value {
         .unwrap_or(false);
     if is_apk {
         return detect_apk_pack(blob, size);
+    }
+    // DEX：`PACKERS` 那张表里 MPRESS / UPX / PECompact 全是 **PE 壳**，套到 dex
+    // 上没有意义，而且会真的误报——`.Ascii("MPRESS")` 是纯子串匹配，而
+    // `"COMPRESS"` 本身就包含 `"MPRESS"`。真实样本（classes.dex 3.1 MB）因此
+    // 被判成 `MPRESS / high`，报告里只能人工标注"假阳性"。
+    //
+    // 单个 dex 的正确结论很有限：能读出 `dex\n` magic 就说明没被整体加密
+    // （加密会连 magic 一起毁掉）；加固证据在 APK 层——壳 so、stub Application、
+    // assets 载荷，单看一个 dex 判不出来。
+    if blob.get(..4) == Some(b"dex\n") {
+        return dex_pack_payload(blob, size);
     }
     let facts = pe_facts(blob);
     let empty = Vec::new();
@@ -2318,6 +2364,66 @@ mod tests {
         let payload = detect_pack(&bytes, 0x1000);
         // 最后一个节收在 0x600，后面 0xA00 字节是附加数据。
         assert_eq!(payload["signals"]["overlayBytes"], json!(0xa00), "{payload}");
+    }
+
+    /// DEX 不是 PE，不能套 PE 壳表：MPRESS / UPX 对 dex 没有意义。
+    ///
+    /// 真实样本上这条路径曾把 classes.dex 判成 `MPRESS / high`，报告里只能
+    /// 人工标注"假阳性"，等于让下游多验一遍。
+    #[test]
+    fn a_dex_is_never_reported_as_a_pe_packer() {
+        let mut bytes = vec![0u8; 0x400];
+        bytes[..8].copy_from_slice(b"dex\n035\0");
+        bytes[0x60..0x64].copy_from_slice(&3300u32.to_le_bytes());
+        let payload = detect_pack(&bytes, 0x400);
+        assert_eq!(payload["format"], "dex", "{payload}");
+        assert_eq!(payload["packed"], false, "{payload}");
+        assert!(payload["packers"].as_array().unwrap().is_empty(), "{payload}");
+        assert_eq!(payload["signals"]["classDefs"], 3300, "{payload}");
+    }
+
+    /// `"COMPRESS"` 里含 `"MPRESS"`：只靠这个子串不能判 MPRESS。
+    #[test]
+    fn the_word_compress_is_not_mpress() {
+        let mut bytes = vec![0u8; 0x1000];
+        bytes[..2].copy_from_slice(b"MZ");
+        let text = b"DECOMPRESS FAILED: a plain PE that merely mentions COMPRESS";
+        bytes[0x200..0x200 + text.len()].copy_from_slice(text);
+        let payload = detect_pack(&bytes, 0x1000);
+        let names: Vec<&str> = payload["packers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect();
+        assert!(
+            !names.contains(&"MPRESS"),
+            "COMPRESS 不该被判成 MPRESS：{names:?}"
+        );
+    }
+
+    /// 真样本回归：整包判未加壳，单独抽出的 dex 也不能被 PE 壳表误判。
+    #[test]
+    #[ignore]
+    fn real_sample_is_not_packed() {
+        let apk = "/Users/edwa2d4th/Desktop/未命名文件夹 7/aerial-guard.apk";
+        let dex = "/Users/edwa2d4th/Desktop/未命名文件夹 7/work/apk/x/classes.dex";
+        for path in [apk, dex] {
+            assert!(
+                std::path::Path::new(path).exists(),
+                "样本不在 {path}：换样本后请同步改这里，不要靠跳过"
+            );
+        }
+        let bytes = std::fs::read(apk).expect("读 apk");
+        let payload = detect_pack(&bytes, bytes.len() as u64);
+        assert_eq!(payload["format"], "apk", "{payload}");
+        assert_eq!(payload["packed"], false, "{payload}");
+
+        let dex_bytes = std::fs::read(dex).expect("读 dex");
+        let dex_payload = detect_pack(&dex_bytes, dex_bytes.len() as u64);
+        assert_eq!(dex_payload["format"], "dex", "{dex_payload}");
+        assert_eq!(dex_payload["packed"], false, "{dex_payload}");
+        assert_eq!(dex_payload["signals"]["classDefs"], 3300, "{dex_payload}");
     }
 
     #[test]
