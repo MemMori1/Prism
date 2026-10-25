@@ -17,6 +17,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
+use super::apkzip;
 use super::forensics::{
     hex, identify, read_head, read_u16, read_u32, read_u64, respond, target_of,
 };
@@ -1208,6 +1209,47 @@ pub(crate) const SIGNATURES: &[(&str, &[u8], &str, &str)] = &[
     ),
 ];
 
+/// 把 APK 拆成「内部二进制」清单：`classes*.dex` 与 `lib/**/*.so`。
+///
+/// 密码学常量 / XOR 明文都落在**解压后**的 dex 与 native 库里，直接扫 APK
+/// 扫的是 deflate 压缩字节，常量必然 0 命中——报告里「字节层 0 命中密码学
+/// 常量」就是这么来的假阴性。这里复用 `apkzip` 的中央目录读取，逐份解出，
+/// 命中时标注来源文件，偏移是**该文件内偏移**。
+///
+/// 解不出（不是 zip / 超限 / 压缩炸弹）返回 `None`，调用方回退到「扫原始
+/// 字节」，而不是报错：对不是 APK 的裸文件，这就是正常路径。
+fn apk_inner_blobs(blob: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    if !blob.starts_with(b"PK\x03\x04") {
+        return None;
+    }
+    let layout = apkzip::layout(blob).ok()?;
+    let mut out = Vec::new();
+    for entry in &layout.entries {
+        let is_dex = entry.name == "classes.dex"
+            || entry
+                .name
+                .strip_prefix("classes")
+                .and_then(|rest| rest.strip_suffix(".dex"))
+                .map(|n| n.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false);
+        let is_so = entry.name.starts_with("lib/") && entry.name.ends_with(".so");
+        if !is_dex && !is_so {
+            continue;
+        }
+        // dex 与 so 都可能几 MB，上限给到样本扫描预算，超过就跳过这一份
+        // 而不是整体失败——清单解析不能因为一个畸形条目就整包不扫。
+        let Ok(bytes) = apkzip::read_entry(blob, entry, SCAN_LIMIT as usize) else {
+            continue;
+        };
+        out.push((entry.name.clone(), bytes));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 fn run_crypto(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
     let (path, size) = match target_of(ctx, args) {
         Ok(found) => found,
@@ -1218,52 +1260,38 @@ fn run_crypto(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
         Err(error) => return ToolResult::fail(error),
     };
 
+    // APK：逐份扫内部 dex / so；裸文件：扫它自己。命中都带 `in` 标注来源。
+    // `blobs` 得先落一个 owned 变量，`targets` 再借它的 `&[u8]`，否则 match
+    // 里的临时 `blobs` 会先被 drop。
+    let blobs = apk_inner_blobs(&bytes);
+    let targets: Vec<(String, &[u8])> = match &blobs {
+        Some(items) => items
+            .iter()
+            .map(|(name, data)| (name.clone(), data.as_slice()))
+            .collect(),
+        None => vec![(path.to_string_lossy().to_string(), bytes.as_slice())],
+    };
+    let unpacked = targets
+        .first()
+        .map(|(name, _)| name.ends_with(".dex") || name.ends_with(".so"))
+        .unwrap_or(false);
+
     let mut hits: Vec<Value> = Vec::new();
-    for (name, pattern, note, confidence) in SIGNATURES {
-        if pattern.is_empty() {
-            continue;
-        }
-        let (found, _) = find_all(&bytes, pattern, 8);
-        for offset in found {
-            hits.push(json!({
-                "algorithm": name,
-                "offset": format!("0x{offset:x}"),
-                "note": note,
-                "confidence": confidence,
-            }));
-        }
+    for (source, target_bytes) in &targets {
+        scan_crypto_into(*target_bytes, source, &mut hits);
     }
 
-    // PEM 头是文本，单独搜：出现在二进制里通常意味着内嵌证书或私钥。
-    for marker in ["-----BEGIN PUBLIC KEY-----", "-----BEGIN RSA PRIVATE KEY-----"] {
-        let (found, _) = find_all(&bytes, marker.as_bytes(), 4);
-        for offset in found {
-            hits.push(json!({
-                "algorithm": "pem",
-                "offset": format!("0x{offset:x}"),
-                "note": format!("内嵌 PEM：{marker}"),
-                "confidence": "high",
-            }));
-        }
-    }
-
-    // RC4 KSA 的 0..255 递增表。误报率高（很多查表都是递增的），
-    // 所以只在前 32 字节完全对得上时报，并且标 low。
-    let ramp: Vec<u8> = (0..=255u8).collect();
-    let (ramp_hits, _) = find_all(&bytes, &ramp[..32], 4);
-    for offset in ramp_hits {
-        hits.push(json!({
-            "algorithm": "rc4-ksa",
-            "offset": format!("0x{offset:x}"),
-            "note": "0..255 递增表，可能是 RC4 KSA 或普通查表",
-            "confidence": "low",
-        }));
+    // 原始 APK 字节里也可能有内嵌 PEM（签名块 CERT.RSA / 证书链），补扫它自身。
+    if unpacked {
+        scan_crypto_into(&bytes, &path.to_string_lossy(), &mut hits);
     }
 
     let mut payload = json!({
         "path": path.display().to_string(),
         "size": size,
         "scanned": bytes.len(),
+        "unpacked": unpacked,
+        "targets": targets.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
         "hits": hits.len(),
         "matches": hits,
     });
@@ -1274,13 +1302,16 @@ fn run_crypto(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
         for key in 1u16..=255 {
             let key = key as u8;
             let needle: Vec<u8> = plain.iter().map(|byte| byte ^ key).collect();
-            let (found, _) = find_all(&bytes, &needle, 4);
-            for offset in found {
-                tried.push(json!({
-                    "key": key,
-                    "offset": format!("0x{offset:x}"),
-                    "sample": probe,
-                }));
+            for (source, target_bytes) in &targets {
+                let (found, _) = find_all(target_bytes, &needle, 4);
+                for offset in found {
+                    tried.push(json!({
+                        "key": key,
+                        "offset": format!("0x{offset:x}"),
+                        "sample": probe,
+                        "in": source,
+                    }));
+                }
             }
         }
         payload["xor"] = json!({
@@ -1292,6 +1323,57 @@ fn run_crypto(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
     }
 
     respond(ctx, "crypto", payload)
+}
+
+/// 在 `bytes` 里扫密码学常量与内嵌 PEM，命中带 `in` 标注来源文件。
+///
+/// 从 `run_crypto` 抽出来，供「逐份扫 APK 内部 dex/so + 补扫 APK 自身」共用，
+/// 避免同一套常量表写两遍。偏移是 `bytes` 内的偏移，由调用方保证 `source`
+/// 与之一致。
+fn scan_crypto_into(bytes: &[u8], source: &str, hits: &mut Vec<Value>) {
+    for (name, pattern, note, confidence) in SIGNATURES {
+        if pattern.is_empty() {
+            continue;
+        }
+        let (found, _) = find_all(bytes, pattern, 8);
+        for offset in found {
+            hits.push(json!({
+                "algorithm": name,
+                "offset": format!("0x{offset:x}"),
+                "note": note,
+                "confidence": confidence,
+                "in": source,
+            }));
+        }
+    }
+
+    // PEM 头是文本，单独搜：出现在二进制里通常意味着内嵌证书或私钥。
+    for marker in ["-----BEGIN PUBLIC KEY-----", "-----BEGIN RSA PRIVATE KEY-----"] {
+        let (found, _) = find_all(bytes, marker.as_bytes(), 4);
+        for offset in found {
+            hits.push(json!({
+                "algorithm": "pem",
+                "offset": format!("0x{offset:x}"),
+                "note": format!("内嵌 PEM：{marker}"),
+                "confidence": "high",
+                "in": source,
+            }));
+        }
+    }
+
+    // RC4 KSA 的 0..255 递增表。误报率高（很多查表都是递增的），
+    // 所以只在前 32 字节完全对得上时报，并且标 low。
+    let ramp: Vec<u8> = (0..=255u8).collect();
+    let (ramp_hits, _) = find_all(bytes, &ramp[..32], 4);
+    for offset in ramp_hits {
+        hits.push(json!({
+            "algorithm": "rc4-ksa",
+            "offset": format!("0x{offset:x}"),
+            "note": "0..255 递增表，可能是 RC4 KSA 或普通查表",
+            "confidence": "low",
+            "in": source,
+        }));
+    }
 }
 
 // ---------------------------------------------------------------- 证书与密钥
@@ -2219,6 +2301,23 @@ fn run_xor_brute(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
         Ok(bytes) => bytes,
         Err(error) => return ToolResult::fail(error),
     };
+    // APK：把内部 dex / so 解出并拼接成一份再爆。XOR 爆破靠的是「同一把密钥
+    // 的明文在样本里重复出现」的统计，跨文件拼接不破坏这个逻辑；偏移变了
+    // 但密钥恢复只看连续性。裸文件保持原样。
+    let scan_bytes: Vec<u8>;
+    let mut unpacked = false;
+    let bytes = match apk_inner_blobs(&bytes) {
+        Some(blobs) => {
+            unpacked = true;
+            let mut merged = Vec::new();
+            for (_, data) in &blobs {
+                merged.extend_from_slice(data);
+            }
+            scan_bytes = merged;
+            scan_bytes.as_slice()
+        }
+        None => bytes.as_slice(),
+    };
     if bytes.len() < plain.len() {
         return ToolResult::fail(format!(
             "样本只有 {} 字节，比 probe（{} 字节）还短",
@@ -2372,6 +2471,7 @@ fn run_xor_brute(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
             "probe": probe,
             "minLen": min_len,
             "maxLen": max_len,
+            "unpacked": unpacked,
             "matchCount": rendered.len(),
             "matches": rendered,
             "truncated": size > bytes.len() as u64 || capped,
@@ -2562,6 +2662,65 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(bytes).unwrap();
         path
+    }
+
+    /// 造一个 deflate 压缩的最小 APK：只含 `classes.dex` 一个条目。
+    /// 密码学常量若在 dex 里，直接扫 APK 必然 0 命中——这正是要验证的假阴性。
+    fn deflated_apk(dex_body: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::DeflateEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        );
+        std::io::Write::write_all(&mut encoder, dex_body).unwrap();
+        let packed = encoder.finish().unwrap();
+
+        let name = b"classes.dex";
+        let mut body = Vec::new();
+        body.extend_from_slice(b"PK\x03\x04");
+        body.extend_from_slice(&20u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&8u16.to_le_bytes()); // method = deflate
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+        body.extend_from_slice(&(dex_body.len() as u32).to_le_bytes());
+        body.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(name);
+        body.extend_from_slice(&packed);
+
+        let mut central = Vec::new();
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&8u16.to_le_bytes()); // method = deflate
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(dex_body.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(name);
+
+        let central_offset = body.len() as u32;
+        body.extend_from_slice(&central);
+        body.extend_from_slice(b"PK\x05\x06");
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        body.extend_from_slice(&central_offset.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body
     }
 
     fn context<'a>(directory: &'a str) -> ToolContext<'a> {
@@ -2789,6 +2948,108 @@ mod tests {
         assert!(
             matches.iter().any(|hit| hit["key"] == json!(key)),
             "应试出密钥 {key}：{}",
+            out.outcome.text
+        );
+    }
+
+    /// 直接扫 APK 会扫到 deflate 压缩字节 → 密码学常量假阴性。修复后应
+    /// 自动解出内部 dex 扫到常量，并标 `in` 与 `unpacked`。
+    #[test]
+    fn crypto_scan_unpacks_apk_and_finds_dex_constants() {
+        let mut dex = vec![0u8; 0x200];
+        dex[0..8].copy_from_slice(b"dex\n035\0");
+        dex[0x80..0x90].copy_from_slice(&[
+            0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7,
+            0xab, 0x76,
+        ]);
+        let apk = deflated_apk(&dex);
+        let path = temp_file("apk-crypto", &apk);
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_crypto(&ctx, &json!({ "path": "sample.bin" }));
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        assert_eq!(payload["unpacked"], json!(true), "{}", out.outcome.text);
+        let hits = payload["matches"].as_array().unwrap();
+        let aes = hits
+            .iter()
+            .find(|hit| hit["algorithm"] == "aes-sbox")
+            .expect("应解包扫到 dex 里的 AES S 盒");
+        assert_eq!(aes["in"], json!("classes.dex"), "{}", out.outcome.text);
+    }
+
+    /// 裸 dex 不是 zip，行为不能变：`unpacked=false`、偏移仍在原文件内。
+    #[test]
+    fn crypto_scan_on_bare_dex_stays_unpacked_false() {
+        let mut dex = vec![0u8; 0x200];
+        dex[0..8].copy_from_slice(b"dex\n035\0");
+        dex[0x80..0x90].copy_from_slice(&[
+            0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7,
+            0xab, 0x76,
+        ]);
+        let path = temp_file("bare-dex", &dex);
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_crypto(&ctx, &json!({ "path": "sample.bin" }));
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        assert_eq!(payload["unpacked"], json!(false), "{}", out.outcome.text);
+        let hits = payload["matches"].as_array().unwrap();
+        let aes = hits
+            .iter()
+            .find(|hit| hit["algorithm"] == "aes-sbox")
+            .expect("裸 dex 也应命中 AES S 盒");
+        assert_eq!(aes["offset"], "0x80", "{}", out.outcome.text);
+    }
+
+    /// xor_brute 同样要解包：明文在 APK 内部的 dex 里，直接扫压缩字节试不出密钥。
+    #[test]
+    fn xor_brute_unpacks_apk_and_recovers_key() {
+        let plain = b"http://evil.example";
+        let key = 0x5a;
+        let encoded: Vec<u8> = plain.iter().map(|byte| byte ^ key).collect();
+        let mut dex = vec![0u8; 0x200];
+        dex[0..8].copy_from_slice(b"dex\n035\0");
+        dex[0x10..0x10 + encoded.len()].copy_from_slice(&encoded);
+        let apk = deflated_apk(&dex);
+        let path = temp_file("apk-xor", &apk);
+        let ctx = context(path.parent().unwrap().to_str().unwrap());
+        let out = run_xor_brute(&ctx, &json!({ "path": "sample.bin", "probe": "http://" }));
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        assert_eq!(payload["unpacked"], json!(true), "{}", out.outcome.text);
+        let matches = payload["matches"].as_array().unwrap();
+        assert!(
+            matches.iter().any(|hit| hit["key"] == json!([key])),
+            "应解包试出密钥 {key}：{}",
+            out.outcome.text
+        );
+    }
+
+    /// 真实 APK 回归：`PRISM_TEST_APK=/path/to.apk cargo test -- --ignored`。
+    /// 验证解包逻辑对真实样本有效——修复前直接扫 APK 是「字节层 0 命中」假阴性。
+    #[test]
+    #[ignore = "需要真实 APK（PRISM_TEST_APK）"]
+    fn crypto_scan_unpacks_a_real_apk() {
+        let apk_path = std::env::var("PRISM_TEST_APK")
+            .expect("先设 PRISM_TEST_APK 指向一个真实 APK");
+        let dir = Path::new(&apk_path)
+            .parent()
+            .and_then(Path::to_str)
+            .expect("APK 要有父目录");
+        let ctx = context(dir);
+        let name = Path::new(&apk_path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let out = run_crypto(&ctx, &json!({ "path": name }));
+        assert!(out.outcome.error.is_none(), "{}", out.outcome.text);
+        let payload: Value = serde_json::from_str(&out.outcome.text).unwrap();
+        assert_eq!(payload["unpacked"], json!(true), "{}", out.outcome.text);
+        // 真实 APK 必有 classes.dex / classes2.dex；targets 至少列出主 dex。
+        let targets = payload["targets"].as_array().unwrap();
+        assert!(
+            targets.iter().any(|t| t == "classes.dex"),
+            "应解出 classes.dex：{}",
             out.outcome.text
         );
     }

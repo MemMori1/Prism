@@ -87,7 +87,7 @@ fn disasm_schema() -> Value {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "相对工作目录的 .dex 文件路径" },
+                    "path": { "type": "string", "description": "相对工作目录的 .dex 文件路径。APK 常拆成多个 dex（classes.dex / classes2.dex / classes3.dex…），类可能落在任何一个里，要逐个读；解包后通常在同目录或 _out/dex/ 下" },
                     "class": { "type": "string", "description": "类描述符，如 Lapp/orchard/tv/guard/BootReceiver;。不填则列出全部类与方法签名" },
                     "method": { "type": "string", "description": "方法名，如 onReceive；不填则反汇编该类全部方法" },
                     "limit": { "type": "integer", "description": "单方法最多输出多少条指令，默认 200，上限 4000" }
