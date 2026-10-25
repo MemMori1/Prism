@@ -16,6 +16,7 @@
 use serde_json::{json, Value};
 
 use super::analysis::describe_der;
+use super::apkzip::{self, le32, le64};
 use super::forensics::{read_head, respond, target_of};
 use super::tools::{
     builtin_full, Network, Permission, Risk, ToolContext, ToolDef, ToolMeta, ToolResult, ToolScope,
@@ -104,7 +105,7 @@ fn run(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
 
 /// 纯函数入口：输入完整 APK 字节，输出签名结构。单测直接吃构造的 zip。
 pub fn inspect(blob: &[u8]) -> Result<Value, String> {
-    let layout = layout(blob)?;
+    let layout = apkzip::layout(blob)?;
     let v1 = v1_summary(&layout.entries);
     let block = match signing_block(blob, layout.central_offset)? {
         Some(block) => block,
@@ -154,90 +155,6 @@ pub fn inspect(blob: &[u8]) -> Result<Value, String> {
         "verdict": verdict,
         "note": "证书指纹由证书 DER 现算（SHA-256）；证书里的自报字段未做可信性判断。"
     }))
-}
-
-// ---------------------------------------------------------------- zip 结构
-
-struct Layout {
-    entries: Vec<String>,
-    central_offset: usize,
-}
-
-/// 定位 EOCD → 中央目录 → 文件名清单。
-///
-/// 刻意不读本地文件头：v1 只看文件名，v2/v3 只看 EOCD 前面的签名块，
-/// 少一层解压逻辑就少一类被畸形输入打穿的面。
-fn layout(blob: &[u8]) -> Result<Layout, String> {
-    let eocd = find_eocd(blob).ok_or_else(|| "找不到 ZIP EOCD（不是 zip / APK？）".to_string())?;
-    let count = le16(blob, eocd + 10)? as usize;
-    let central_size = le32(blob, eocd + 12)? as usize;
-    let central_offset = le32(blob, eocd + 16)? as usize;
-    if count == u16::MAX as usize
-        || central_size == u32::MAX as usize
-        || central_offset == u32::MAX as usize
-    {
-        return Err("ZIP64 APK 暂不支持（EOCD 字段是 0xffff / 0xffffffff）".to_string());
-    }
-    let central_end = central_offset
-        .checked_add(central_size)
-        .ok_or_else(|| "中央目录偏移溢出".to_string())?;
-    if central_end > eocd {
-        return Err(format!(
-            "中央目录越过 EOCD（{central_offset:#x}+{central_size} > {eocd:#x}）"
-        ));
-    }
-
-    let mut entries = Vec::with_capacity(count);
-    let mut at = central_offset;
-    for _ in 0..count {
-        if at + 46 > central_end {
-            return Err(format!("中央目录在 {at:#x} 处截断"));
-        }
-        if &blob[at..at + 4] != b"PK\x01\x02" {
-            return Err(format!("中央目录条目 {at:#x} 的签名不是 PK\\x01\\x02"));
-        }
-        let name_len = le16(blob, at + 28)? as usize;
-        let extra_len = le16(blob, at + 30)? as usize;
-        let comment_len = le16(blob, at + 32)? as usize;
-        let name_start = at + 46;
-        let name_end = name_start
-            .checked_add(name_len)
-            .ok_or_else(|| "文件名长度溢出".to_string())?;
-        if name_end > central_end {
-            return Err(format!("文件名越过中央目录（{name_end:#x}）"));
-        }
-        entries.push(String::from_utf8_lossy(&blob[name_start..name_end]).to_string());
-        at = name_end
-            .checked_add(extra_len)
-            .and_then(|value| value.checked_add(comment_len))
-            .ok_or_else(|| "中央目录条目长度溢出".to_string())?;
-    }
-    Ok(Layout {
-        entries,
-        central_offset,
-    })
-}
-
-/// 从尾部找一个"注释长度正好补到文件末"的 EOCD；找不到再退回最后一个魔数。
-fn find_eocd(blob: &[u8]) -> Option<usize> {
-    if blob.len() < 22 {
-        return None;
-    }
-    let start = blob.len().saturating_sub(22 + 65535);
-    let mut fallback = None;
-    for at in (start..=blob.len() - 22).rev() {
-        if &blob[at..at + 4] != b"PK\x05\x06" {
-            continue;
-        }
-        let comment = u16::from_le_bytes([blob[at + 20], blob[at + 21]]) as usize;
-        if at + 22 + comment == blob.len() {
-            return Some(at);
-        }
-        if fallback.is_none() {
-            fallback = Some(at);
-        }
-    }
-    fallback
 }
 
 // ---------------------------------------------------------------- 签名块
@@ -482,10 +399,11 @@ fn algorithm_name(id: u32) -> String {
 
 // ---------------------------------------------------------------- v1
 
-fn v1_summary(entries: &[String]) -> Value {
+fn v1_summary(entries: &[apkzip::Entry]) -> Value {
     let mut manifest = false;
     let mut signature_files = Vec::new();
-    for name in entries {
+    for entry in entries {
+        let name = &entry.name;
         if name == "META-INF/MANIFEST.MF" {
             manifest = true;
         }
@@ -506,29 +424,6 @@ fn v1_summary(entries: &[String]) -> Value {
 }
 
 // ---------------------------------------------------------------- 小工具
-
-fn le16(bytes: &[u8], at: usize) -> Result<u16, String> {
-    let slice = bytes
-        .get(at..at + 2)
-        .ok_or_else(|| format!("读取 u16 越界：{at:#x}"))?;
-    Ok(u16::from_le_bytes([slice[0], slice[1]]))
-}
-
-fn le32(bytes: &[u8], at: usize) -> Result<u32, String> {
-    let slice = bytes
-        .get(at..at + 4)
-        .ok_or_else(|| format!("读取 u32 越界：{at:#x}"))?;
-    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
-}
-
-fn le64(bytes: &[u8], at: usize) -> Result<u64, String> {
-    let slice = bytes
-        .get(at..at + 8)
-        .ok_or_else(|| format!("读取 u64 越界：{at:#x}"))?;
-    let mut raw = [0u8; 8];
-    raw.copy_from_slice(slice);
-    Ok(u64::from_le_bytes(raw))
-}
 
 /// 小端长度前缀阅读器，所有越界都报错而不是 panic。
 struct Reader<'a> {
@@ -780,7 +675,7 @@ mod tests {
     fn broken_signing_block_is_not_silently_unsigned() {
         let mut apk = zip(&[("AndroidManifest.xml", b"manifest")], None);
         // 在中央目录前插一个带 magic、但 size 指向文件头的坏块。
-        let eocd = find_eocd(&apk).unwrap();
+        let eocd = apkzip::find_eocd(&apk).unwrap();
         let central_offset = le32(&apk, eocd + 16).unwrap() as usize;
         let mut bad = Vec::new();
         bad.extend_from_slice(&8u64.to_le_bytes());

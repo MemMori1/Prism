@@ -23,6 +23,7 @@
 
 pub mod agent;
 pub mod analysis;
+pub mod apkzip;
 pub mod apksig;
 pub mod approval;
 pub mod artifact_tools;
@@ -36,6 +37,7 @@ pub mod dex;
 pub mod engine;
 pub mod forensics;
 pub mod guard;
+pub mod manifest;
 pub mod overflow;
 pub mod provider;
 pub mod runtime;

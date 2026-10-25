@@ -43,6 +43,9 @@ zstd = "0.13"
 # grep 的 `regex: true` 模式：默认按字面量搜，显式开才当正则。
 # 同版本已作为 tauri-utils 的传递依赖在锁文件里，不新增下载。
 regex = "1"
+# APK 里的 AndroidManifest.xml 是 deflate 压缩的 AXML，清单解析要现解压。
+# 同版本已作为 tauri-utils 的传递依赖在锁文件里，不新增下载。
+flate2 = "1"
 sha2 = "0.10.9"
 sha1 = "0.10.7"
 md-5 = "0.10.6"
