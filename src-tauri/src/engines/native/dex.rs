@@ -421,11 +421,15 @@ enum Ref {
 ///
 /// 返回 `(registers, ins_size, 指令列表)`。指令按 code unit（16-bit）推进，
 /// 覆盖全部 opcode 格式（含 invoke-custom、switch 的 data_off 标记）。
+/// 解一条 `code_item`，返回 `(registers, ins_size, 指令流, 结束游标)`。
+///
+/// 结束游标只给自检用：它必须恰好等于 `insns_size`。差一个 unit 就说明某条
+/// 指令的长度写错，之后整段错位——那正是"registers=5 却出现 v4206"的来历。
 fn decode_code_item(
     bytes: &[u8],
     code_off: u32,
     max_insns: usize,
-) -> Result<(u32, u32, Vec<Insn>), DexError> {
+) -> Result<(u32, u32, Vec<Insn>, usize), DexError> {
     let at = code_off as usize;
     let registers = read_u16(bytes, at, true).ok_or(DexError::BadOffset)? as u32;
     let ins_size = read_u16(bytes, at + 2, true).ok_or(DexError::BadOffset)? as u32;
@@ -453,8 +457,45 @@ fn decode_code_item(
         let b = (code >> 12) & 0xf; // 4-bit vB
         let aa = (code >> 8) & 0xff; // 8-bit vAA
 
+        // payload 不是指令。`packed-switch` / `sparse-switch` /
+        // `fill-array-data` 的数据块就躺在指令流里，第一个 unit 是
+        // `0x0100` / `0x0200` / `0x0300`（低字节为 0，看着像 nop）。
+        //
+        // 以前一律当 nop 吃 1 个 unit，于是游标直接走进数据区，后面全是
+        // 垃圾——15,275 个方法里有 1,389 个（9.1%）末尾不是 return，
+        // 落在 `nop` / `op 0x37` / `0x38 v0, 0` 上。下游报告因此只能写
+        // 「不得引用指令偏移与指令顺序」。这里按 payload 的真实长度跳过。
+        if op == 0x00 && code != 0x0000 {
+            let payload = match code {
+                // ident + size + **first_key** + size*2 个 target
+                //
+                // first_key 是 4 字节（2 个 code unit），很容易漏：少了它，
+                // 游标会停在 insns_size 前 2 个 unit，末尾那条指令被截断。
+                // 本样本 172 个方法（1.1%）正好差这 2 个 unit。
+                0x0100 => {
+                    let size = read_u(unit + 1)? as usize;
+                    4 + size * 2
+                }
+                // ident + size + size*2 个 key + size*2 个 target
+                0x0200 => {
+                    let size = read_u(unit + 1)? as usize;
+                    2 + size * 4
+                }
+                // ident + element_width + size(2 unit) + 数据（按 2 字节对齐）
+                0x0300 => {
+                    let width = read_u(unit + 1)? as usize;
+                    let size = read_uu(unit + 2)? as usize;
+                    let data_bytes = width.saturating_mul(size);
+                    4 + (data_bytes + 1) / 2
+                }
+                _ => 1,
+            };
+            unit += payload.max(1);
+            continue;
+        }
+
         // 用一个闭包推进：每个分支返回「本指令消耗的 code unit 数」。
-        let mut consumed;
+        let consumed;
         let mnemonic;
         let mut refs: Vec<Ref> = Vec::new();
 
@@ -560,9 +601,14 @@ fn decode_code_item(
                 refs.push(Ref::Type(idx));
                 mnemonic = format!("const/check-cast v{a}, type@{idx}");
             }
-            // 23x 算术（略写，只给 opcode 名）
-            0x90..=0xaf | 0xb0..=0xcf => {
-                mnemonic = format!("{:#x} v{aa}, v{}, v{}", op, read_u(unit + 1)?, read_u(unit + 2)?);
+            // 23x 算术：vAA, vBB, vCC —— BB 与 CC 各占 unit1 的一个字节。
+            0x90..=0xaf => {
+                let pair = read_u(unit + 1)?;
+                mnemonic = format!("op{op:#x} v{aa}, v{}, v{}", pair & 0xff, pair >> 8);
+            }
+            // 12x 算术：vA, vB 两个 4-bit 寄存器都挤在同一个 unit 里。
+            0xb0..=0xcf => {
+                mnemonic = format!("op{op:#x} v{a}, v{b}");
             }
             // 22c field 访问
             0x52..=0x5f | 0x60..=0x6d => {
@@ -619,39 +665,59 @@ fn decode_code_item(
             }
         }
 
-        // 统一按格式推进 code unit。
+        // 按 DEX 格式表推进 code unit：指令长度完全由格式决定，不看内容。
+        //
+        // 这张表原来错得离谱，而且错法与格式大类无关，是逐条对错：
+        //   `0x1b const-string/jumbo` 写成 5（应 3）、`0x90..=0xaf` 的 binop
+        //   写成 3（应 2）、`0xb0..=0xcf` 同理、`0x13 const/16` 与
+        //   `0x24 filled-new-array` 直接漏掉、`0x28 goto` 写成 2（应 1）、
+        //   `0x3e..=0x43` 写成 2（应 1）。
+        //
+        // 只要错一条，游标就永久偏了，之后全是垃圾。真实症状：registers=5
+        // 的方法里冒出 `v4206`、`return-void` 连着出现三次、字段索引离谱到
+        // `field@5312`。下游报告只能写「不得引用指令偏移与指令顺序」。
         consumed = match op {
-            0x02 | 0x05 | 0x08 | 0x19 | 0x1a | 0x1c | 0x1d | 0x1f | 0x20 | 0x22 | 0x23
-            | 0x28 | 0x29 | 0x2c | 0x38..=0x3d | 0x3e..=0x43 | 0x6e..=0x72 | 0x74..=0x78
-            | 0x52..=0x5f | 0x60..=0x6d | 0xfa | 0xfb => 2,
-            0x03 | 0x06 | 0x09 | 0x2a | 0x14 | 0x16 | 0x18 | 0x1b | 0x26 | 0x2b | 0x90..=0xaf
-            | 0xb0..=0xcf => 3,
-            0x17 => 3,
+            // 10x / 11x / 11n / 12x：一个 code unit。
+            //
+            // `0xb0..=0xcf` 是 **12x**（`binop vA, vB`，两个 4-bit 寄存器挤在
+            // 同一个 unit 里），只有 1 个 unit。它和 23x 的 `0x90..=0xaf`
+            // （`binop vAA, vBB, vCC`，2 units）长得像，但长度不同。这类
+            // add-int/lit16 之类的运算几乎每个方法都有，写成 2 就是每条多走
+            // 一个 unit——15,275 个方法里 1,421 个因此末尾不是 return。
+            0x00 | 0x01 | 0x04 | 0x07 | 0x0a..=0x12 | 0x1d | 0x1e | 0x21 | 0x27
+            | 0x28 | 0x3e..=0x43 | 0x73 | 0x79..=0x8f | 0xb0..=0xcf => 1,
+            // 20t / 21c / 21h / 21s / 21t / 22b / 22c / 22s / 22t / 22x / 23x
+            0x02 | 0x05 | 0x08 | 0x13 | 0x15 | 0x16 | 0x19 | 0x1a | 0x1c | 0x1f
+            | 0x20 | 0x22 | 0x23 | 0x29 | 0x2d..=0x37 | 0x38..=0x3d
+            | 0x44..=0x51 | 0x52..=0x5f | 0x60..=0x6d
+            | 0x90..=0xaf | 0xd0..=0xe2
+            | 0xfe | 0xff => 2,
+            // 30t / 31c / 31i / 31t / 32x / 35c / 3rc
+            0x03 | 0x06 | 0x09 | 0x14 | 0x17 | 0x1b | 0x24 | 0x25 | 0x26
+            | 0x2a | 0x2b | 0x2c | 0x6e..=0x72 | 0x74..=0x78 | 0xfc | 0xfd => 3,
+            // 45cc / 4rcc
+            0xfa | 0xfb => 4,
+            // 51l：const-wide
+            0x18 => 5,
             _ => 1,
         };
-        // 修正几个多字指令的实际长度（上面按大类粗分，这里精确化）。
-        consumed = match op {
-            0x1b | 0x18 => 5, // const-string/jumbo、const-wide（4 个 code unit 操作数 + op）
-            _ => consumed,
-        };
-        // 35c 的寄存器列表占 1 个 code unit（op 后第一个是 meth@，第二个是寄存器）。
-        if matches!(op, 0x6e..=0x72 | 0x74..=0x78) {
-            consumed = 3;
-        }
-        // 3rc 系列（0x74..=0x78 已含），invoke-custom 是 4 code unit。
-        if matches!(op, 0xfa | 0xfb) {
-            consumed = 4;
-        }
-        // 21t/22t 类带 16-bit 偏移的（0x29 goto/16 已 2 unit），31t 是 3 unit。
-        if op == 0x26 || op == 0x2b || op == 0x2c {
-            consumed = 3;
-        }
 
+        // 越界就先停：不能让 read_u 读到方法外。
+        //
+        // payload 长度与实际排布偶尔差一两个 unit（本样本 15275 个方法里有
+        // 172 个，1.1%）。以前继续解，会把**下一条 code_item 的字节**当成
+        // 指令读出来——`registers=5` 的方法里冒出 `v4206`、`return-void`
+        // 连出三次，就是这里的产物。宁可少一条末尾指令，也不产出垃圾。
+        if unit + consumed as usize > insns_size {
+            break;
+        }
         out.push(Insn { mnemonic, refs });
         unit += consumed as usize;
     }
 
-    Ok((registers, ins_size, out))
+    // 第四个值只给测试用：解码结束时游标停在哪。它必须恰好等于 insns_size
+    // ——差一个 unit 就说明某条指令的长度写错了，之后全是垃圾。
+    Ok((registers, ins_size, out, unit))
 }
 
 /// 解析 `packed-switch` / `sparse-switch` 的 payload，返回键列表。
@@ -826,7 +892,7 @@ fn run_disasm(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
                 }
             }
             match decode_code_item(dex.bytes, code_off, limit) {
-                Ok((registers, ins_size, insns)) => {
+                Ok((registers, ins_size, insns, _)) => {
                     let instructions: Vec<Value> = insns
                         .iter()
                         .map(|insn| {
@@ -975,7 +1041,7 @@ fn run_xref(ctx: &ToolContext<'_>, args: &Value) -> ToolResult {
                 Err(_) => return Ok(()),
             };
             let insns = match decode_code_item(dex.bytes, code_off, INSN_MAX) {
-                Ok((_, _, insns)) => insns,
+                Ok((_, _, insns, _)) => insns,
                 Err(_) => return Ok(()),
             };
             for insn in insns {
@@ -1205,7 +1271,7 @@ mod tests {
         write_u32(&mut d, 0x0c, 1); // insns_size
         write_u16(&mut d, 0x10, 0x0e); // return-void
 
-        let (registers, ins_size, insns) = decode_code_item(&d, 0, 10).unwrap();
+        let (registers, ins_size, insns, _) = decode_code_item(&d, 0, 10).unwrap();
         assert_eq!(registers, 1);
         assert_eq!(ins_size, 1);
         assert_eq!(insns.len(), 1);
@@ -1247,17 +1313,7 @@ mod tests {
     #[test]
     #[ignore]
     fn dex_decodes_real_sample() {
-        let path = "/Users/edwa2d4th/Desktop/未命名文件夹 7/work/apk/x/classes.dex";
-        // 路径不存在时必须报错，**不能再 return**。
-        //
-        // 这条测试原来写的是一个不存在的路径 + `else { return; }`，于是它
-        // 一直"通过"，而 header 偏移整体错位 0x18 的问题就这么藏了整轮：
-        // 真实样本上 `classCount` 读出 2685886（实际 3300）、两个 dex 工具
-        // 全失效。测试静默跳过比没有测试更危险。
-        assert!(
-            std::path::Path::new(path).exists(),
-            "真实样本不在 {path}：换样本后请同步改这里，不要靠跳过"
-        );
+        let path = real_dex_path();
         let bytes = read_head(std::path::Path::new(path), DEX_LIMIT).unwrap();
         let dex = Dex::parse(&bytes).expect("真实样本应能解析");
         let class_count = dex.sections.class_defs.0;
@@ -1313,7 +1369,7 @@ mod tests {
         use crate::engines::native::tools::{run_with_args, EnabledTools, ToolContext};
 
         let dir = "/Users/edwa2d4th/Desktop/未命名文件夹 7";
-        let dex_rel = "work/apk/x/classes.dex";
+        let dex_rel = "unpacked/classes.dex";
         let dex_abs = format!("{dir}/{dex_rel}");
         assert!(
             std::path::Path::new(&dex_abs).exists(),
@@ -1405,8 +1461,7 @@ mod tests {
     #[test]
     #[ignore]
     fn audit_report_claims() {
-        let path = "/Users/edwa2d4th/Desktop/未命名文件夹 7/work/apk/x/classes.dex";
-        assert!(std::path::Path::new(path).exists(), "样本不在 {path}");
+        let path = real_dex_path();
         let bytes = read_head(std::path::Path::new(path), DEX_LIMIT).unwrap();
         let dex = Dex::parse(&bytes).expect("真实样本应能解析");
 
@@ -1439,7 +1494,7 @@ mod tests {
                 if !name.ends_with("->g") {
                     return Ok(());
                 }
-                let Ok((_, _, insns)) = decode_code_item(dex.bytes, code_off, 4000) else {
+                let Ok((_, _, insns, _)) = decode_code_item(dex.bytes, code_off, 4000) else {
                     println!("  g @0x{code_off:x} 解码失败");
                     return Ok(());
                 };
@@ -1466,6 +1521,81 @@ mod tests {
                 Ok(())
             });
         }
+    }
+
+    /// 指令对齐回归：解码消耗的 unit 必须**恰好等于** insns_size。
+    ///
+    /// 这是比「最后一条必须是 return」更硬的校验——有 try/catch 的方法，
+    /// `insns` 数组末尾是 handler 块，末条可能是 `goto`（合法），用 return
+    /// 判定会误报 6%。而游标对不上就一定是某条指令的长度写错了。
+    ///
+    /// `cargo test --lib -- --ignored every_method_consumes_exactly --nocapture`
+    #[test]
+    #[ignore]
+    fn every_method_consumes_exactly_its_insns() {
+        let path = real_dex_path();
+        let bytes = read_head(std::path::Path::new(path), DEX_LIMIT).unwrap();
+        let dex = Dex::parse(&bytes).expect("真实样本应能解析");
+        let class_count = dex.sections.class_defs.0;
+
+        let mut good = 0usize;
+        let mut bad = 0usize;
+        let mut truncated = 0usize;
+        let mut samples: Vec<String> = Vec::new();
+        for i in 0..class_count {
+            let _ = dex.each_method(i, |method_idx, _access, code_off| {
+                let Ok((_, _, insns, end_unit)) = decode_code_item(dex.bytes, code_off, 40000) else {
+                    return Ok(());
+                };
+                let insns_size =
+                    read_u32(dex.bytes, code_off as usize + 0x0c, true).unwrap_or(0) as usize;
+                // 撞到上限说明是被截断，不是错位。
+                if insns.len() >= 40000 {
+                    truncated += 1;
+                    return Ok(());
+                }
+                if end_unit == insns_size {
+                    good += 1;
+                } else {
+                    bad += 1;
+                    if samples.len() < 8 {
+                        let name = dex
+                            .method_ref(method_idx)
+                            .unwrap_or_else(|_| format!("method[{method_idx}]"));
+                        samples.push(format!(
+                            "{name} @0x{code_off:x} 游标停 {end_unit} / insns_size {insns_size}（{} 条）",
+                            insns.len()
+                        ));
+                    }
+                }
+                Ok(())
+            });
+        }
+        println!(
+            "游标精确 {good} / 偏离 {bad} / 截断跳过 {truncated}（共 {} 个方法）",
+            good + bad
+        );
+        for sample in &samples {
+            println!("  偏离样例：{sample}");
+        }
+        assert_eq!(bad, 0, "有 {bad} 个方法的指令游标没有走到 insns_size");
+    }
+
+    /// 真实样本的 classes.dex 路径。
+    ///
+    /// 解包目录会随每次运行变（`work/apk/x` → `unpacked` → …），所以给几个
+    /// 候选**按顺序找**。都找不到就直接 panic：以前这里写死一个路径 + 找不到
+    /// 就 return，测试「永远通过」，把 header 偏移整体错位藏了整轮。
+    fn real_dex_path() -> &'static str {
+        const CANDIDATES: &[&str] = &[
+            "/Users/edwa2d4th/Desktop/未命名文件夹 7/unpacked/classes.dex",
+            "/Users/edwa2d4th/Desktop/未命名文件夹 7/work/apk/x/classes.dex",
+        ];
+        CANDIDATES
+            .iter()
+            .copied()
+            .find(|path| std::path::Path::new(path).exists())
+            .unwrap_or_else(|| panic!("真实样本不在候选路径里（换样本请更新 CANDIDATES）"))
     }
 
     fn write_u16(bytes: &mut [u8], at: usize, value: u16) {
