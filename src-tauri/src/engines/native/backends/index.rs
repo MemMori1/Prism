@@ -116,6 +116,14 @@ pub struct ImportEntry {
 struct AfljFunction {
     #[serde(default)]
     offset: u64,
+    /// r2 6.x 的 `aflj` 不再给 `offset`，地址只放在 `addr` 里。
+    ///
+    /// 实测 6.2.4：23 个函数的 `offset`/`va` 两个键**都不存在**，`addr` 是对的
+    /// （`JNI_OnLoad` = 5832 = 0x16c8）。只认 `offset` 的话整张索引地址全是 0，
+    /// 下游只能写"地址不可引用"——一份 native 分析就这样废掉，还得靠 ELF 符号表
+    /// 手工兜底。两个都读，非零者优先。
+    #[serde(default)]
+    addr: u64,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -150,13 +158,15 @@ pub fn from_aflj(
     let truncated = entries.len() > MAX_FUNCTIONS;
     let mut functions = Vec::with_capacity(entries.len().min(MAX_FUNCTIONS));
     for entry in entries.into_iter().take(MAX_FUNCTIONS) {
+        // 地址：新版 r2 只在 `addr`，老版在 `offset`。哪个非零用哪个。
+        let va = if entry.addr != 0 { entry.addr } else { entry.offset };
         let name = if entry.name.trim().is_empty() {
-            format!("sub_{:x}", entry.offset)
+            format!("sub_{va:x}")
         } else {
             entry.name
         };
         functions.push(FunctionEntry {
-            va: entry.offset,
+            va,
             kind: kind_of(&entry.kind, &name).to_string(),
             name,
             size: entry.size.min(u32::MAX as u64) as u32,
@@ -629,6 +639,26 @@ mod tests {
         assert_eq!(index.functions[3].name, "sub_100001090");
         assert_eq!(index.functions[3].kind, "thunk");
         assert!(index.functions.iter().all(|item| item.blocks.is_none()));
+    }
+
+    /// r2 6.x 的 `aflj` 只给 `addr`（没有 `offset`、也没有 `va`）。
+    ///
+    /// 这条回归直接对应一次真实失效：整份 native 报告的地址全成 `0x0`，下游只好
+    /// 标"不可引用"，再靠 ELF 符号表手工兜底。样本里的真实值是
+    /// `JNI_OnLoad` = 5832 = 0x16c8。
+    #[test]
+    fn aflj_reads_addr_for_r2_6() {
+        let text = r#"[
+          {"addr": 5832, "name": "sym.JNI_OnLoad", "size": 448, "realsz": 448, "type": "fcn"},
+          {"addr": 6280, "name": "fcn.00001888", "size": 332, "type": "fcn"},
+          {"addr": 0, "offset": 4294971392, "name": "entry0", "size": 32, "type": "sym"}
+        ]"#;
+        let index = from_aflj(text, sample(&"b".repeat(64)), "6.2.4").expect("应能解析");
+        assert_eq!(index.functions[0].va, 0x16c8, "addr 必须被当成地址");
+        assert_eq!(index.functions[0].size, 448);
+        assert_eq!(index.functions[1].va, 6280);
+        // addr 为 0 时回退 offset：老版本输出不能被这次修改弄坏。
+        assert_eq!(index.functions[2].va, 4294971392);
     }
 
     #[test]
