@@ -40,7 +40,7 @@ const PREVIEW: usize = 30;
 pub fn tools() -> Vec<Arc<ToolDef>> {
     vec![builtin_full(
         "bin.radare2.scan",
-        "radare2 函数边界扫描",
+        "radare2 函数边界（机器码）",
         schema,
         Permission::ReadOnly,
         None,

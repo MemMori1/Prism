@@ -63,7 +63,10 @@ fn system_prompt(max_nodes: usize) -> String {
 5. task 必须自足：子 Agent 看不到别的节点上下文。需要上游结论时用占位符
    {{{{nodes.<id>.output}}}}，且只能引用自己的上游（祖先）。
 6. 不要生成"安装依赖"这类环境节点，除非目标里明确提到。
-7. 绝不产生环。"#
+7. 绝不产生环。
+8. 要读二进制/字节码的**语义**（反编译还原逻辑、脱壳、伪 C、指令级证据）时，
+   在该节点的 task 里**点名**「可用的专业工具」里对应的那个，并写清要拿到什么
+   证据。不点名，节点通常不会自己去用——它只会用顺手的那几个内置工具。"#
     )
 }
 
@@ -89,10 +92,49 @@ fn agent_catalog(agents: &[AgentProfile]) -> String {
     out
 }
 
-fn user_prompt(goal: &str, project: &str, catalog: &str) -> String {
+fn user_prompt(goal: &str, project: &str, catalog: &str, tools: &str) -> String {
     format!(
-        "目标：{goal}\n项目目录：{project}\n\n可用的 Agent（agent 字段只能取这里的 id）：\n{catalog}"
+        "目标：{goal}\n项目目录：{project}\n\n可用的 Agent（agent 字段只能取这里的 id）：\n{catalog}\n\n可用的专业工具（需要在 task 里点名，不点节点不会主动用）：\n{tools}"
     )
+}
+
+/// 当前可用的「专业工具」——需要外部后端的那些。
+///
+/// 为什么只列这一批：内置的读文件/搜索/写文件，模型天然会用，列出来只是白烧
+/// token；而 `bin_jadx_decompile`、`bin_ghidra_analyze` 这类**装没装决定它存不存在**。
+/// planner 看不到工具声明（`ask` 传给模型的 tools 是空数组），不告诉它就绝不会在
+/// task 里点名，节点模型再聪明也不会主动用一个没人要求的工具——实测就发生过：
+/// 节点自己 `run_command` 去 PATH 里找 jadx，没找到就退回自建 Python 解析器。
+///
+/// 用**模型侧的名字**（`bin_jadx_decompile`）而不是代码里的内部名：task 是写给
+/// 节点模型读的，名字要和它在 schema 里看到的一致，否则它还得自己猜对应关系。
+fn tool_catalog() -> String {
+    use crate::engines::native::tools::{self as native_tools, EnabledTools, Need};
+
+    let enabled = EnabledTools::from_config();
+    let mut out = String::new();
+    for tool in native_tools::visible(
+        &enabled,
+        native_tools::Permission::WriteWorkspace,
+        true,
+        false,
+    ) {
+        // 只有"外部依赖型"工具值得占这几行：其余工具不看提示也知道有。
+        let needs_backend = tool
+            .meta
+            .needs
+            .iter()
+            .any(|need| matches!(need, Need::Backend(_)));
+        if !needs_backend {
+            continue;
+        }
+        out.push_str(&format!("- {}：{}\n", tool.wire_name(), tool.blurb));
+    }
+    if out.is_empty() {
+        "（本机没有可用的外部后端工具，只能用内置工具）".to_string()
+    } else {
+        out
+    }
 }
 
 /// 从模型输出里捞出 JSON 对象。
@@ -398,7 +440,8 @@ pub fn draft(
     let max_nodes = max_nodes.clamp(2, validate::MAX_NODES);
     let system = system_prompt(max_nodes);
     let catalog = agent_catalog(agents);
-    let base = user_prompt(goal, project, &catalog);
+    let tools = tool_catalog();
+    let base = user_prompt(goal, project, &catalog, &tools);
     let known: Vec<String> = agents.iter().map(|agent| agent.id.clone()).collect();
 
     let mut last_error = String::new();
@@ -443,6 +486,29 @@ pub fn draft(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 规划器必须知道哪些专业工具真的存在。
+    ///
+    /// 这条不是"锦上添花"：planner 传给模型的 tools 是空数组，它**看不到任何工具
+    /// 声明**。清单里没有 jadx，它就绝不会在 task 里点名，节点模型也就只会用顺手
+    /// 的内置工具——工具装了等于没装。
+    #[test]
+    fn tool_catalog_names_the_backend_tools() {
+        let text = tool_catalog();
+        println!("{text}");
+
+        // 内置工具不该占这几行：模型天然会用，列出来只是白烧 token。
+        assert!(!text.contains("read_file"), "内置工具不该进清单：{text}");
+        assert!(!text.contains("run_command"), "内置工具不该进清单：{text}");
+
+        // jadx 装了就必须出现，而且用模型侧的名字（下划线），否则节点模型对不上。
+        if crate::engines::native::backends::require("jadx").is_ok() {
+            assert!(
+                text.contains("bin_jadx_decompile"),
+                "jadx 已就绪却没进规划器的工具清单：{text}"
+            );
+        }
+    }
 
     fn agents() -> Vec<AgentProfile> {
         crate::agents::builtin()

@@ -29,7 +29,7 @@ const PREVIEW: usize = 40;
 pub fn tools() -> Vec<Arc<ToolDef>> {
     vec![builtin_full(
         "bin.jadx.decompile",
-        "jadx Java 反编译",
+        "jadx 反编译成 Java（读代码语义）",
         schema,
         Permission::ReadOnly,
         None,

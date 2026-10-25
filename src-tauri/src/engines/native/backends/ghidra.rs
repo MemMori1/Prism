@@ -68,7 +68,7 @@ pub fn tools() -> Vec<Arc<ToolDef>> {
     vec![
         builtin_full(
             "bin.ghidra.analyze",
-            "Ghidra 分析",
+            "Ghidra 全量分析（函数/基本块）",
             schema_analyze,
             Permission::ReadOnly,
             None,
@@ -87,7 +87,7 @@ pub fn tools() -> Vec<Arc<ToolDef>> {
         ),
         builtin_full(
             "bin.ghidra.decompile_func",
-            "Ghidra 单函数反编译",
+            "Ghidra 单函数伪 C",
             schema_decompile,
             Permission::ReadOnly,
             None,

@@ -37,7 +37,7 @@ const KEEP_UNPACKED: usize = 20;
 pub fn tools() -> Vec<Arc<ToolDef>> {
     vec![builtin_full(
         "bin.unpack.upx",
-        "UPX 脱壳",
+        "UPX 脱壳（标准 UPX 壳）",
         schema,
         Permission::ReadOnly,
         None,
